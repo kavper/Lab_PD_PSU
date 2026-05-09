@@ -20,6 +20,10 @@ set(MX_Include_Dirs
 # STM32CubeMX generated application sources
 set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/app.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/debug_uart.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/tps25751.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/bq25731.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32g4xx_it.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32g4xx_hal_msp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/sysmem.c

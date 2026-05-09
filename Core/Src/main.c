@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,7 +94,7 @@ int main(void)
   MX_I2C4_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  App_Init(&hi2c4, &huart2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,10 +104,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-    HAL_Delay(200);
-    HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
-    HAL_Delay(200);
+  App_Run();
   }
   /* USER CODE END 3 */
 }
