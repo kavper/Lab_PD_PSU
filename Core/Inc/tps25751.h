@@ -22,7 +22,8 @@ typedef enum {
     TPS25751_ERROR,
     TPS25751_I2C_ERROR,
     TPS25751_INVALID_ARG,
-    TPS25751_BAD_LENGTH
+    TPS25751_BAD_LENGTH,
+    TPS25751_COMMAND_ERROR
 } TPS25751_Status_t;
 
 typedef enum {
@@ -40,6 +41,13 @@ typedef enum {
     TPS25751_SUPPLY_APDO_PPS,
     TPS25751_SUPPLY_APDO_OTHER
 } TPS25751_PdoSupply_t;
+
+typedef enum {
+    TPS25751_TYPEC_SM_SINK_ONLY = 1,
+    TPS25751_TYPEC_SM_SOURCE_ONLY = 0,
+    TPS25751_TYPEC_SM_DRP = 2,
+    TPS25751_TYPEC_SM_DISABLED = 3
+} TPS25751_TypecStateMachine_t;
 
 typedef struct {
     TPS25751_PdoSupply_t type;
@@ -167,5 +175,23 @@ const char *TPS25751_TypecStateToString(uint8_t state);
 const char *TPS25751_CcStateToString(uint8_t state);
 const char *TPS25751_PowerPathSwitchToString(uint8_t state);
 const char *TPS25751_TypecCurrentToString(uint8_t value);
+
+TPS25751_Status_t TPS25751_I2cControllerRead(TPS25751_Device_t *dev,
+                                             uint8_t target_addr_7bit,
+                                             uint8_t target_register,
+                                             uint8_t *data,
+                                             uint8_t length);
+
+TPS25751_Status_t TPS25751_I2cControllerWrite(TPS25751_Device_t *dev,
+                                              uint8_t target_addr_7bit,
+                                              uint8_t target_register,
+                                              const uint8_t *data,
+                                              uint8_t length);
+
+TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
+                                                 TPS25751_TypecStateMachine_t *mode);
+
+TPS25751_Status_t TPS25751_SetTypecStateMachine(TPS25751_Device_t *dev,
+                                                 TPS25751_TypecStateMachine_t mode);
 
 #endif

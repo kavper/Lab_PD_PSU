@@ -7,6 +7,7 @@
 #define TPS25751_REG_MODE                     0x03U
 #define TPS25751_REG_STATUS                   0x1AU
 #define TPS25751_REG_POWER_PATH_STATUS        0x26U
+#define TPS25751_REG_PORT_CONFIG              0x28U
 #define TPS25751_REG_RX_SOURCE_CAPS           0x30U
 #define TPS25751_REG_RX_SINK_CAPS             0x31U
 #define TPS25751_REG_TX_SOURCE_CAPS           0x32U
@@ -17,6 +18,15 @@
 #define TPS25751_REG_PD_STATUS                0x40U
 #define TPS25751_REG_TYPEC_STATUS             0x69U
 #define TPS25751_REG_ADC_RESULTS              0x6AU
+
+#define TPS25751_REG_CMD1                     0x08U
+#define TPS25751_REG_DATA1                    0x09U
+
+#define TPS25751_CMD_POLL_TIMEOUT_MS          500U
+#define TPS25751_CMD_POLL_STEP_MS             10U
+#define TPS25751_DATA1_MAX_PAYLOAD            64U
+#define TPS25751_PORT_CONFIG_READ_LEN         17U
+#define TPS25751_PORT_CONFIG_TYPEC_SM_MASK    0x03U
 
 static uint16_t TPS25751_ReadLe16(const uint8_t *data)
 {
@@ -435,19 +445,422 @@ TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
     return TPS25751_OK;
 }
 
+static void TPS25751_WriteLe32(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)(value & 0xFFU);
+    data[1] = (uint8_t)((value >> 8) & 0xFFU);
+    data[2] = (uint8_t)((value >> 16) & 0xFFU);
+    data[3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+static uint32_t TPS25751_FourCc(const char text[4])
+{
+    return ((uint32_t)(uint8_t)text[0]) |
+           ((uint32_t)(uint8_t)text[1] << 8) |
+           ((uint32_t)(uint8_t)text[2] << 16) |
+           ((uint32_t)(uint8_t)text[3] << 24);
+}
+
+static TPS25751_Status_t TPS25751_WritePayload(TPS25751_Device_t *dev,
+                                               uint8_t reg,
+                                               const uint8_t *payload,
+                                               uint8_t payload_len)
+{
+    uint8_t raw[TPS25751_DATA1_MAX_PAYLOAD + 1U];
+    HAL_StatusTypeDef hal_status;
+
+    if ((dev == NULL) ||
+        (dev->hi2c == NULL) ||
+        (payload == NULL) ||
+        (payload_len == 0U) ||
+        (payload_len > TPS25751_DATA1_MAX_PAYLOAD)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    raw[0] = payload_len;
+    memcpy(&raw[1], payload, payload_len);
+
+    hal_status = HAL_I2C_Mem_Write(dev->hi2c,
+                                   (uint16_t)(dev->address_7bit << 1),
+                                   reg,
+                                   I2C_MEMADD_SIZE_8BIT,
+                                   raw,
+                                   (uint16_t)(payload_len + 1U),
+                                   TPS25751_I2C_TIMEOUT_MS);
+
+    return TPS25751_MapHalStatus(dev, reg, payload_len, hal_status);
+}
+
+static TPS25751_Status_t TPS25751_ReadCommandRaw(TPS25751_Device_t *dev,
+                                                 uint32_t *command_raw)
+{
+    TPS25751_Status_t status;
+    uint8_t payload[4];
+    uint8_t len;
+
+    if ((dev == NULL) || (command_raw == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_CMD1,
+                                  payload,
+                                  sizeof(payload),
+                                  &len);
+
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if (len < 4U) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    *command_raw = TPS25751_ReadLe32(payload);
+    return TPS25751_OK;
+}
+
+static TPS25751_Status_t TPS25751_SendCommand(TPS25751_Device_t *dev,
+                                              const char command_text[4])
+{
+    uint8_t payload[4];
+    uint32_t command_raw;
+
+    if ((dev == NULL) || (command_text == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    command_raw = TPS25751_FourCc(command_text);
+    TPS25751_WriteLe32(payload, command_raw);
+
+    return TPS25751_WritePayload(dev,
+                                 TPS25751_REG_CMD1,
+                                 payload,
+                                 sizeof(payload));
+}
+
+static TPS25751_Status_t TPS25751_WaitCommandDone(TPS25751_Device_t *dev)
+{
+    uint32_t start_ms;
+    uint32_t command_raw;
+    TPS25751_Status_t status;
+
+    if (dev == NULL) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    start_ms = HAL_GetTick();
+
+    while ((uint32_t)(HAL_GetTick() - start_ms) < TPS25751_CMD_POLL_TIMEOUT_MS) {
+        status = TPS25751_ReadCommandRaw(dev, &command_raw);
+
+        if (status != TPS25751_OK) {
+            return status;
+        }
+
+        if (command_raw == 0U) {
+            return TPS25751_OK;
+        }
+
+        if (command_raw == TPS25751_FourCc("!CMD")) {
+            return TPS25751_COMMAND_ERROR;
+        }
+
+        HAL_Delay(TPS25751_CMD_POLL_STEP_MS);
+    }
+
+    return TPS25751_ERROR;
+}
+
+TPS25751_Status_t TPS25751_I2cControllerRead(TPS25751_Device_t *dev,
+                                             uint8_t target_addr_7bit,
+                                             uint8_t target_register,
+                                             uint8_t *data,
+                                             uint8_t length)
+{
+    TPS25751_Status_t status;
+    uint8_t data1_in[3];
+    uint8_t data1_out[TPS25751_DATA1_MAX_PAYLOAD];
+    uint8_t data1_len;
+    uint8_t task_return_code;
+
+    if ((dev == NULL) ||
+        (data == NULL) ||
+        (length == 0U) ||
+        (length > 63U) ||
+        (target_addr_7bit > 0x7FU)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    memset(data, 0, length);
+    memset(data1_out, 0, sizeof(data1_out));
+
+    /*
+     * DATA1 input for I2Cr:
+     * Byte 1: target address
+     * Byte 2: target register offset
+     * Byte 3: number of bytes to read
+     */
+    data1_in[0] = target_addr_7bit & 0x7FU;
+    data1_in[1] = target_register;
+    data1_in[2] = length;
+
+    status = TPS25751_WritePayload(dev,
+                                   TPS25751_REG_DATA1,
+                                   data1_in,
+                                   sizeof(data1_in));
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_SendCommand(dev, "I2Cr");
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_WaitCommandDone(dev);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    /*
+     * DATA1 output for I2Cr:
+     * Byte 1: task return code
+     * Bytes 2..65: data read from target
+     */
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_DATA1,
+                                  data1_out,
+                                  (uint8_t)(length + 1U),
+                                  &data1_len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if (data1_len < (uint8_t)(length + 1U)) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    task_return_code = data1_out[0];
+
+    if (task_return_code != 0U) {
+        dev->last_error = task_return_code;
+        return TPS25751_COMMAND_ERROR;
+    }
+
+    memcpy(data, &data1_out[1], length);
+
+    return TPS25751_OK;
+}
+
+TPS25751_Status_t TPS25751_I2cControllerWrite(TPS25751_Device_t *dev,
+                                              uint8_t target_addr_7bit,
+                                              uint8_t target_register,
+                                              const uint8_t *data,
+                                              uint8_t length)
+{
+    TPS25751_Status_t status;
+    uint8_t data1_in[14];
+    uint8_t data1_out[1];
+    uint8_t data1_len;
+    uint8_t task_return_code;
+
+    if ((dev == NULL) ||
+        ((data == NULL) && (length > 0U)) ||
+        (length > 10U) ||
+        (target_addr_7bit > 0x7FU)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    memset(data1_in, 0, sizeof(data1_in));
+
+    /*
+     * DATA1 input for I2Cw:
+     * Byte 1: target address
+     * Byte 2: number of data bytes
+     * Byte 3: register-offset length (0 for standard 8-bit target offsets)
+     * Byte 4: target register offset
+     * Byte 5..: data payload
+     */
+    data1_in[0] = target_addr_7bit & 0x7FU;
+    data1_in[1] = length;
+    data1_in[2] = 0U;
+    data1_in[3] = target_register;
+
+    if (length > 0U) {
+        memcpy(&data1_in[4], data, length);
+    }
+
+    status = TPS25751_WritePayload(dev,
+                                   TPS25751_REG_DATA1,
+                                   data1_in,
+                                   (uint8_t)(length + 4U));
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_SendCommand(dev, "I2Cw");
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_WaitCommandDone(dev);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    /*
+     * DATA1 output for I2Cw:
+     * Byte 1: task return code
+     */
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_DATA1,
+                                  data1_out,
+                                  sizeof(data1_out),
+                                  &data1_len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if (data1_len < sizeof(data1_out)) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    task_return_code = data1_out[0];
+
+    if (task_return_code != 0U) {
+        dev->last_error = task_return_code;
+        return TPS25751_COMMAND_ERROR;
+    }
+
+    return TPS25751_OK;
+}
+
+TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
+                                                 TPS25751_TypecStateMachine_t *mode)
+{
+    TPS25751_Status_t status;
+    uint8_t payload[TPS25751_PORT_CONFIG_READ_LEN];
+    uint8_t len;
+
+    if ((dev == NULL) || (mode == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_PORT_CONFIG,
+                                  payload,
+                                  sizeof(payload),
+                                  &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if (len < 1U) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    *mode = (TPS25751_TypecStateMachine_t)(payload[0] & TPS25751_PORT_CONFIG_TYPEC_SM_MASK);
+
+    return TPS25751_OK;
+}
+
+TPS25751_Status_t TPS25751_SetTypecStateMachine(TPS25751_Device_t *dev,
+                                                 TPS25751_TypecStateMachine_t mode)
+{
+    TPS25751_Status_t status;
+    uint8_t payload[TPS25751_PORT_CONFIG_READ_LEN];
+    uint8_t len;
+    uint8_t target_mode;
+    uint8_t retry;
+
+    if (dev == NULL) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    if ((uint8_t)mode > (uint8_t)TPS25751_TYPEC_SM_DISABLED) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_PORT_CONFIG,
+                                  payload,
+                                  sizeof(payload),
+                                  &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if (len < 1U) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    target_mode = (uint8_t)mode & TPS25751_PORT_CONFIG_TYPEC_SM_MASK;
+
+    if ((payload[0] & TPS25751_PORT_CONFIG_TYPEC_SM_MASK) == target_mode) {
+        return TPS25751_OK;
+    }
+
+    payload[0] = (uint8_t)((payload[0] & (uint8_t)~TPS25751_PORT_CONFIG_TYPEC_SM_MASK) |
+                           target_mode);
+
+    status = TPS25751_WritePayload(dev,
+                                   TPS25751_REG_PORT_CONFIG,
+                                   payload,
+                                   len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    /*
+     * Port Configuration write causes a quick disconnect/reconnect.
+     * Give TPS a moment and then verify the state-machine bits.
+     */
+    for (retry = 0U; retry < 8U; ++retry) {
+        HAL_Delay(15U);
+
+        status = TPS25751_ReadPayload(dev,
+                                      TPS25751_REG_PORT_CONFIG,
+                                      payload,
+                                      sizeof(payload),
+                                      &len);
+        if (status != TPS25751_OK) {
+            continue;
+        }
+
+        if (len < 1U) {
+            return TPS25751_BAD_LENGTH;
+        }
+
+        if ((payload[0] & TPS25751_PORT_CONFIG_TYPEC_SM_MASK) == target_mode) {
+            return TPS25751_OK;
+        }
+    }
+
+    return TPS25751_ERROR;
+}
+
 const char *TPS25751_StatusToString(TPS25751_Status_t status)
 {
     switch (status) {
         case TPS25751_OK:
             return "OK";
+
         case TPS25751_ERROR:
             return "ERROR";
+
         case TPS25751_I2C_ERROR:
             return "I2C_ERROR";
+
         case TPS25751_INVALID_ARG:
             return "INVALID_ARG";
+
         case TPS25751_BAD_LENGTH:
             return "BAD_LENGTH";
+
+        case TPS25751_COMMAND_ERROR:
+            return "COMMAND_ERROR";
+
         default:
             return "UNKNOWN";
     }
