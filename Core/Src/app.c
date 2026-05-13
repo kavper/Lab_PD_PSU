@@ -11,17 +11,24 @@
 #define APP_TPS_POLL_MS                       250U
 #define APP_BQ_POLL_MS                        5000U
 #define APP_DEBUG_PRINT_MS                    1000U
+#define APP_BQ_ADC_PROOF_MIN_DELAY_MS         1000U
 
 #define APP_BQ_DEBUG_ENABLE                   1U
-
 #define APP_BQ_ADDRESS_7BIT                   BQ25731_I2C_ADDR_7BIT
-#define APP_BQ_RSNS_RAC_IS_5MOHM              1U
-#define APP_BQ_RSNS_RSR_IS_5MOHM              1U
-#define APP_BQ_VSYS_VBAT_5S_RANGE             0U
-#define APP_BQ_IIN_MIN_MA                     100U
-#define APP_BQ_IIN_MAX_FROM_PD_MA             5000U
-#define APP_BQ_RECONFIG_AFTER_ERRORS          4U
 
+/*
+ * Zakladamy 5S.
+ * Dla 5S dekodowanie VBAT/VSYS ma offset 8.160 V, nie 2.880 V.
+ */
+#define APP_BQ_VSYS_VBAT_5S_RANGE             1U
+
+/*
+ * AUTO      - zostawia role z EEPROM TPS
+ * SINK_ONLY - wymusza sink
+ * SOURCE_ONLY - wymusza source
+ *
+ * Na teraz zostaw AUTO, zeby nie robic reconnectow.
+ */
 #define APP_PD_ROLE_MODE_AUTO                 0U
 #define APP_PD_ROLE_MODE_SINK_ONLY            1U
 #define APP_PD_ROLE_MODE_SOURCE_ONLY          2U
@@ -48,6 +55,7 @@ typedef struct {
 
     bool initialized;
     bool tps_online;
+    bool tps_role_mode_checked;
     bool tps_role_mode_applied;
     TPS25751_TypecStateMachine_t tps_role_mode_current;
 
@@ -55,10 +63,16 @@ typedef struct {
     bool bq_online;
     bool bq_read_attempted;
     bool bq_initialized;
-    bool bq_configured;
-    bool bq_iin_target_valid;
-    uint32_t bq_iin_target_ma;
-    uint8_t bq_error_streak;
+    bool bq_device_checked;
+    bool bq_adc_started_once;
+    bool bq_adc_enable_failed_once;
+    bool bq_adc_proof_armed;
+    bool bq_adc_proof_captured;
+    uint32_t bq_adc_proof_t0_ms;
+    uint32_t bq_adc_proof_delay_ms;
+    uint16_t bq_adc_proof_before;
+    uint16_t bq_adc_proof_after_write;
+    uint16_t bq_adc_proof_after_delay;
 #endif
 } App_Context_t;
 
@@ -203,36 +217,44 @@ static const char *App_TpsRoleModeText(TPS25751_TypecStateMachine_t mode)
     }
 }
 
-static bool App_TpsRolePolicyTask(void)
+static void App_TpsRolePolicyTask(void)
 {
+#if (APP_PD_ROLE_MODE == APP_PD_ROLE_MODE_AUTO)
+    app.tps_role_mode_checked = true;
+    app.tps_role_mode_applied = false;
+    app.tps_role_mode_current = TPS25751_TYPEC_SM_DRP;
+    return;
+#else
     TPS25751_Status_t status;
     TPS25751_TypecStateMachine_t desired_mode;
 
     if (!app.tps_online || !app.tps_telemetry.app_ready) {
-        return false;
+        return;
     }
 
     desired_mode = App_TpsDesiredTypecStateMachine();
 
-    if (app.tps_role_mode_applied &&
+    if (app.tps_role_mode_checked &&
+        app.tps_role_mode_applied &&
         (app.tps_role_mode_current == desired_mode)) {
-        return false;
+        return;
     }
+
+    app.tps_role_mode_checked = true;
 
     status = TPS25751_SetTypecStateMachine(&app.tps, desired_mode);
     if (status != TPS25751_OK) {
         Debug_Printf("[TPS] Role mode set failed: %s\r\n",
                      TPS25751_StatusToString(status));
-        return false;
+        return;
     }
 
     app.tps_role_mode_current = desired_mode;
     app.tps_role_mode_applied = true;
 
-    Debug_Printf("[TPS] Role mode applied: %s\r\n",
+    Debug_Printf("[TPS] Role mode applied once: %s\r\n",
                  App_TpsRoleModeText(desired_mode));
-
-    return true;
+#endif
 }
 
 static void App_TpsPollTask(uint32_t now)
@@ -262,6 +284,7 @@ static void App_TpsPollTask(uint32_t now)
 }
 
 #if (APP_BQ_DEBUG_ENABLE != 0U)
+
 static bool App_BqHasFault(const BQ25731_Telemetry_t *bq)
 {
     if (bq == NULL) {
@@ -278,93 +301,36 @@ static bool App_BqHasFault(const BQ25731_Telemetry_t *bq)
            bq->fault_otg_uvp;
 }
 
-static uint32_t App_BqDesiredInputCurrentMa(const TPS25751_Telemetry_t *tps)
+/*
+ * BQ debug pasywny.
+ *
+ * Nie rusza:
+ * - IIN_HOST
+ * - ICHG
+ * - VCHG
+ * - OTG voltage/current
+ * - charge inhibit
+ * - ext_ilim
+ * - targetow z EEPROM
+ *
+ * Jedyny zapis:
+ * - jednorazowa proba wlaczenia ADC
+ *
+ * Jezeli proba wlaczenia ADC sie nie uda, nie ponawiamy co 5 s,
+ * bo to powodowalo cykliczne zaklocenie ladowania.
+ */
+static void App_BqSetErrorStatus(BQ25731_Status_t status)
 {
-    uint32_t contract_ma = 0U;
-    uint32_t advertised_ma = 0U;
-    uint8_t pdo_index = 0xFFU;
-
-    if (tps == NULL) {
-        return 0U;
-    }
-
-    if (!tps->power_connection) {
-        return 0U;
-    }
-
-    if (tps->active_rdo.valid) {
-        contract_ma = tps->active_rdo.max_current_ma;
-        if (contract_ma == 0U) {
-            contract_ma = tps->active_rdo.operating_current_ma;
-        }
-    }
-
-    advertised_ma = tps->active_pdo.current_ma;
-    if ((contract_ma == 0U) && (advertised_ma > 0U)) {
-        contract_ma = advertised_ma;
-    }
-
-    if (tps->active_rdo.object_position > 0U) {
-        pdo_index = (uint8_t)(tps->active_rdo.object_position - 1U);
-    }
-
-    if ((contract_ma == 0U) &&
-        (pdo_index < tps->rx_source_caps.count)) {
-        contract_ma = tps->rx_source_caps.pdo[pdo_index].current_ma;
-    }
-
-    if (contract_ma == 0U) {
-        return 0U;
-    }
-
-    if (contract_ma < APP_BQ_IIN_MIN_MA) {
-        contract_ma = APP_BQ_IIN_MIN_MA;
-    }
-
-    if (contract_ma > APP_BQ_IIN_MAX_FROM_PD_MA) {
-        contract_ma = APP_BQ_IIN_MAX_FROM_PD_MA;
-    }
-
-    return contract_ma;
-}
-
-static BQ25731_Status_t App_BqApplyInputCurrentLimit(uint32_t desired_ma)
-{
-    BQ25731_Status_t status;
-
-    if (desired_ma == 0U) {
-        return BQ25731_INVALID_ARG;
-    }
-
-    if (app.bq_iin_target_valid &&
-        (app.bq_iin_target_ma == desired_ma)) {
-        return BQ25731_OK;
-    }
-
-    status = BQ25731_DisableExternalInputCurrentLimit(&app.bq, NULL, NULL);
-    if (status != BQ25731_OK) {
-        return status;
-    }
-
-    status = BQ25731_SetInputCurrentLimit(&app.bq, desired_ma, NULL, NULL);
-    if (status != BQ25731_OK) {
-        return status;
-    }
-
-    app.bq_iin_target_ma = desired_ma;
-    app.bq_iin_target_valid = true;
-
-    Debug_Printf("[BQ] IIN_HOST target updated to %lu mA (PD contract)\r\n",
-                 (unsigned long)desired_ma);
-
-    return BQ25731_OK;
+    app.bq_online = false;
+    app.bq_telemetry.status = status;
+    app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
 }
 
 static void App_BqPollTask(uint32_t now)
 {
     BQ25731_Status_t status;
     BQ25731_Telemetry_t temp;
-    uint32_t desired_iin_ma;
+    bool bq_enable_window_open;
 
     if (!App_IsDue(now, app.last_bq_poll_ms, APP_BQ_POLL_MS)) {
         return;
@@ -373,10 +339,8 @@ static void App_BqPollTask(uint32_t now)
     app.last_bq_poll_ms = now;
     app.bq_read_attempted = true;
 
-    if (!app.tps_telemetry.app_ready) {
-        app.bq_online = false;
-        app.bq_telemetry.status = BQ25731_TPS_ERROR;
-        app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
+    if (!app.tps_online || !app.tps_telemetry.app_ready) {
+        App_BqSetErrorStatus(BQ25731_TPS_ERROR);
         return;
     }
 
@@ -385,9 +349,7 @@ static void App_BqPollTask(uint32_t now)
                               &app.tps,
                               APP_BQ_ADDRESS_7BIT);
         if (status != BQ25731_OK) {
-            app.bq_online = false;
-            app.bq_telemetry.status = status;
-            app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
+            App_BqSetErrorStatus(status);
             return;
         }
 
@@ -395,94 +357,107 @@ static void App_BqPollTask(uint32_t now)
                                    (APP_BQ_VSYS_VBAT_5S_RANGE != 0U));
 
         app.bq_initialized = true;
-        app.bq_configured = false;
-        app.bq_iin_target_valid = false;
-        app.bq_error_streak = 0U;
+        app.bq_device_checked = false;
+        app.bq_adc_started_once = false;
+        app.bq_adc_enable_failed_once = false;
+        app.bq_adc_proof_armed = false;
+        app.bq_adc_proof_captured = false;
+        app.bq_adc_proof_t0_ms = 0U;
+        app.bq_adc_proof_delay_ms = 0U;
+        app.bq_adc_proof_before = 0U;
+        app.bq_adc_proof_after_write = 0U;
+        app.bq_adc_proof_after_delay = 0U;
     }
 
-    if (!app.bq_configured) {
-        status = BQ25731_CheckDevice(&app.bq);
+    if (!app.bq_device_checked) {
+        status = BQ25731_TestCommunication(&app.bq);
         if (status != BQ25731_OK) {
-            app.bq_online = false;
-            app.bq_telemetry.status = status;
-            app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
+            App_BqSetErrorStatus(status);
             return;
         }
 
-        status = BQ25731_SetSenseResistors(&app.bq,
-                                           (APP_BQ_RSNS_RAC_IS_5MOHM != 0U),
-                                           (APP_BQ_RSNS_RSR_IS_5MOHM != 0U));
+        app.bq_device_checked = true;
+        Debug_Printf("[BQ] Device detected OK at 0x%02X\r\n",
+                     APP_BQ_ADDRESS_7BIT);
+    }
+
+    /*
+     * Bezpieczna polityka debug:
+     * - pojedyncza proba zapisu ADCOption
+     * - tylko gdy TPS pracuje jako SINK (nie SOURCE)
+     */
+    bq_enable_window_open = app.tps_telemetry.app_ready &&
+                            !app.tps_telemetry.pd_role_source;
+
+    if (bq_enable_window_open &&
+        !app.bq_adc_started_once &&
+        !app.bq_adc_enable_failed_once) {
+        app.bq_adc_started_once = true;
+        status = BQ25731_EnableAdcOnce(&app.bq);
+
         if (status != BQ25731_OK) {
-            app.bq_online = false;
-            app.bq_telemetry.status = status;
-            app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
-            return;
+            app.bq_adc_enable_failed_once = true;
+            App_BqSetErrorStatus(status);
+
+            Debug_Printf("[BQ] ADC enable failed once: %s | before=0x%04X after=0x%04X expected=0x%04X task=0x%02X\r\n",
+                         BQ25731_StatusToString(status),
+                         app.bq.adc_option_before,
+                         app.bq.adc_option_after,
+                         app.bq.adc_option_expected,
+                         app.bq.last_task_return_code);
+        } else {
+            Debug_Printf("[BQ] ADC enable once: before=0x%04X after=0x%04X expected=0x%04X task=0x%02X\r\n",
+                         app.bq.adc_option_before,
+                         app.bq.adc_option_after,
+                         app.bq.adc_option_expected,
+                         app.bq.last_task_return_code);
         }
 
-        status = BQ25731_ConfigureForMonitoring(&app.bq);
-        if (status != BQ25731_OK) {
-            app.bq_online = false;
-            app.bq_telemetry.status = status;
-            app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
-            return;
-        }
-
-        desired_iin_ma = App_BqDesiredInputCurrentMa(&app.tps_telemetry);
-        if (desired_iin_ma > 0U) {
-            status = App_BqApplyInputCurrentLimit(desired_iin_ma);
-            if (status != BQ25731_OK) {
-                app.bq_online = false;
-                app.bq_telemetry.status = status;
-                app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
-                return;
-            }
-        }
-
-        app.bq_configured = true;
-        app.bq_error_streak = 0U;
-        Debug_Printf("[BQ] Monitor config OK: RAC=%s RSR=%s\r\n",
-                     (APP_BQ_RSNS_RAC_IS_5MOHM != 0U) ? "5m" : "10m",
-                     (APP_BQ_RSNS_RSR_IS_5MOHM != 0U) ? "5m" : "10m");
+        app.bq_adc_proof_armed = true;
+        app.bq_adc_proof_captured = false;
+        app.bq_adc_proof_t0_ms = now;
+        app.bq_adc_proof_delay_ms = 0U;
+        app.bq_adc_proof_before = app.bq.adc_option_before;
+        app.bq_adc_proof_after_write = app.bq.adc_option_after;
+        app.bq_adc_proof_after_delay = app.bq.adc_option_after;
     }
 
     memset(&temp, 0, sizeof(temp));
 
     status = BQ25731_ReadTelemetry(&app.bq, &temp);
-
     if (status == BQ25731_OK) {
-        desired_iin_ma = App_BqDesiredInputCurrentMa(&app.tps_telemetry);
-        if (desired_iin_ma > 0U) {
-            status = App_BqApplyInputCurrentLimit(desired_iin_ma);
-            if (status != BQ25731_OK) {
-                app.bq_online = false;
-                app.bq_configured = false;
-                app.bq_iin_target_valid = false;
-                app.bq_telemetry.status = status;
-                app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
-                return;
-            }
-        }
-
         app.bq_telemetry = temp;
         app.bq_online = true;
-        app.bq_error_streak = 0U;
+
+        if (app.bq_adc_proof_armed &&
+            !app.bq_adc_proof_captured &&
+            ((uint32_t)(now - app.bq_adc_proof_t0_ms) >= APP_BQ_ADC_PROOF_MIN_DELAY_MS)) {
+            app.bq_adc_proof_after_delay = temp.adc_option_raw;
+            app.bq_adc_proof_delay_ms = (uint32_t)(now - app.bq_adc_proof_t0_ms);
+            app.bq_adc_proof_captured = true;
+
+            if ((app.bq_adc_proof_after_write == app.bq.adc_option_expected) &&
+                (app.bq_adc_proof_after_delay != app.bq.adc_option_expected)) {
+                Debug_Printf("[BQ] ADC proof: write accepted at t0, then value changed after %lu ms -> runtime overwrite detected.\r\n",
+                             (unsigned long)app.bq_adc_proof_delay_ms);
+            } else if (app.bq_adc_proof_after_write != app.bq.adc_option_expected) {
+                Debug_Printf("[BQ] ADC proof: value never reached expected (before=0x%04X after_write=0x%04X after_%lums=0x%04X expected=0x%04X).\r\n",
+                             app.bq_adc_proof_before,
+                             app.bq_adc_proof_after_write,
+                             (unsigned long)app.bq_adc_proof_delay_ms,
+                             app.bq_adc_proof_after_delay,
+                             app.bq.adc_option_expected);
+            } else {
+                Debug_Printf("[BQ] ADC proof: expected value persisted after %lu ms (after=0x%04X).\r\n",
+                             (unsigned long)app.bq_adc_proof_delay_ms,
+                             app.bq_adc_proof_after_delay);
+            }
+        }
     } else {
-        app.bq_online = false;
-        if (app.bq_error_streak < 0xFFU) {
-            app.bq_error_streak++;
-        }
-
-        if (app.bq_error_streak >= APP_BQ_RECONFIG_AFTER_ERRORS) {
-            app.bq_configured = false;
-            app.bq_iin_target_valid = false;
-            app.bq_error_streak = 0U;
-            Debug_Printf("[BQ] Reconfig scheduled after repeated read errors.\r\n");
-        }
-
-        app.bq_telemetry.status = status;
-        app.bq_telemetry.address_7bit = APP_BQ_ADDRESS_7BIT;
+        App_BqSetErrorStatus(status);
     }
 }
+
 #endif
 
 static void App_PrintHeader(uint32_t now)
@@ -509,10 +484,18 @@ static void App_PrintMainStatus(const TPS25751_Telemetry_t *t)
                  App_BoolText(t->power_connection),
                  TPS25751_ConnectionStateToString(t->connection_state));
 
-    Debug_Printf("  ROLE       TypeC=%s  PD=%s  Data=%s\r\n",
+    Debug_Printf("  ROLE       TypeC=%s  PD=%s  Data=%s  policy=%s",
                  t->port_role_source ? "SOURCE" : "SINK",
                  t->pd_role_source ? "SOURCE" : "SINK",
-                 t->data_role_dfp ? "DFP" : "UFP");
+                 t->data_role_dfp ? "DFP" : "UFP",
+                 App_TpsRoleModeText(App_TpsDesiredTypecStateMachine()));
+
+#if (APP_PD_ROLE_MODE == APP_PD_ROLE_MODE_AUTO)
+    Debug_Printf(" EEPROM/AUTO");
+#else
+    Debug_Printf(" forced_once=%s", App_BoolText(app.tps_role_mode_applied));
+#endif
+    Debug_Printf("\r\n");
 
     Debug_Printf("  VBUS       status=%s  adc=",
                  TPS25751_VbusStatusToString(t->vbus_status));
@@ -572,17 +555,45 @@ static void App_PrintContract(const TPS25751_Telemetry_t *t)
 }
 
 #if (APP_BQ_DEBUG_ENABLE != 0U)
+
 static void App_PrintBqDebug(void)
 {
     const BQ25731_Telemetry_t *bq = &app.bq_telemetry;
     uint8_t bq_addr = app.bq_initialized ? app.bq.device_address : APP_BQ_ADDRESS_7BIT;
+    bool adc_ch_vbat_en;
+    bool adc_ch_vsys_en;
+    bool adc_ch_ichg_en;
+    bool adc_ch_idchg_en;
+    bool adc_ch_iin_en;
+    bool adc_ch_psys_en;
+    bool adc_ch_vbus_en;
+    bool adc_ch_cmpin_en;
 
     Debug_Printf("------------------------------------------------------------\r\n");
-    Debug_Printf(" BQ25731 DEBUG | %s | addr=0x%02X | %s\r\n",
+    Debug_Printf(" BQ25731 DEBUG | %s | addr=0x%02X | %s | adc_once=%s | adc_fail=%s\r\n",
                  app.bq_online ? "ONLINE" : "OFFLINE",
                  bq_addr,
-                 BQ25731_StatusToString(bq->status));
+                 BQ25731_StatusToString(bq->status),
+                 App_BoolText(app.bq_adc_started_once),
+                 App_BoolText(app.bq_adc_enable_failed_once));
     Debug_Printf("------------------------------------------------------------\r\n");
+
+    if (app.bq_initialized) {
+        Debug_Printf("  BRIDGE    cmd=%s tgt=0x%02X reg=0x%02X len=%u task=0x%02X data1_len=%u status=%s\r\n",
+                     app.tps.last_i2c_controller_command,
+                     app.tps.last_i2c_controller_target_addr,
+                     app.tps.last_i2c_controller_target_reg,
+                     app.tps.last_i2c_controller_length,
+                     app.tps.last_i2c_controller_task_return_code,
+                     app.tps.last_i2c_controller_data1_len,
+                     TPS25751_StatusToString(app.tps.last_i2c_controller_error));
+
+        Debug_Printf("  DIAG      bridge=%s task=0x%02X last_bq_reg=0x%02X bq_err=0x%08lX\r\n",
+                     TPS25751_StatusToString(app.bq.last_bridge_status),
+                     app.bq.last_task_return_code,
+                     app.bq.last_bq_register,
+                     (unsigned long)app.bq.last_bq_error_code);
+    }
 
     if (!app.bq_read_attempted) {
         Debug_Printf("  NOTE      BQ read not attempted yet. Waiting for first polling window.\r\n");
@@ -591,12 +602,15 @@ static void App_PrintBqDebug(void)
 
     if (!app.bq_online) {
         Debug_Printf("  NOTE      BQ read failed or TPS I2Cr is not ready. No valid BQ data printed.\r\n");
+
         if (app.bq_initialized) {
             char diagnostic[96];
+
             if (BQ25731_GetDiagnosticText(&app.bq, diagnostic, sizeof(diagnostic)) > 0) {
                 Debug_Printf("  DIAG      %s\r\n", diagnostic);
             }
         }
+
         return;
     }
 
@@ -612,14 +626,64 @@ static void App_PrintBqDebug(void)
                  bq->charge_option3_raw,
                  bq->adc_option_raw);
 
-    Debug_Printf("  SENSE     RAC=%s RSR=%s ext_ilim=%s hiz=%s inhibit=%s watchdog=%s low_power=%s\r\n",
+    Debug_Printf("  ADCWR     before=0x%04X after=0x%04X expected=0x%04X ready=%s\r\n",
+                 app.bq.adc_option_before,
+                 app.bq.adc_option_after,
+                 app.bq.adc_option_expected,
+                 App_BoolText(bq->adc_enabled));
+
+    if (app.bq_adc_proof_armed) {
+        Debug_Printf("  ADCPROOF  before=0x%04X after_w=0x%04X after_t=0x%04X delay=%lums captured=%s\r\n",
+                     app.bq_adc_proof_before,
+                     app.bq_adc_proof_after_write,
+                     app.bq_adc_proof_after_delay,
+                     (unsigned long)app.bq_adc_proof_delay_ms,
+                     App_BoolText(app.bq_adc_proof_captured));
+    }
+
+    adc_ch_vbat_en = (bq->adc_option_raw & 0x0001U) != 0U;
+    adc_ch_vsys_en = (bq->adc_option_raw & 0x0002U) != 0U;
+    adc_ch_ichg_en = (bq->adc_option_raw & 0x0004U) != 0U;
+    adc_ch_idchg_en = (bq->adc_option_raw & 0x0008U) != 0U;
+    adc_ch_iin_en = (bq->adc_option_raw & 0x0010U) != 0U;
+    adc_ch_psys_en = (bq->adc_option_raw & 0x0020U) != 0U;
+    adc_ch_vbus_en = (bq->adc_option_raw & 0x0040U) != 0U;
+    adc_ch_cmpin_en = (bq->adc_option_raw & 0x0080U) != 0U;
+
+    Debug_Printf("  ADCCH     vbat=%s vsys=%s ichg=%s idchg=%s iin=%s psys=%s vbus=%s cmpin=%s conv=%s start=%s\r\n",
+                 App_BoolText(adc_ch_vbat_en),
+                 App_BoolText(adc_ch_vsys_en),
+                 App_BoolText(adc_ch_ichg_en),
+                 App_BoolText(adc_ch_idchg_en),
+                 App_BoolText(adc_ch_iin_en),
+                 App_BoolText(adc_ch_psys_en),
+                 App_BoolText(adc_ch_vbus_en),
+                 App_BoolText(adc_ch_cmpin_en),
+                 App_BoolText((bq->adc_option_raw & 0x8000U) != 0U),
+                 App_BoolText((bq->adc_option_raw & 0x4000U) != 0U));
+
+    if (app.bq_adc_enable_failed_once &&
+        (app.bq.last_bridge_status == TPS25751_OK) &&
+        (app.bq.last_task_return_code == 0U)) {
+        Debug_Printf("  ADCNOTE   Write accepted by bridge, but BQ value unchanged. TPS/BQ runtime policy may override ADCOption.\r\n");
+    }
+
+    if ((bq->adc_option_raw & 0x005EU) != 0x005EU) {
+        Debug_Printf("  ADCNOTE   IIN/ICHG/IDCHG/PSYS/VBUS/VSYS channels are disabled in ADCOption; zero readings are expected.\r\n");
+    }
+
+    Debug_Printf("  SENSE     RAC=%s RSR=%s ext_ilim=%s hiz=%s inhibit=%s watchdog=%s low_power=%s adc_ready=%s\r\n",
                  bq->rsns_rac_5mohm ? "5m" : "10m",
                  bq->rsns_rsr_5mohm ? "5m" : "10m",
                  App_BoolText(bq->external_input_current_limit_enabled),
                  App_BoolText(bq->hiz_enabled),
                  App_BoolText(bq->charge_inhibited),
                  App_BoolText(bq->watchdog_enabled),
-                 App_BoolText(bq->low_power_mode));
+                 App_BoolText(bq->low_power_mode),
+                 App_BoolText(bq->adc_enabled));
+
+    Debug_Printf("  STATUS    ChargerStatus=0x%04X\r\n",
+                 bq->charger_status_raw);
 
     Debug_Printf("  LIMITS    IIN_HOST=");
     App_PrintCurrent(bq->iin_host_ma);
@@ -640,31 +704,73 @@ static void App_PrintBqDebug(void)
                  App_BoolText(bq->in_otg));
 
     Debug_Printf("  ADC       VBUS=");
-    App_PrintVoltage(bq->vbus_mv);
+    if (adc_ch_vbus_en) {
+        App_PrintVoltage(bq->vbus_mv);
+    } else {
+        Debug_Printf("N/A");
+    }
     Debug_Printf(" VBAT=");
-    App_PrintVoltage(bq->vbat_mv);
+    if (adc_ch_vbat_en) {
+        App_PrintVoltage(bq->vbat_mv);
+    } else {
+        Debug_Printf("N/A");
+    }
     Debug_Printf(" VSYS=");
-    App_PrintVoltage(bq->vsys_mv);
+    if (adc_ch_vsys_en) {
+        App_PrintVoltage(bq->vsys_mv);
+    } else {
+        Debug_Printf("N/A");
+    }
     Debug_Printf("\r\n");
 
     Debug_Printf("            IIN=");
-    App_PrintCurrent(bq->iin_ma);
+    if (adc_ch_iin_en) {
+        App_PrintCurrent(bq->iin_ma);
+    } else {
+        Debug_Printf("N/A");
+    }
     Debug_Printf(" ICHG=");
-    App_PrintCurrent(bq->ichg_ma);
+    if (adc_ch_ichg_en) {
+        App_PrintCurrent(bq->ichg_ma);
+    } else {
+        Debug_Printf("N/A");
+    }
     Debug_Printf(" IDCHG=");
-    App_PrintCurrent(bq->idchg_ma);
-    Debug_Printf(" PSYS_ADC=%lumV\r\n",
-                 (unsigned long)bq->psys_mv);
+    if (adc_ch_idchg_en) {
+        App_PrintCurrent(bq->idchg_ma);
+    } else {
+        Debug_Printf("N/A");
+    }
+
+    Debug_Printf(" PSYS_ADC=");
+    if (adc_ch_psys_en) {
+        Debug_Printf("%lumV", (unsigned long)bq->psys_mv);
+    } else {
+        Debug_Printf("N/A");
+    }
+
+    Debug_Printf(" CMPIN=");
+    if (adc_ch_cmpin_en) {
+        Debug_Printf("%lumV", (unsigned long)bq->cmpin_mv);
+    } else {
+        Debug_Printf("N/A");
+    }
+    Debug_Printf("\r\n");
 
     Debug_Printf("  POWER     input=");
     App_PrintPower(bq->input_power_mw);
     Debug_Printf(" charge=");
     App_PrintPower(bq->charge_power_mw);
+    Debug_Printf(" discharge=");
+    App_PrintPower(bq->discharge_power_mw);
+    Debug_Printf(" otg=");
+    App_PrintPower(bq->otg_output_power_mw);
     Debug_Printf("\r\n");
 
-    Debug_Printf("  STATE     input=%s fast=%s iin_dpm=%s vindpm=%s vap=%s ico=%s\r\n",
+    Debug_Printf("  STATE     input=%s fast=%s otg=%s iin_dpm=%s vindpm=%s vap=%s ico=%s\r\n",
                  App_BoolText(bq->input_present),
                  App_BoolText(bq->in_fast_charge),
+                 App_BoolText(bq->in_otg),
                  App_BoolText(bq->in_iin_dpm),
                  App_BoolText(bq->in_vindpm),
                  App_BoolText(bq->in_vap),
@@ -681,6 +787,7 @@ static void App_PrintBqDebug(void)
                  App_BoolText(bq->fault_otg_ovp),
                  App_BoolText(bq->fault_otg_uvp));
 }
+
 #endif
 
 static void App_PrintNotes(const TPS25751_Telemetry_t *t)
@@ -708,14 +815,14 @@ static void App_PrintNotes(const TPS25751_Telemetry_t *t)
     }
 
     if (t->pd_role_source) {
-        Debug_Printf("TPS aktualnie dziala jako SOURCE. Patrz TX_SOURCE i RX_SINK.\r\n");
+        Debug_Printf("TPS dziala jako SOURCE. BQ debug jest tylko pomiarowy, bez ustawiania targetow.\r\n");
         return;
     }
 
 #if (APP_BQ_DEBUG_ENABLE != 0U)
-    Debug_Printf("TPS aktualnie dziala jako SINK. Patrz RX_SOURCE, aktywny kontrakt i BQ debug.\r\n");
+    Debug_Printf("TPS dziala jako SINK. BQ debug czyta ADC; targety z EEPROM zostaja bez zmian.\r\n");
 #else
-    Debug_Printf("TPS aktualnie dziala jako SINK. BQ debug jest chwilowo wylaczony.\r\n");
+    Debug_Printf("TPS dziala jako SINK. BQ debug jest wylaczony.\r\n");
 #endif
 }
 
@@ -767,6 +874,19 @@ static void App_DebugPrintTask(uint32_t now)
                  app.tps.last_reported_payload_len,
                  (unsigned long)app.tps.last_error);
 
+#if (APP_BQ_DEBUG_ENABLE != 0U)
+    if (app.bq_initialized) {
+        Debug_Printf("  bq_i2cr   last_reg=0x%02X task=0x%02X bridge=%s err=0x%08lX adc_once=%s adc_fail=%s checked=%s\r\n",
+                     app.bq.last_bq_register,
+                     app.bq.last_task_return_code,
+                     TPS25751_StatusToString(app.bq.last_bridge_status),
+                     (unsigned long)app.bq.last_bq_error_code,
+                     App_BoolText(app.bq_adc_started_once),
+                     App_BoolText(app.bq_adc_enable_failed_once),
+                     App_BoolText(app.bq_device_checked));
+    }
+#endif
+
     Debug_Printf("------------------------------------------------------------\r\n");
     App_PrintNotes(t);
 }
@@ -798,12 +918,20 @@ void App_Init(I2C_HandleTypeDef *hi2c_tps,
     Debug_Printf("============================================================\r\n");
     Debug_Printf(" Digital PSU firmware bring-up\r\n");
 #if (APP_BQ_DEBUG_ENABLE != 0U)
-    Debug_Printf(" Stage 3: readable TPS25751 + BQ25731 debug\r\n");
+    Debug_Printf(" Stage: TPS25751 debug + passive BQ25731 ADC debug\r\n");
 #else
-    Debug_Printf(" Stage 3: readable TPS25751 debug, BQ disabled\r\n");
+    Debug_Printf(" Stage: TPS25751 debug only\r\n");
 #endif
-    Debug_Printf(" PD role policy: %s\r\n",
+    Debug_Printf(" PD role policy: %s",
                  App_TpsRoleModeText(App_TpsDesiredTypecStateMachine()));
+
+#if (APP_PD_ROLE_MODE == APP_PD_ROLE_MODE_AUTO)
+    Debug_Printf(" / EEPROM untouched\r\n");
+#else
+    Debug_Printf(" / forced once\r\n");
+#endif
+
+    Debug_Printf(" BQ policy: 5S decode, passive read, ADC enable once, charger targets untouched\r\n");
     Debug_Printf("============================================================\r\n");
 
     status = TPS25751_Init(&app.tps,
@@ -836,13 +964,10 @@ void App_Run(void)
     }
 
     App_TpsPollTask(now);
+    App_TpsRolePolicyTask();
 
 #if (APP_BQ_DEBUG_ENABLE != 0U)
-    if (!App_TpsRolePolicyTask()) {
-        App_BqPollTask(now);
-    }
-#else
-    (void)App_TpsRolePolicyTask();
+    App_BqPollTask(now);
 #endif
 
     App_DebugPrintTask(now);

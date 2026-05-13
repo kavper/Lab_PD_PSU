@@ -6,8 +6,8 @@
 #define BQ25731_TPS_READ_GAP_MS               6U
 #define BQ25731_TPS_WRITE_GAP_MS              6U
 #define BQ25731_ADC_SETTLE_MS                 250U
-#define BQ25731_TPS_READ_CHUNK_MAX            16U
-#define BQ25731_WRITE_VERIFY_RETRIES          6U
+#define BQ25731_TPS_READ_CHUNK_MAX            8U
+#define BQ25731_WRITE_VERIFY_RETRIES          2U
 #define BQ25731_WRITE_VERIFY_DELAY_MS         8U
 
 #define BQ25731_REG_CHARGE_OPTION0            0x00U
@@ -40,19 +40,13 @@
 #define BQ25731_CHGOPT0_EN_IIN_DPM_MASK       0x0002U
 #define BQ25731_CHGOPT0_CHRG_INHIBIT_MASK     0x0001U
 
-#define BQ25731_CHGOPT1_EN_IBAT_MASK          0x8000U
-#define BQ25731_CHGOPT1_EN_PROCHOT_LPWR_MASK  0x4000U
-#define BQ25731_CHGOPT1_PSYS_CONFIG_MASK      0x3000U
 #define BQ25731_CHGOPT1_RSNS_RAC_MASK         0x0800U
 #define BQ25731_CHGOPT1_RSNS_RSR_MASK         0x0400U
-#define BQ25731_CHGOPT1_PSYS_RATIO_MASK       0x0200U
 #define BQ25731_CHGOPT1_EN_FAST_5MOHM_MASK    0x0100U
 
 #define BQ25731_CHGOPT2_EN_EXTILIM_MASK       0x0080U
 
 #define BQ25731_CHGOPT3_EN_HIZ_MASK           0x8000U
-#define BQ25731_CHGOPT3_RESET_REG_MASK        0x4000U
-#define BQ25731_CHGOPT3_RESET_VINDPM_MASK     0x2000U
 #define BQ25731_CHGOPT3_EN_OTG_MASK           0x1000U
 #define BQ25731_CHGOPT3_EN_OTG_BIGCAP_MASK    0x0100U
 #define BQ25731_CHGOPT3_OTG_VAP_MODE_MASK     0x0020U
@@ -63,32 +57,32 @@
                                                 BQ25731_CHGOPT3_IL_AVG_15A |        \
                                                 BQ25731_CHGOPT3_CMP_EN_MASK)
 
-#define BQ25731_CHGSTATUS_IN_OTG_MASK         0x0001U
-#define BQ25731_CHGSTATUS_IN_FCHRG_MASK       0x0004U
-#define BQ25731_CHGSTATUS_IN_IIN_DPM_MASK     0x0008U
-#define BQ25731_CHGSTATUS_IN_VINDPM_MASK      0x0010U
-#define BQ25731_CHGSTATUS_IN_VAP_MASK         0x0020U
-#define BQ25731_CHGSTATUS_ICO_DONE_MASK       0x0040U
-#define BQ25731_CHGSTATUS_INPUT_PRESENT_MASK  0x0080U
-#define BQ25731_CHGSTATUS_FAULT_OTG_UVP_MASK  0x0100U
-#define BQ25731_CHGSTATUS_FAULT_OTG_OVP_MASK  0x0200U
-#define BQ25731_CHGSTATUS_FORCE_OFF_MASK      0x0400U
-#define BQ25731_CHGSTATUS_FAULT_VSYS_UVP_MASK 0x0800U
-#define BQ25731_CHGSTATUS_FAULT_SYSOVP_MASK   0x1000U
-#define BQ25731_CHGSTATUS_FAULT_ACOC_MASK     0x2000U
-#define BQ25731_CHGSTATUS_FAULT_BATOC_MASK    0x4000U
-#define BQ25731_CHGSTATUS_FAULT_ACOV_MASK     0x8000U
+#define BQ25731_CHGSTATUS_IN_OTG_MASK         0x0100U
+#define BQ25731_CHGSTATUS_IN_FCHRG_MASK       0x0400U
+#define BQ25731_CHGSTATUS_IN_IIN_DPM_MASK     0x0800U
+#define BQ25731_CHGSTATUS_IN_VINDPM_MASK      0x1000U
+#define BQ25731_CHGSTATUS_IN_VAP_MASK         0x2000U
+#define BQ25731_CHGSTATUS_ICO_DONE_MASK       0x4000U
+#define BQ25731_CHGSTATUS_INPUT_PRESENT_MASK  0x8000U
+#define BQ25731_CHGSTATUS_FAULT_OTG_UVP_MASK  0x0001U
+#define BQ25731_CHGSTATUS_FAULT_OTG_OVP_MASK  0x0002U
+#define BQ25731_CHGSTATUS_FORCE_OFF_MASK      0x0004U
+#define BQ25731_CHGSTATUS_FAULT_VSYS_UVP_MASK 0x0008U
+#define BQ25731_CHGSTATUS_FAULT_SYSOVP_MASK   0x0010U
+#define BQ25731_CHGSTATUS_FAULT_ACOC_MASK     0x0020U
+#define BQ25731_CHGSTATUS_FAULT_BATOC_MASK    0x0040U
+#define BQ25731_CHGSTATUS_FAULT_ACOV_MASK     0x0080U
 
 #define BQ25731_ADCOPT_ADC_CONV_MASK          0x8000U
 #define BQ25731_ADCOPT_ADC_START_MASK         0x4000U
 #define BQ25731_ADCOPT_ADC_FULLSCALE_MASK     0x2000U
 #define BQ25731_ADCOPT_ENABLE_MASK            0x007FU
-#define BQ25731_ADCOPT_DEFAULT_CHANNELS       0x007FU
-#define BQ25731_ADCOPT_CONFIG                 0xE07FU
+#define BQ25731_ADCOPT_EXPECTED               0xE05FU
+
 #define BQ25731_VERIFY_ALL_MASK               0xFFFFU
 #define BQ25731_ADCOPT_VERIFY_MASK            (BQ25731_ADCOPT_ADC_CONV_MASK | \
                                                 BQ25731_ADCOPT_ADC_FULLSCALE_MASK | \
-                                                BQ25731_ADCOPT_ENABLE_MASK)
+                                                0x005FU)
 
 #define BQ25731_ADC_PSYS_MV_PER_LSB_LOW       8U
 #define BQ25731_ADC_PSYS_MV_PER_LSB_HIGH      12U
@@ -116,40 +110,6 @@
 #define BQ25731_OTG_CURRENT_MA_PER_LSB_5MOHM  100U
 #define BQ25731_OTG_CURRENT_MA_PER_LSB_10MOHM 50U
 
-static TPS25751_Status_t BQ25731_TpsBridgeRead(TPS25751_Device_t *tps,
-                                               uint8_t target_address,
-                                               uint8_t target_register,
-                                               uint8_t *buffer,
-                                               uint8_t length)
-{
-    if ((tps == NULL) || (buffer == NULL) || (length == 0U)) {
-        return TPS25751_INVALID_ARG;
-    }
-
-    return TPS25751_I2cControllerRead(tps,
-                                      target_address,
-                                      target_register,
-                                      buffer,
-                                      length);
-}
-
-static TPS25751_Status_t BQ25731_TpsBridgeWrite(TPS25751_Device_t *tps,
-                                                uint8_t target_address,
-                                                uint8_t target_register,
-                                                const uint8_t *buffer,
-                                                uint8_t length)
-{
-    if ((tps == NULL) || ((buffer == NULL) && (length > 0U))) {
-        return TPS25751_INVALID_ARG;
-    }
-
-    return TPS25751_I2cControllerWrite(tps,
-                                       target_address,
-                                       target_register,
-                                       buffer,
-                                       length);
-}
-
 static BQ25731_Status_t BQ25731_MapTransportStatus(BQ25731_Device_t *ctx,
                                                    uint8_t reg_address,
                                                    TPS25751_Status_t status)
@@ -158,7 +118,17 @@ static BQ25731_Status_t BQ25731_MapTransportStatus(BQ25731_Device_t *ctx,
         return BQ25731_INVALID_ARG;
     }
 
+    ctx->last_bridge_status = status;
+    ctx->last_task_return_code = 0U;
+    ctx->last_bq_register = reg_address;
     ctx->last_register = reg_address;
+
+    if (ctx->tps != NULL) {
+        ctx->last_task_return_code = ctx->tps->last_i2c_controller_task_return_code;
+        ctx->last_bq_error_code = ctx->tps->last_error;
+    } else {
+        ctx->last_bq_error_code = (uint32_t)status;
+    }
 
     if (status == TPS25751_OK) {
         ctx->online = true;
@@ -167,7 +137,7 @@ static BQ25731_Status_t BQ25731_MapTransportStatus(BQ25731_Device_t *ctx,
     }
 
     ctx->online = false;
-    ctx->last_error_code = (ctx->tps != NULL) ? ctx->tps->last_error : (uint32_t)status;
+    ctx->last_error_code = ctx->last_bq_error_code;
 
     if (status == TPS25751_INVALID_ARG) {
         return BQ25731_INVALID_ARG;
@@ -211,11 +181,11 @@ static BQ25731_Status_t BQ25731_ReadBlockChunk(BQ25731_Device_t *ctx,
 
     BQ25731_WaitForGap(ctx->last_read_tick_ms, BQ25731_TPS_READ_GAP_MS);
 
-    status = BQ25731_TpsBridgeRead(ctx->tps,
-                                   ctx->device_address,
-                                   reg_address,
-                                   buffer,
-                                   length);
+    status = TPS25751_I2cControllerRead(ctx->tps,
+                                        ctx->device_address,
+                                        reg_address,
+                                        buffer,
+                                        length);
 
     if (status != TPS25751_OK) {
         return BQ25731_MapTransportStatus(ctx, reg_address, status);
@@ -223,6 +193,12 @@ static BQ25731_Status_t BQ25731_ReadBlockChunk(BQ25731_Device_t *ctx,
 
     ctx->last_read_tick_ms = HAL_GetTick();
     ctx->online = true;
+    ctx->last_bridge_status = TPS25751_OK;
+    ctx->last_task_return_code = (ctx->tps != NULL) ?
+                                 ctx->tps->last_i2c_controller_task_return_code :
+                                 0U;
+    ctx->last_bq_register = reg_address;
+    ctx->last_bq_error_code = 0U;
     ctx->last_register = reg_address;
     ctx->last_error_code = 0U;
 
@@ -279,11 +255,11 @@ static BQ25731_Status_t BQ25731_Write16(BQ25731_Device_t *ctx,
 
     BQ25731_WaitForGap(ctx->last_write_tick_ms, BQ25731_TPS_WRITE_GAP_MS);
 
-    status = BQ25731_TpsBridgeWrite(ctx->tps,
-                                    ctx->device_address,
-                                    reg_address,
-                                    raw,
-                                    sizeof(raw));
+    status = TPS25751_I2cControllerWrite(ctx->tps,
+                                         ctx->device_address,
+                                         reg_address,
+                                         raw,
+                                         sizeof(raw));
 
     if (status != TPS25751_OK) {
         return BQ25731_MapTransportStatus(ctx, reg_address, status);
@@ -291,6 +267,12 @@ static BQ25731_Status_t BQ25731_Write16(BQ25731_Device_t *ctx,
 
     ctx->last_write_tick_ms = HAL_GetTick();
     ctx->online = true;
+    ctx->last_bridge_status = TPS25751_OK;
+    ctx->last_task_return_code = (ctx->tps != NULL) ?
+                                 ctx->tps->last_i2c_controller_task_return_code :
+                                 0U;
+    ctx->last_bq_register = reg_address;
+    ctx->last_bq_error_code = 0U;
     ctx->last_register = reg_address;
     ctx->last_error_code = 0U;
 
@@ -350,9 +332,12 @@ static BQ25731_Status_t BQ25731_Write16Verified(BQ25731_Device_t *ctx,
     }
 
     ctx->online = false;
+    ctx->last_bridge_status = TPS25751_COMMAND_ERROR;
+    ctx->last_bq_register = reg_address;
+    ctx->last_bq_error_code = ((uint32_t)(value & verify_mask) << 16) |
+                              (uint32_t)(readback & verify_mask);
     ctx->last_register = reg_address;
-    ctx->last_error_code = ((uint32_t)(value & verify_mask) << 16) |
-                           (uint32_t)(readback & verify_mask);
+    ctx->last_error_code = ctx->last_bq_error_code;
 
     return BQ25731_ERROR;
 }
@@ -370,17 +355,42 @@ static void BQ25731_SaveRawRange(BQ25731_Telemetry_t *telemetry,
 
     for (i = 0U; i < length; ++i) {
         uint16_t target = (uint16_t)reg_address + (uint16_t)i;
+
         if (target >= BQ25731_RAW_REGISTER_SNAPSHOT_LENGTH) {
             return;
         }
+
         telemetry->raw_registers[target] = buffer[i];
     }
 }
 
-static uint16_t BQ25731_RawLe16(const uint8_t *buffer, uint8_t offset)
+static void BQ25731_SaveRaw16(BQ25731_Telemetry_t *telemetry,
+                              uint8_t reg_address,
+                              uint16_t value)
 {
-    return (uint16_t)buffer[offset] |
-           ((uint16_t)buffer[(uint8_t)(offset + 1U)] << 8);
+    uint8_t raw[2];
+
+    raw[0] = (uint8_t)(value & 0xFFU);
+    raw[1] = (uint8_t)((value >> 8) & 0xFFU);
+
+    BQ25731_SaveRawRange(telemetry, reg_address, raw, sizeof(raw));
+}
+
+static BQ25731_Status_t BQ25731_Read16WithSnapshot(BQ25731_Device_t *ctx,
+                                                   BQ25731_Telemetry_t *telemetry,
+                                                   uint8_t reg_address,
+                                                   uint16_t *value)
+{
+    BQ25731_Status_t status;
+
+    status = BQ25731_Read16(ctx, reg_address, value);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    BQ25731_SaveRaw16(telemetry, reg_address, *value);
+
+    return BQ25731_OK;
 }
 
 static bool BQ25731_IsSupportedDeviceId(uint8_t manufacturer_id, uint8_t device_id)
@@ -434,12 +444,14 @@ static uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw, bool rsns_rsr_5mohm)
 static uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw)
 {
     uint32_t code = (uint32_t)((raw >> 3) & 0x0FFFU);
+
     return code * 8U;
 }
 
 static uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw)
 {
     uint32_t code = (uint32_t)((raw >> 2) & 0x0FFFU);
+
     return code * BQ25731_OTG_VOLTAGE_MV_PER_LSB;
 }
 
@@ -681,6 +693,10 @@ BQ25731_Status_t BQ25731_Init(BQ25731_Device_t *ctx,
     ctx->tps = tps;
     ctx->device_address = device_address;
     ctx->vsys_vbat_range_is_5s = false;
+    ctx->adc_option_before = 0U;
+    ctx->adc_option_after = 0U;
+    ctx->adc_option_expected = BQ25731_ADCOPT_EXPECTED;
+    ctx->last_bridge_status = TPS25751_OK;
 
     return BQ25731_OK;
 }
@@ -696,6 +712,11 @@ void BQ25731_SetVsysVbatRange5S(BQ25731_Device_t *ctx, bool enabled)
 
 BQ25731_Status_t BQ25731_CheckDevice(BQ25731_Device_t *ctx)
 {
+    return BQ25731_TestCommunication(ctx);
+}
+
+BQ25731_Status_t BQ25731_TestCommunication(BQ25731_Device_t *ctx)
+{
     BQ25731_Status_t status;
     uint8_t id[2];
 
@@ -710,12 +731,15 @@ BQ25731_Status_t BQ25731_CheckDevice(BQ25731_Device_t *ctx)
 
     if (!BQ25731_IsSupportedDeviceId(id[0], id[1])) {
         ctx->online = false;
-        ctx->last_error_code = ((uint32_t)id[0] << 8) | id[1];
+        ctx->last_bq_register = BQ25731_REG_MANUFACTURE_ID;
+        ctx->last_bq_error_code = ((uint32_t)id[0] << 8) | id[1];
+        ctx->last_error_code = ctx->last_bq_error_code;
         return BQ25731_DEVICE_ID_MISMATCH;
     }
 
     ctx->online = true;
     ctx->last_error_code = 0U;
+    ctx->last_bq_error_code = 0U;
 
     return BQ25731_OK;
 }
@@ -738,6 +762,7 @@ BQ25731_Status_t BQ25731_SetSenseResistors(BQ25731_Device_t *ctx,
 
     if (rac_5mohm) {
         option1 |= BQ25731_CHGOPT1_RSNS_RAC_MASK;
+        option1 |= BQ25731_CHGOPT1_EN_FAST_5MOHM_MASK;
     } else {
         option1 &= (uint16_t)~BQ25731_CHGOPT1_RSNS_RAC_MASK;
     }
@@ -764,7 +789,10 @@ BQ25731_Status_t BQ25731_SetSenseResistors(BQ25731_Device_t *ctx,
 BQ25731_Status_t BQ25731_EnableAdc(BQ25731_Device_t *ctx)
 {
     BQ25731_Status_t status;
-    uint16_t option0;
+    uint16_t option0 = 0U;
+    uint16_t adc_before = 0U;
+    uint16_t adc_after = 0U;
+    uint16_t adc_config = BQ25731_ADCOPT_EXPECTED;
 
     if (ctx == NULL) {
         return BQ25731_INVALID_ARG;
@@ -777,25 +805,88 @@ BQ25731_Status_t BQ25731_EnableAdc(BQ25731_Device_t *ctx)
 
     option0 &= (uint16_t)~BQ25731_CHGOPT0_EN_LWPWR_MASK;
 
-    status = BQ25731_Write16Verified(ctx,
-                                     BQ25731_REG_CHARGE_OPTION0,
-                                     option0,
-                                     BQ25731_VERIFY_ALL_MASK);
+    status = BQ25731_Write16(ctx, BQ25731_REG_CHARGE_OPTION0, option0);
     if (status != BQ25731_OK) {
         return status;
     }
 
-    status = BQ25731_Write16Verified(ctx,
-                                     BQ25731_REG_ADC_OPTION,
-                                     BQ25731_ADCOPT_CONFIG,
-                                     BQ25731_ADCOPT_VERIFY_MASK);
+    HAL_Delay(20U);
 
-    if (status == BQ25731_OK) {
-        ctx->adc_enabled_tick_ms = HAL_GetTick();
+    status = BQ25731_Read16(ctx, BQ25731_REG_ADC_OPTION, &adc_before);
+    if (status != BQ25731_OK) {
+        return status;
     }
 
-    return status;
+    status = BQ25731_Write16(ctx, BQ25731_REG_ADC_OPTION, adc_config);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    HAL_Delay(80U);
+
+    status = BQ25731_Read16(ctx, BQ25731_REG_ADC_OPTION, &adc_after);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    ctx->adc_option_before = adc_before;
+    ctx->adc_option_after = adc_after;
+    ctx->adc_option_expected = adc_config;
+    ctx->last_bq_register = BQ25731_REG_ADC_OPTION;
+    ctx->last_error_code = ((uint32_t)adc_before << 16) | adc_after;
+    ctx->last_bq_error_code = ctx->last_error_code;
+    ctx->adc_enabled_tick_ms = HAL_GetTick();
+
+    return BQ25731_OK;
 }
+
+BQ25731_Status_t BQ25731_EnableAdcOnce(BQ25731_Device_t *ctx)
+{
+    BQ25731_Status_t status;
+    uint16_t adc_before = 0U;
+    uint16_t adc_after = 0U;
+    uint16_t adc_expected = BQ25731_ADCOPT_EXPECTED;
+
+    if (ctx == NULL) {
+        return BQ25731_INVALID_ARG;
+    }
+
+    status = BQ25731_Read16(ctx, BQ25731_REG_ADC_OPTION, &adc_before);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    status = BQ25731_Write16(ctx, BQ25731_REG_ADC_OPTION, adc_expected);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    HAL_Delay(20U);
+
+    status = BQ25731_Read16(ctx, BQ25731_REG_ADC_OPTION, &adc_after);
+    if (status != BQ25731_OK) {
+        return status;
+    }
+
+    ctx->adc_option_before = adc_before;
+    ctx->adc_option_after = adc_after;
+    ctx->adc_option_expected = adc_expected;
+    ctx->last_bq_register = BQ25731_REG_ADC_OPTION;
+    ctx->last_error_code = ((uint32_t)adc_before << 16) | adc_after;
+    ctx->last_bq_error_code = ctx->last_error_code;
+
+    if ((adc_after & BQ25731_ADCOPT_VERIFY_MASK) !=
+        (adc_expected & BQ25731_ADCOPT_VERIFY_MASK)) {
+        ctx->adc_enabled_tick_ms = 0U;
+        ctx->online = false;
+        return BQ25731_ERROR;
+    }
+
+    ctx->adc_enabled_tick_ms = HAL_GetTick();
+    ctx->online = true;
+    return BQ25731_OK;
+}
+
 
 bool BQ25731_IsAdcReady(const BQ25731_Device_t *ctx,
                         const BQ25731_Telemetry_t *telemetry)
@@ -806,11 +897,8 @@ bool BQ25731_IsAdcReady(const BQ25731_Device_t *ctx,
         return false;
     }
 
-    if ((telemetry->adc_option_raw & BQ25731_ADCOPT_ADC_CONV_MASK) == 0U) {
-        return false;
-    }
-
-    if ((telemetry->adc_option_raw & BQ25731_ADCOPT_ENABLE_MASK) != BQ25731_ADCOPT_DEFAULT_CHANNELS) {
+    if ((telemetry->adc_option_raw & BQ25731_ADCOPT_VERIFY_MASK) !=
+        (ctx->adc_option_expected & BQ25731_ADCOPT_VERIFY_MASK)) {
         return false;
     }
 
@@ -864,8 +952,6 @@ BQ25731_Status_t BQ25731_ConfigureForMonitoring(BQ25731_Device_t *ctx)
 {
     BQ25731_Status_t status;
     uint16_t option0;
-    uint16_t option1;
-    uint16_t option2;
     uint16_t option3;
 
     if (ctx == NULL) {
@@ -889,36 +975,7 @@ BQ25731_Status_t BQ25731_ConfigureForMonitoring(BQ25731_Device_t *ctx)
         return status;
     }
 
-    status = BQ25731_Read16(ctx, BQ25731_REG_CHARGE_OPTION1, &option1);
-    if (status != BQ25731_OK) {
-        return status;
-    }
-
-    option1 |= BQ25731_CHGOPT1_RSNS_RAC_MASK;
-    option1 |= BQ25731_CHGOPT1_RSNS_RSR_MASK;
-    option1 |= BQ25731_CHGOPT1_EN_FAST_5MOHM_MASK;
-
-    status = BQ25731_Write16Verified(ctx,
-                                     BQ25731_REG_CHARGE_OPTION1,
-                                     option1,
-                                     BQ25731_VERIFY_ALL_MASK);
-    if (status != BQ25731_OK) {
-        return status;
-    }
-
-    BQ25731_SaveSenseResistorConfig(ctx, option1);
-
-    status = BQ25731_Read16(ctx, BQ25731_REG_CHARGE_OPTION2, &option2);
-    if (status != BQ25731_OK) {
-        return status;
-    }
-
-    option2 &= (uint16_t)~BQ25731_CHGOPT2_EN_EXTILIM_MASK;
-
-    status = BQ25731_Write16Verified(ctx,
-                                     BQ25731_REG_CHARGE_OPTION2,
-                                     option2,
-                                     BQ25731_VERIFY_ALL_MASK);
+    status = BQ25731_DisableExternalInputCurrentLimit(ctx, NULL, NULL);
     if (status != BQ25731_OK) {
         return status;
     }
@@ -988,6 +1045,7 @@ BQ25731_Status_t BQ25731_PrepareForCharging(BQ25731_Device_t *ctx,
 
     option3 &= (uint16_t)~BQ25731_CHGOPT3_EN_HIZ_MASK;
     option3 &= (uint16_t)~BQ25731_CHGOPT3_EN_OTG_MASK;
+    option3 |= BQ25731_CHGOPT3_POR_BASE;
 
     return BQ25731_Write16Verified(ctx,
                                    BQ25731_REG_CHARGE_OPTION3,
@@ -1281,9 +1339,7 @@ BQ25731_Status_t BQ25731_ReadTelemetry(BQ25731_Device_t *ctx,
                                        BQ25731_Telemetry_t *telemetry)
 {
     BQ25731_Status_t status;
-    uint8_t regs_00_0f[0x10];
-    uint8_t regs_20_2f[0x10];
-    uint8_t regs_30_3b[0x0c];
+    uint8_t id_raw[2];
 
     if ((ctx == NULL) || (telemetry == NULL)) {
         return BQ25731_INVALID_ARG;
@@ -1294,65 +1350,163 @@ BQ25731_Status_t BQ25731_ReadTelemetry(BQ25731_Device_t *ctx,
     telemetry->address_7bit = ctx->device_address;
     telemetry->status = BQ25731_ERROR;
 
-    status = BQ25731_ReadBlock(ctx,
-                               BQ25731_REG_CHARGE_OPTION0,
-                               regs_00_0f,
-                               sizeof(regs_00_0f));
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_OPTION0,
+                                        &telemetry->charge_option0_raw);
     if (status != BQ25731_OK) {
         telemetry->status = status;
         return status;
     }
-    BQ25731_SaveRawRange(telemetry,
-                         BQ25731_REG_CHARGE_OPTION0,
-                         regs_00_0f,
-                         sizeof(regs_00_0f));
 
-    status = BQ25731_ReadBlock(ctx,
-                               BQ25731_REG_CHARGER_STATUS,
-                               regs_20_2f,
-                               sizeof(regs_20_2f));
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_CURRENT,
+                                        &telemetry->charge_current_raw);
     if (status != BQ25731_OK) {
         telemetry->status = status;
         return status;
     }
-    BQ25731_SaveRawRange(telemetry,
-                         BQ25731_REG_CHARGER_STATUS,
-                         regs_20_2f,
-                         sizeof(regs_20_2f));
 
-    status = BQ25731_ReadBlock(ctx,
-                               BQ25731_REG_CHARGE_OPTION1,
-                               regs_30_3b,
-                               sizeof(regs_30_3b));
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_VOLTAGE,
+                                        &telemetry->charge_voltage_raw);
     if (status != BQ25731_OK) {
         telemetry->status = status;
         return status;
     }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_OTG_VOLTAGE,
+                                        &telemetry->otg_voltage_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_OTG_CURRENT,
+                                        &telemetry->otg_current_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_IIN_HOST,
+                                        &telemetry->iin_host_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGER_STATUS,
+                                        &telemetry->charger_status_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_IIN_DPM,
+                                        &telemetry->iin_dpm_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_ADC_VBUS_PSYS,
+                                        &telemetry->adc_vbus_psys_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_ADC_IBAT,
+                                        &telemetry->adc_ibat_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_ADC_IIN_CMPIN,
+                                        &telemetry->adc_iin_cmpin_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_ADC_VSYS_VBAT,
+                                        &telemetry->adc_vsys_vbat_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_ReadBlock(ctx, BQ25731_REG_MANUFACTURE_ID, id_raw, sizeof(id_raw));
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
     BQ25731_SaveRawRange(telemetry,
-                         BQ25731_REG_CHARGE_OPTION1,
-                         regs_30_3b,
-                         sizeof(regs_30_3b));
+                         BQ25731_REG_MANUFACTURE_ID,
+                         id_raw,
+                         sizeof(id_raw));
 
-    telemetry->charge_option0_raw = BQ25731_RawLe16(regs_00_0f, 0x00U);
-    telemetry->charge_current_raw = BQ25731_RawLe16(regs_00_0f, 0x02U);
-    telemetry->charge_voltage_raw = BQ25731_RawLe16(regs_00_0f, 0x04U);
-    telemetry->otg_voltage_raw = BQ25731_RawLe16(regs_00_0f, 0x06U);
-    telemetry->otg_current_raw = BQ25731_RawLe16(regs_00_0f, 0x08U);
-    telemetry->iin_host_raw = BQ25731_RawLe16(regs_00_0f, 0x0EU);
+    telemetry->manufacturer_id = id_raw[0];
+    telemetry->device_id = id_raw[1];
 
-    telemetry->charger_status_raw = BQ25731_RawLe16(regs_20_2f, 0x00U);
-    telemetry->iin_dpm_raw = BQ25731_RawLe16(regs_20_2f, 0x04U);
-    telemetry->adc_vbus_psys_raw = BQ25731_RawLe16(regs_20_2f, 0x06U);
-    telemetry->adc_ibat_raw = BQ25731_RawLe16(regs_20_2f, 0x08U);
-    telemetry->adc_iin_cmpin_raw = BQ25731_RawLe16(regs_20_2f, 0x0AU);
-    telemetry->adc_vsys_vbat_raw = BQ25731_RawLe16(regs_20_2f, 0x0CU);
-    telemetry->manufacturer_id = regs_20_2f[0x0EU];
-    telemetry->device_id = regs_20_2f[0x0FU];
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_OPTION1,
+                                        &telemetry->charge_option1_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
 
-    telemetry->charge_option1_raw = BQ25731_RawLe16(regs_30_3b, 0x00U);
-    telemetry->charge_option2_raw = BQ25731_RawLe16(regs_30_3b, 0x02U);
-    telemetry->charge_option3_raw = BQ25731_RawLe16(regs_30_3b, 0x04U);
-    telemetry->adc_option_raw = BQ25731_RawLe16(regs_30_3b, 0x0AU);
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_OPTION2,
+                                        &telemetry->charge_option2_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_CHARGE_OPTION3,
+                                        &telemetry->charge_option3_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
+
+    status = BQ25731_Read16WithSnapshot(ctx,
+                                        telemetry,
+                                        BQ25731_REG_ADC_OPTION,
+                                        &telemetry->adc_option_raw);
+    if (status != BQ25731_OK) {
+        telemetry->status = status;
+        return status;
+    }
 
     telemetry->raw_adc_psys = (uint8_t)(telemetry->adc_vbus_psys_raw & 0xFFU);
     telemetry->raw_adc_vbus = (uint8_t)((telemetry->adc_vbus_psys_raw >> 8) & 0xFFU);
@@ -1375,8 +1529,10 @@ BQ25731_Status_t BQ25731_ReadTelemetry(BQ25731_Device_t *ctx,
 
     if (!telemetry->device_id_valid) {
         ctx->online = false;
-        ctx->last_error_code =
+        ctx->last_bq_register = BQ25731_REG_MANUFACTURE_ID;
+        ctx->last_bq_error_code =
             ((uint32_t)telemetry->manufacturer_id << 8) | telemetry->device_id;
+        ctx->last_error_code = ctx->last_bq_error_code;
         telemetry->status = BQ25731_DEVICE_ID_MISMATCH;
         return BQ25731_DEVICE_ID_MISMATCH;
     }
@@ -1437,24 +1593,6 @@ void BQ25731_PrintRawDebug(const BQ25731_Telemetry_t *telemetry)
            telemetry->raw_adc_vbat,
            (unsigned long)telemetry->vsys_mv,
            (unsigned long)telemetry->vbat_mv);
-
-    printf("BQ RAW sense rac=%s rsr=%s ext_ilim=%s hiz=%s inhibit=%s adc_ready=%s\r\n",
-           telemetry->rsns_rac_5mohm ? "5m" : "10m",
-           telemetry->rsns_rsr_5mohm ? "5m" : "10m",
-           telemetry->external_input_current_limit_enabled ? "YES" : "NO",
-           telemetry->hiz_enabled ? "YES" : "NO",
-           telemetry->charge_inhibited ? "YES" : "NO",
-           telemetry->adc_enabled ? "YES" : "NO");
-
-    printf("BQ RAW faults acov=%s batoc=%s acoc=%s sysovp=%s vsys_uvp=%s force_off=%s otg_ovp=%s otg_uvp=%s\r\n",
-           telemetry->fault_acov ? "YES" : "NO",
-           telemetry->fault_batoc ? "YES" : "NO",
-           telemetry->fault_acoc ? "YES" : "NO",
-           telemetry->fault_sysovp ? "YES" : "NO",
-           telemetry->fault_vsys_uvp ? "YES" : "NO",
-           telemetry->fault_force_converter_off ? "YES" : "NO",
-           telemetry->fault_otg_ovp ? "YES" : "NO",
-           telemetry->fault_otg_uvp ? "YES" : "NO");
 }
 
 const char *BQ25731_StatusToString(BQ25731_Status_t status)
@@ -1462,25 +1600,18 @@ const char *BQ25731_StatusToString(BQ25731_Status_t status)
     switch (status) {
         case BQ25731_OK:
             return "OK";
-
         case BQ25731_ERROR:
             return "ERROR";
-
         case BQ25731_I2C_ERROR:
             return "I2C_ERROR";
-
         case BQ25731_INVALID_ARG:
             return "INVALID_ARG";
-
         case BQ25731_NOT_READY:
             return "NOT_READY";
-
         case BQ25731_DEVICE_ID_MISMATCH:
             return "DEVICE_ID_MISMATCH";
-
         case BQ25731_TPS_ERROR:
             return "TPS_ERROR";
-
         default:
             return "UNKNOWN_STATUS";
     }
@@ -1496,9 +1627,14 @@ int BQ25731_GetDiagnosticText(const BQ25731_Device_t *ctx,
 
     return snprintf(buffer,
                     length,
-                    "BQ25731 I2C@0x%02X online=%s reg=0x%02X err=0x%08lX",
+                    "BQ25731 I2C@0x%02X online=%s reg=0x%02X bridge=%s task=0x%02X err=0x%08lX adc=%04X/%04X/%04X",
                     ctx->device_address,
                     ctx->online ? "YES" : "NO",
-                    ctx->last_register,
-                    (unsigned long)ctx->last_error_code);
+                    ctx->last_bq_register,
+                    TPS25751_StatusToString(ctx->last_bridge_status),
+                    ctx->last_task_return_code,
+                    (unsigned long)ctx->last_bq_error_code,
+                    ctx->adc_option_before,
+                    ctx->adc_option_after,
+                    ctx->adc_option_expected);
 }
