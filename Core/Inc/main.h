@@ -49,6 +49,8 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_HRTIM_MspPostInit(HRTIM_HandleTypeDef *hhrtim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -63,6 +65,24 @@ void Error_Handler(void);
 #define LED1_GPIO_Port GPIOC
 #define RESET_Pin GPIO_PIN_10
 #define RESET_GPIO_Port GPIOG
+#define ADC_VBAT_Pin GPIO_PIN_0
+#define ADC_VBAT_GPIO_Port GPIOA
+#define ADC_VOUT_Pin GPIO_PIN_2
+#define ADC_VOUT_GPIO_Port GPIOA
+#define ADC_IOUT_Pin GPIO_PIN_6
+#define ADC_IOUT_GPIO_Port GPIOA
+#define SD_Pin GPIO_PIN_7
+#define SD_GPIO_Port GPIOA
+#define FLT_Pin GPIO_PIN_4
+#define FLT_GPIO_Port GPIOC
+#define STBY_Pin GPIO_PIN_5
+#define STBY_GPIO_Port GPIOC
+#define BTN_ON_OFF_Pin GPIO_PIN_0
+#define BTN_ON_OFF_GPIO_Port GPIOB
+#define BTN_AUX1_Pin GPIO_PIN_1
+#define BTN_AUX1_GPIO_Port GPIOB
+#define BTN_AUX2_Pin GPIO_PIN_2
+#define BTN_AUX2_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
