@@ -5,6 +5,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -83,75 +84,7 @@ int main(void)
   MX_ADC2_Init();
   MX_HRTIM1_Init();
   /* USER CODE BEGIN 2 */
-/* USER CODE BEGIN 2 */
-
-GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-/* =========================
-   GPIO HRTIM
-   PA8  = TA1
-   PA9  = TA2
-   PB12 = TC1  <-- zmień, jeśli masz inny pin
-   PB13 = TC2  <-- zmień, jeśli masz inny pin
-   ========================= */
-
-__HAL_RCC_GPIOA_CLK_ENABLE();
-__HAL_RCC_GPIOB_CLK_ENABLE();
-
-/* Timer A: PA8/PA9 */
-GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-GPIO_InitStruct.Pull = GPIO_NOPULL;
-GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-GPIO_InitStruct.Alternate = GPIO_AF13_HRTIM1;
-HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-/* Timer C: PB12/PB13 */
-GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13;
-GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-GPIO_InitStruct.Pull = GPIO_NOPULL;
-GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-GPIO_InitStruct.Alternate = GPIO_AF13_HRTIM1;
-HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-/* Odblokowanie drivera */
-HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
-HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
-
-/* =========================
-   TIMER A PWM
-   Period = 5440
-   CMP1   = 2000
-   ========================= */
-
-hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].PERxR = 5440;
-hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR = 2000;
-
-/* =========================
-   TIMER C PWM
-   Period = 5440
-   CMP1   = 2000
-   ========================= */
-
-hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].PERxR = 5440;
-hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR = 2000;
-
-/* Update obu timerów */
-HAL_HRTIM_SoftwareUpdate(&hhrtim1, HRTIM_TIMERUPDATE_A | HRTIM_TIMERUPDATE_C);
-
-/* Start liczników Timer A i Timer C */
-if (HAL_HRTIM_WaveformCounterStart(&hhrtim1, HRTIM_TIMERID_TIMER_A | HRTIM_TIMERID_TIMER_C) != HAL_OK)
-{
-  Error_Handler();
-}
-
-/* Start wyjść TA1/TA2 oraz TC1/TC2 */
-if (HAL_HRTIM_WaveformOutputStart(&hhrtim1,
-                                  HRTIM_OUTPUT_TA1 | HRTIM_OUTPUT_TA2 |
-                                  HRTIM_OUTPUT_TC1 | HRTIM_OUTPUT_TC2) != HAL_OK)
-{
-  Error_Handler();
-}
+  App_Init(&hhrtim1, &hadc1, &hadc2, &huart2);
 
   /* USER CODE END 2 */
 
@@ -159,7 +92,7 @@ if (HAL_HRTIM_WaveformOutputStart(&hhrtim1,
   /* USER CODE BEGIN WHILE */
     while (1)
   {
-      
+      App_Run();
   }
     /* USER CODE END WHILE */
 
@@ -354,6 +287,7 @@ static void MX_HRTIM1_Init(void)
 
   /* USER CODE END HRTIM1_Init 0 */
 
+  HRTIM_ADCTriggerCfgTypeDef pADCTriggerCfg = {0};
   HRTIM_TimeBaseCfgTypeDef pTimeBaseCfg = {0};
   HRTIM_TimerCfgTypeDef pTimerCfg = {0};
   HRTIM_TimerCtlTypeDef pTimerCtl = {0};
@@ -376,6 +310,16 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   if (HAL_HRTIM_PollForDLLCalibration(&hhrtim1, 10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  pADCTriggerCfg.UpdateSource = HRTIM_ADCTRIGGERUPDATE_TIMER_A;
+  pADCTriggerCfg.Trigger = HRTIM_ADCTRIGGEREVENT13_TIMERA_CMP3;
+  if (HAL_HRTIM_ADCTriggerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, &pADCTriggerCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_HRTIM_ADCPostScalerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, 10) != HAL_OK)
   {
     Error_Handler();
   }
@@ -412,6 +356,7 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   pTimerCtl.UpDownMode = HRTIM_TIMERUPDOWNMODE_UP;
+  pTimerCtl.GreaterCMP3 = HRTIM_TIMERGTCMP3_EQUAL;
   pTimerCtl.GreaterCMP1 = HRTIM_TIMERGTCMP1_EQUAL;
   pTimerCtl.DualChannelDacEnable = HRTIM_TIMER_DCDE_DISABLED;
   if (HAL_HRTIM_WaveformTimerControl(&hhrtim1, HRTIM_TIMERINDEX_TIMER_A, &pTimerCtl) != HAL_OK)
@@ -441,12 +386,16 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_A, HRTIM_COMPAREUNIT_3, &pCompareCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
   pDeadTimeCfg.Prescaler = HRTIM_TIMDEADTIME_PRESCALERRATIO_MUL2;
-  pDeadTimeCfg.RisingValue = 5;
+  pDeadTimeCfg.RisingValue = 1;
   pDeadTimeCfg.RisingSign = HRTIM_TIMDEADTIME_RISINGSIGN_POSITIVE;
   pDeadTimeCfg.RisingLock = HRTIM_TIMDEADTIME_RISINGLOCK_WRITE;
   pDeadTimeCfg.RisingSignLock = HRTIM_TIMDEADTIME_RISINGSIGNLOCK_WRITE;
-  pDeadTimeCfg.FallingValue = 5;
+  pDeadTimeCfg.FallingValue = 1;
   pDeadTimeCfg.FallingSign = HRTIM_TIMDEADTIME_FALLINGSIGN_POSITIVE;
   pDeadTimeCfg.FallingLock = HRTIM_TIMDEADTIME_FALLINGLOCK_WRITE;
   pDeadTimeCfg.FallingSignLock = HRTIM_TIMDEADTIME_FALLINGSIGNLOCK_WRITE;
@@ -632,17 +581,23 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, LED2_Pin|LED1_Pin|STBY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LED2_Pin LED1_Pin FLT_Pin STBY_Pin */
-  GPIO_InitStruct.Pin = LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin;
+  /*Configure GPIO pins : LED2_Pin LED1_Pin STBY_Pin */
+  GPIO_InitStruct.Pin = LED2_Pin|LED1_Pin|STBY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : FLT_Pin */
+  GPIO_InitStruct.Pin = FLT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(FLT_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : RESET_Pin */
   GPIO_InitStruct.Pin = RESET_Pin;
