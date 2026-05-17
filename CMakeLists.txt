@@ -47,13 +47,18 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
+    Core/Src/gui.c
     Core/Src/measurements.c
     Core/Src/power_stage.c
+    Core/Src/psu_gui_api.c
+    Drivers/ssd1306/ssd1306.c
+    Drivers/ssd1306/ssd1306_fonts.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    Drivers/ssd1306
 )
 
 # Add project symbols (macros)
@@ -69,4 +74,27 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+)
+
+# Build-and-flash target for VS Code / STM32Cube extension without starting a debug session.
+set(STM32_PROGRAMMER_CLI
+    "/Users/kacpergawel/Library/Application Support/stm32cube/bundles/programmer/2.21.0/bin/STM32_Programmer_CLI"
+    CACHE FILEPATH "Path to STM32_Programmer_CLI")
+
+add_custom_target(flash
+    COMMAND "${STM32_PROGRAMMER_CLI}"
+            -c port=SWD mode=UR reset=HWrst
+            -w "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>"
+            -v
+            -rst
+    DEPENDS ${CMAKE_PROJECT_NAME}
+    USES_TERMINAL
+    COMMENT "Build and flash ${CMAKE_PROJECT_NAME}"
+)
+
+# VS Code can keep an old selected target in its internal state.
+# Keep this alias so a stale "erase" button still performs the intended flash.
+add_custom_target(erase
+    DEPENDS flash
+    COMMENT "Compatibility alias: erase -> flash"
 )

@@ -30,6 +30,17 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 void App_Run(void);
 void App_SetRequestedMode(App_Mode_t mode);
 App_Mode_t App_GetMode(void);
+App_Mode_t App_GetRequestedMode(void);
 uint32_t App_GetFaultFlags(void);
+void App_ClearFaults(void);
+void App_SetCvSetpoint(float setpoint_v);
+float App_GetCvSetpoint(void);
+float App_GetCvRampedSetpoint(void);
+void App_SetCurrentLimit(float current_limit_a);
+float App_GetCurrentLimit(void);
+float App_GetInputVoltage(void);
+float App_GetOutputVoltage(void);
+float App_GetOutputCurrent(void);
+uint32_t APP_GetPower(void);
 
 #endif

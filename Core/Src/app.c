@@ -13,12 +13,13 @@
 #define APP_DEBUG_PERIOD_MS                    200U
 #define APP_STARTUP_HOLD_MS                    2000U
 #define APP_LED_BLINK_MS                       250U
+#define APP_MAX_POWER_W                        100U
 
 /*
  * GLOWNE NASTAWY BRING-UP (CV + zabezpieczenia):
  * TODO: skalibrowac pod realny hardware i dzielniki pomiarowe.
  */
-#define VOUT_SETPOINT                          30.00f
+#define VOUT_SETPOINT                          10.00f
 #define VOUT_OVP_LIMIT                         35.00f
 #define IOUT_OCP_LIMIT                         4.00f
 #define VIN_UVLO_LIMIT                         8.00f
@@ -58,6 +59,7 @@ typedef struct {
     uint32_t mode_top_hits;
     uint32_t mode_bottom_hits;
     uint32_t latched_fault_flags;
+    float current_limit_a;
     bool enable_attempted;
     bool shutdown_latched;
     bool stage_enabled;
@@ -435,7 +437,7 @@ static void App_UpdateFaultFlags(bool adc_ok)
         if (app.meas.vout > VOUT_OVP_LIMIT) {
             flags |= FAULT_OVP;
         }
-        if (app.meas.iout > IOUT_OCP_LIMIT) {
+        if (app.meas.iout > app.current_limit_a) {
             flags |= FAULT_OCP;
         }
     }
@@ -502,8 +504,8 @@ static void App_ControlTask(void)
     }
 
     if (!app.stage_enabled) {
-        float startup_duty = App_EstimateStartupDuty(app.meas.vin, VOUT_SETPOINT);
-        PowerStage_Region_t startup_region = App_SelectRegion(app.meas.vin, VOUT_SETPOINT);
+        float startup_duty = App_EstimateStartupDuty(app.meas.vin, app.cv.target_setpoint);
+        PowerStage_Region_t startup_region = App_SelectRegion(app.meas.vin, app.cv.target_setpoint);
 
         if (app.enable_attempted) {
             App_EnterIdle();
@@ -664,9 +666,10 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                    CV_SOFTSTART_SLEW_V_PER_S);
     ControlCv_SetTarget(&app.cv, VOUT_SETPOINT);
 
-    app.requested_mode = MODE_CV;
+    app.requested_mode = MODE_IDLE;
     app.active_mode = MODE_IDLE;
     app.fault_flags = FAULT_NONE;
+    app.current_limit_a = IOUT_OCP_LIMIT;
     app.startup_tick_ms = HAL_GetTick();
     app.last_debug_tick_ms = app.startup_tick_ms;
     app.last_led_tick_ms = app.startup_tick_ms;
@@ -684,12 +687,12 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 
     set_x100 = App_ToFixed(VOUT_SETPOINT, 100);
     ovp_x100 = App_ToFixed(VOUT_OVP_LIMIT, 100);
-    ocp_x100 = App_ToFixed(IOUT_OCP_LIMIT, 100);
+    ocp_x100 = App_ToFixed(app.current_limit_a, 100);
     uvlo_x100 = App_ToFixed(VIN_UVLO_LIMIT, 100);
     duty_min_x100 = App_ToFixed(DUTY_MIN, 100);
     duty_max_x100 = App_ToFixed(DUTY_MAX, 100);
 
-    Debug_Printf("\r\n[APP] PSU bring-up start. Mode=IDLE, request=CV, ctrl=%lu Hz, enable_delay=%lu ms\r\n",
+    Debug_Printf("\r\n[APP] PSU bring-up start. Mode=IDLE, request=IDLE, ctrl=%lu Hz, enable_delay=%lu ms\r\n",
                  (unsigned long)APP_CTRL_FREQ_HZ,
                  (unsigned long)APP_STARTUP_HOLD_MS);
     Debug_Printf("[APP] RESET_FLAGS=0x%08lX\r\n", (unsigned long)reset_flags);
@@ -720,6 +723,18 @@ void App_Run(void)
 
 void App_SetRequestedMode(App_Mode_t mode)
 {
+    if (mode == MODE_IDLE) {
+        app.requested_mode = MODE_IDLE;
+        app.enable_attempted = false;
+        App_EnterIdle();
+        return;
+    }
+
+    if (app.requested_mode == MODE_IDLE) {
+        app.startup_tick_ms = HAL_GetTick();
+        app.enable_attempted = false;
+    }
+
     app.requested_mode = mode;
 }
 
@@ -728,7 +743,73 @@ App_Mode_t App_GetMode(void)
     return app.active_mode;
 }
 
+App_Mode_t App_GetRequestedMode(void)
+{
+    return app.requested_mode;
+}
+
 uint32_t App_GetFaultFlags(void)
 {
     return app.fault_flags;
+}
+
+void App_ClearFaults(void)
+{
+    app.latched_fault_flags = FAULT_NONE;
+    app.fault_flags = FAULT_NONE;
+    app.shutdown_latched = false;
+    app.enable_attempted = false;
+}
+
+void App_SetCvSetpoint(float setpoint_v)
+{
+    if (setpoint_v < 0.0f) {
+        setpoint_v = 0.0f;
+    }
+
+    ControlCv_SetTarget(&app.cv, setpoint_v);
+}
+
+float App_GetCvSetpoint(void)
+{
+    return app.cv.target_setpoint;
+}
+
+float App_GetCvRampedSetpoint(void)
+{
+    return ControlCv_GetRampedSetpoint(&app.cv);
+}
+
+void App_SetCurrentLimit(float current_limit_a)
+{
+    if (current_limit_a < 0.0f) {
+        current_limit_a = 0.0f;
+    }
+
+    app.current_limit_a = current_limit_a;
+}
+
+float App_GetCurrentLimit(void)
+{
+    return app.current_limit_a;
+}
+
+float App_GetInputVoltage(void)
+{
+    return app.meas.vin;
+}
+
+float App_GetOutputVoltage(void)
+{
+    return app.meas.vout;
+}
+
+float App_GetOutputCurrent(void)
+{
+    return app.meas.iout;
+}
+
+uint32_t APP_GetPower(void)
+{
+    return APP_MAX_POWER_W;
 }

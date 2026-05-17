@@ -83,8 +83,38 @@ void Error_Handler(void);
 #define BTN_AUX1_GPIO_Port GPIOB
 #define BTN_AUX2_Pin GPIO_PIN_2
 #define BTN_AUX2_GPIO_Port GPIOB
+#define I2C_OLED_SCL_Pin GPIO_PIN_8
+#define I2C_OLED_SCL_GPIO_Port GPIOC
+#define I2C_OLED_SDA_Pin GPIO_PIN_9
+#define I2C_OLED_SDA_GPIO_Port GPIOC
+#define ENC_BTN_Pin GPIO_PIN_5
+#define ENC_BTN_GPIO_Port GPIOB
+#define ENC_A_Pin GPIO_PIN_6
+#define ENC_A_GPIO_Port GPIOB
+#define ENC_B_Pin GPIO_PIN_7
+#define ENC_B_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+#ifndef BTN_ONOFF_Pin
+#define BTN_ONOFF_Pin BTN_ON_OFF_Pin
+#define BTN_ONOFF_GPIO_Port BTN_ON_OFF_GPIO_Port
+#endif
+
+#ifndef ENC_A_Pin
+#define ENC_A_Pin GPIO_PIN_6
+#define ENC_A_GPIO_Port GPIOB
+#endif
+
+#ifndef ENC_B_Pin
+#define ENC_B_Pin GPIO_PIN_7
+#define ENC_B_GPIO_Port GPIOB
+#endif
+
+#ifndef ENC_SW_Pin
+#define ENC_SW_Pin ENC_BTN_Pin
+#define ENC_SW_GPIO_Port ENC_BTN_GPIO_Port
+#define ENC_SW_EXTI_IRQn EXTI9_5_IRQn
+#endif
 
 /* USER CODE END Private defines */
 
