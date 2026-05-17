@@ -482,7 +482,7 @@ static void MX_I2C3_Init(void)
 
   /* USER CODE END I2C3_Init 1 */
   hi2c3.Instance = I2C3;
-  hi2c3.Init.Timing = 0x40B285C2;
+  hi2c3.Init.Timing = 0x40621236;
   hi2c3.Init.OwnAddress1 = 0;
   hi2c3.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c3.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -771,17 +771,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(SD_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BTN_ON_OFF_Pin BTN_AUX1_Pin BTN_AUX2_Pin */
-  GPIO_InitStruct.Pin = BTN_ON_OFF_Pin|BTN_AUX1_Pin|BTN_AUX2_Pin;
+  /*Configure GPIO pins : BTN_ON_OFF_Pin BTN_AUX1_Pin BTN_AUX2_Pin ENC_BTN_Pin */
+  GPIO_InitStruct.Pin = BTN_ON_OFF_Pin|BTN_AUX1_Pin|BTN_AUX2_Pin|ENC_BTN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : ENC_BTN_Pin */
-  GPIO_InitStruct.Pin = ENC_BTN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(ENC_BTN_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* USER CODE END MX_GPIO_Init_2 */
