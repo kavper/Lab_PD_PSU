@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DEBUG_UART_BUFFER_SIZE      256U
+#define DEBUG_UART_BUFFER_SIZE      1024U
 #define DEBUG_UART_TIMEOUT_MS       100U
 
 static UART_HandleTypeDef *debug_uart = NULL;
@@ -53,8 +53,16 @@ void Debug_Printf(const char *fmt, ...)
     }
 
     if ((uint32_t)length >= sizeof(buffer)) {
-        length = (int)(sizeof(buffer) - 1U);
+        length = (int)(sizeof(buffer) - 3U);
+        buffer[length++] = '\r';
+        buffer[length++] = '\n';
         buffer[length] = '\0';
+    } else if ((length < 1) || (buffer[length - 1] != '\n')) {
+        if ((uint32_t)length <= (sizeof(buffer) - 3U)) {
+            buffer[length++] = '\r';
+            buffer[length++] = '\n';
+            buffer[length] = '\0';
+        }
     }
 
     HAL_UART_Transmit(debug_uart,

@@ -20,9 +20,12 @@ typedef struct {
     uint32_t duty_a_10k;
     uint32_t duty_b_10k;
     uint32_t adc_trigger_10k;
+    uint32_t discharge_pulse_ticks;
+    uint32_t discharge_every_periods;
     uint8_t last_error;
     bool enabled;
     bool initialized;
+    bool discharge_active;
 } PowerStage_Context_t;
 
 static PowerStage_Context_t ps;
@@ -73,6 +76,34 @@ static float PowerStage_10kToFloat(uint32_t duty_10k)
 {
     duty_10k = PowerStage_Clamp10k(duty_10k);
     return (float)duty_10k / (float)POWER_STAGE_DUTY_SCALE;
+}
+
+static void PowerStage_DisableBurstMode(void)
+{
+    if ((ps.hhrtim == NULL) || (ps.hhrtim->Instance == NULL)) {
+        return;
+    }
+
+    (void)HAL_HRTIM_BurstModeCtl(ps.hhrtim, HRTIM_BURSTMODECTL_DISABLED);
+}
+
+static uint32_t PowerStage_NsToTicks(uint32_t pulse_ns)
+{
+    uint32_t period = PowerStage_PeriodTicks();
+    uint32_t ticks;
+
+    if (pulse_ns == 0U) {
+        pulse_ns = 1U;
+    }
+
+    ticks = (period * pulse_ns) / 1000U;
+    if (ticks == 0U) {
+        ticks = 1U;
+    } else if (ticks >= period) {
+        ticks = period - 1U;
+    }
+
+    return ticks;
 }
 
 static uint32_t PowerStage_DutyAToCmp(uint32_t duty_a_10k)
@@ -198,9 +229,12 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.duty_a_10k = 0U;
     ps.duty_b_10k = 0U;
     ps.adc_trigger_10k = POWER_STAGE_ADC_TRIGGER_10K;
+    ps.discharge_pulse_ticks = 0U;
+    ps.discharge_every_periods = 0U;
     ps.last_error = POWER_STAGE_ERR_NONE;
     ps.enabled = false;
     ps.initialized = true;
+    ps.discharge_active = false;
 
     /* FLT ma byc wejsciem open-drain z zewnetrznym pull-up. */
     gpio_cfg.Pin = FLT_Pin;
@@ -226,6 +260,7 @@ bool PowerStage_Enable(void)
     }
 
     ps.last_error = POWER_STAGE_ERR_NONE;
+    PowerStage_DisableBurstMode();
 
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
@@ -253,6 +288,7 @@ bool PowerStage_Enable(void)
     }
 
     ps.enabled = true;
+    ps.discharge_active = false;
     ps.last_error = POWER_STAGE_ERR_NONE;
     return true;
 }
@@ -265,11 +301,31 @@ void PowerStage_Disable(void)
     }
 
     (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
+    PowerStage_DisableBurstMode();
     PowerStage_SetDuty(0.0f, 0.0f);
 
     HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
     ps.enabled = false;
+    ps.discharge_active = false;
+}
+
+void PowerStage_SuspendOutputsKeepDriverOn(void)
+{
+    if ((!ps.initialized) || (ps.hhrtim == NULL)) {
+        ps.last_error = POWER_STAGE_ERR_NOT_INITIALIZED;
+        return;
+    }
+
+    (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
+    PowerStage_DisableBurstMode();
+    PowerStage_SetDuty(0.0f, 0.0f);
+
+    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
+    ps.enabled = false;
+    ps.discharge_active = false;
+    ps.last_error = POWER_STAGE_ERR_NONE;
 }
 
 void PowerStage_ForceSafeState(void)
@@ -285,6 +341,8 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
     if ((!ps.initialized) || (ps.hhrtim == NULL) || (ps.hhrtim->Instance == NULL)) {
         return;
     }
+
+    PowerStage_DisableBurstMode();
 
     duty_a_10k = PowerStage_Clamp10k(duty_a_10k);
     duty_b_10k = PowerStage_Clamp10k(duty_b_10k);
@@ -302,6 +360,130 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
     ps.duty_b_10k = duty_b_10k;
     ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
     ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
+    ps.discharge_active = false;
+}
+
+void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods)
+{
+    HRTIM_OutputCfgTypeDef out_cfg = {0};
+    HRTIM_BurstModeCfgTypeDef burst_cfg = {0};
+    uint32_t pulse_ticks;
+    uint32_t period;
+    uint32_t cmp_c;
+
+    if ((!ps.initialized) || (ps.hhrtim == NULL) || (ps.hhrtim->Instance == NULL)) {
+        ps.last_error = POWER_STAGE_ERR_NOT_INITIALIZED;
+        return;
+    }
+
+    if (every_periods == 0U) {
+        every_periods = 1U;
+    }
+
+    pulse_ticks = PowerStage_NsToTicks(pulse_ns);
+    if (ps.discharge_active &&
+        (ps.discharge_pulse_ticks == pulse_ticks) &&
+        (ps.discharge_every_periods == every_periods)) {
+        return;
+    }
+
+    period = PowerStage_PeriodTicks();
+    cmp_c = PowerStage_DutyBToCmp(0U);
+
+    (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
+    PowerStage_DisableBurstMode();
+
+    out_cfg.Polarity = HRTIM_OUTPUTPOLARITY_HIGH;
+    out_cfg.SetSource = HRTIM_OUTPUTSET_NONE;
+    out_cfg.ResetSource = HRTIM_OUTPUTRESET_NONE;
+    out_cfg.IdleMode = HRTIM_OUTPUTIDLEMODE_NONE;
+    out_cfg.IdleLevel = HRTIM_OUTPUTIDLELEVEL_INACTIVE;
+    out_cfg.FaultLevel = HRTIM_OUTPUTFAULTLEVEL_NONE;
+    out_cfg.ChopperModeEnable = HRTIM_OUTPUTCHOPPERMODE_DISABLED;
+    out_cfg.BurstModeEntryDelayed = HRTIM_OUTPUTBURSTMODEENTRY_REGULAR;
+
+    /* TA1 ma byc stale wylaczony, zeby nie pompowac energii z VIN. */
+    (void)HAL_HRTIM_WaveformOutputConfig(ps.hhrtim,
+                                         HRTIM_TIMERINDEX_TIMER_A,
+                                         HRTIM_OUTPUT_TA1,
+                                         &out_cfg);
+    (void)HAL_HRTIM_WaveformSetOutputLevel(ps.hhrtim,
+                                           HRTIM_TIMERINDEX_TIMER_A,
+                                           HRTIM_OUTPUT_TA1,
+                                           HRTIM_OUTPUTLEVEL_INACTIVE);
+
+    /* TA2 daje krotki impuls low-side A: realny czas w ns, nie mikro-duty. */
+    out_cfg.SetSource = HRTIM_OUTPUTSET_TIMPER;
+    out_cfg.ResetSource = HRTIM_OUTPUTRESET_TIMCMP1;
+    (void)HAL_HRTIM_WaveformOutputConfig(ps.hhrtim,
+                                         HRTIM_TIMERINDEX_TIMER_A,
+                                         HRTIM_OUTPUT_TA2,
+                                         &out_cfg);
+
+    /* Mostek C zostaje jak buck pass-through, z refresh bootstrapu. */
+    (void)HAL_HRTIM_WaveformOutputConfig(ps.hhrtim,
+                                         HRTIM_TIMERINDEX_TIMER_C,
+                                         HRTIM_OUTPUT_TC1,
+                                         &out_cfg);
+    out_cfg.SetSource = HRTIM_OUTPUTSET_TIMCMP1;
+    out_cfg.ResetSource = HRTIM_OUTPUTRESET_TIMPER;
+    (void)HAL_HRTIM_WaveformOutputConfig(ps.hhrtim,
+                                         HRTIM_TIMERINDEX_TIMER_C,
+                                         HRTIM_OUTPUT_TC2,
+                                         &out_cfg);
+
+    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR = pulse_ticks;
+    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR = cmp_c;
+    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].PERxR = period;
+    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].PERxR = period;
+
+    (void)HAL_HRTIM_SoftwareUpdate(ps.hhrtim,
+                                   HRTIM_TIMERUPDATE_A | HRTIM_TIMERUPDATE_C);
+
+    if (every_periods > 1U) {
+        burst_cfg.Mode = HRTIM_BURSTMODE_CONTINOUS;
+        burst_cfg.ClockSource = HRTIM_BURSTMODECLOCKSOURCE_TIMER_A;
+        burst_cfg.Prescaler = HRTIM_BURSTMODEPRESCALER_DIV1;
+        burst_cfg.PreloadEnable = HRIM_BURSTMODEPRELOAD_DISABLED;
+        burst_cfg.Trigger = HRTIM_BURSTMODETRIGGER_NONE;
+        burst_cfg.IdleDuration = every_periods - 1U;
+        burst_cfg.Period = every_periods;
+        (void)HAL_HRTIM_BurstModeConfig(ps.hhrtim, &burst_cfg);
+        (void)HAL_HRTIM_BurstModeCtl(ps.hhrtim, HRTIM_BURSTMODECTL_ENABLED);
+        (void)HAL_HRTIM_BurstModeSoftwareTrigger(ps.hhrtim);
+    }
+
+    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
+
+    if (PowerStage_IsFaultActive()) {
+        ps.last_error = POWER_STAGE_ERR_DRIVER_FAULT;
+        PowerStage_ForceSafeState();
+        return;
+    }
+
+    if (!PowerStage_StartCounters()) {
+        PowerStage_ForceSafeState();
+        return;
+    }
+
+    if (HAL_HRTIM_WaveformOutputStart(ps.hhrtim,
+                                      HRTIM_OUTPUT_TA2 | HRTIM_OUTPUT_TC1 | HRTIM_OUTPUT_TC2) != HAL_OK) {
+        ps.last_error = POWER_STAGE_ERR_OUTPUT_START;
+        PowerStage_ForceSafeState();
+        return;
+    }
+
+    ps.region = POWER_REGION_BUCK;
+    ps.duty_a_10k = 0U;
+    ps.duty_b_10k = 0U;
+    ps.duty_a = 0.0f;
+    ps.duty_c = 0.0f;
+    ps.discharge_pulse_ticks = pulse_ticks;
+    ps.discharge_every_periods = every_periods;
+    ps.enabled = true;
+    ps.discharge_active = true;
+    ps.last_error = POWER_STAGE_ERR_NONE;
 }
 
 void PowerStage_SetDuty(float duty_a, float duty_c)
@@ -375,6 +557,11 @@ bool PowerStage_IsFaultActive(void)
 bool PowerStage_IsEnabled(void)
 {
     return ps.enabled;
+}
+
+bool PowerStage_IsDischarging(void)
+{
+    return ps.discharge_active;
 }
 
 uint8_t PowerStage_GetLastError(void)

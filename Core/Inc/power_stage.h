@@ -22,7 +22,9 @@ typedef enum {
 void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim);
 bool PowerStage_Enable(void);
 void PowerStage_Disable(void);
+void PowerStage_SuspendOutputsKeepDriverOn(void);
 void PowerStage_ForceSafeState(void);
+void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods);
 /* duty_a = D_A buck high-side TA1/HIN, duty_c = D_B boost low-side TC2/LIN. */
 void PowerStage_SetDuty(float duty_a, float duty_c);
 void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k);
@@ -35,6 +37,7 @@ void PowerStage_SetRegion(PowerStage_Region_t region);
 PowerStage_Region_t PowerStage_GetRegion(void);
 bool PowerStage_IsFaultActive(void);
 bool PowerStage_IsEnabled(void);
+bool PowerStage_IsDischarging(void);
 uint8_t PowerStage_GetLastError(void);
 float PowerStage_GetDutyA(void);
 float PowerStage_GetDutyC(void);
