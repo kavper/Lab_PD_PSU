@@ -24,13 +24,13 @@
 #define IOUT_OCP_LIMIT                         4.00f
 #define VIN_UVLO_LIMIT                         8.00f
 
-#define DUTY_MIN                               0.05f
-#define DUTY_MAX                               0.80f
-#define DUTY_BUCK_MIN                          0.15f
-#define DUTY_BUCK_MAX                          0.80f
+#define DUTY_MIN                               0.001f
+#define DUTY_MAX                               0.999f
+#define DUTY_BUCK_MIN                          0.001f
+#define DUTY_BUCK_MAX                          0.95f
 #define DUTY_BOOST_MIN                         0.05f
-#define DUTY_BOOST_MAX                         0.80f
-#define DUTY_MIXED_B_MIN                       0.05f
+#define DUTY_BOOST_MAX                         0.95f
+#define DUTY_MIXED_B_MIN                       0.001f
 #define DUTY_MIXED_B_MAX                       0.45f
 #define CV_STARTUP_DUTY                        0.15f
 #define CV_STARTUP_DUTY_MAX                    0.30f
