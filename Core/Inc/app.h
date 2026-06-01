@@ -25,7 +25,8 @@ typedef enum {
 void App_Init(HRTIM_HandleTypeDef *hhrtim,
               ADC_HandleTypeDef *hadc1,
               ADC_HandleTypeDef *hadc2,
-              UART_HandleTypeDef *huart_debug);
+              UART_HandleTypeDef *huart_debug,
+              I2C_HandleTypeDef *hi2c_pd);
 
 void App_Run(void);
 void App_SetRequestedMode(App_Mode_t mode);

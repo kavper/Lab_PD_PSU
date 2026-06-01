@@ -96,17 +96,17 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-  App_Init(&hhrtim1, &hadc1, &hadc2, &huart2);
+  App_Init(&hhrtim1, &hadc1, &hadc2, &huart2, &hi2c4);
   GUI_Init();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-    while (1)
+  while (1)
   {
-      App_Run();
       GUI_Process();
+      App_Run();
   }
     /* USER CODE END WHILE */
 

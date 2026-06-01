@@ -10,8 +10,8 @@
 #include <stdio.h>
 
 #define GUI_FILTER_ALPHA 0.5f
-#define BTN_DEBOUNCE_MS 50u
-#define BTN_POLL_FALLBACK_LOCKOUT_MS 150u
+#define BTN_DEBOUNCE_MS 25u
+#define BTN_POLL_FALLBACK_LOCKOUT_MS 80u
 #define GUI_V_SNAP_TO_SET 0.01f
 #define GUI_V_DEADBAND 0.02f
 #define GUI_MODE_AUTOFOLLOW_MS 1200u
@@ -27,12 +27,15 @@ static float v_in = 0.0f;
 static float v_target_local = 0.0f;
 
 volatile uint8_t enc_click  = 0;
+volatile uint8_t onoff_click = 0;
 volatile uint8_t aux1_click = 0;
 volatile uint8_t aux2_click = 0;
 
 static volatile uint32_t enc_last_ms  = 0;
+static volatile uint32_t onoff_last_ms = 0;
 static volatile uint32_t aux1_last_ms = 0;
 static volatile uint32_t aux2_last_ms = 0;
+static GPIO_PinState onoff_pressed_state = GPIO_PIN_RESET;
 static uint32_t last_manual_focus_ms = 0;
 static uint8_t control_focus_pending = 0;
 static PSU_GuiControlMode_t last_control_mode = PSU_GUI_CONTROL_MODE_CV;
@@ -127,12 +130,20 @@ static void GUI_SyncEncoder(void) {
 static void GUI_InitInputGpio(void) {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 
   GPIO_InitStruct.Pin = ENC_BTN_Pin;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(ENC_BTN_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = BTN_ON_OFF_Pin;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BTN_ON_OFF_GPIO_Port, &GPIO_InitStruct);
+  onoff_pressed_state =
+      (HAL_GPIO_ReadPin(BTN_ON_OFF_GPIO_Port, BTN_ON_OFF_Pin) == GPIO_PIN_SET) ?
+      GPIO_PIN_RESET :
+      GPIO_PIN_SET;
 
   GPIO_InitStruct.Pull = GPIO_PULLUP;
 
@@ -141,6 +152,15 @@ static void GUI_InitInputGpio(void) {
 
   GPIO_InitStruct.Pin = BTN_AUX2_Pin;
   HAL_GPIO_Init(BTN_AUX2_GPIO_Port, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 }
 
 static void GUI_InitEncoderTimer(void) {
@@ -218,7 +238,8 @@ void BTN_enc_handle() {
 }
 
 void BTN_onoff_handle() {
-  /* ON/OFF is intentionally handled only by ENC_BTN. */
+  debounce_set_flag_when_pressed(&onoff_click, &onoff_last_ms,
+                                 BTN_ON_OFF_GPIO_Port, BTN_ON_OFF_Pin, onoff_pressed_state);
 }
 
 void BTN_aux1_handle() {
@@ -234,6 +255,8 @@ void BTN_aux2_handle() {
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   if (GPIO_Pin == ENC_BTN_Pin) {
     BTN_enc_handle();
+  } else if (GPIO_Pin == BTN_ON_OFF_Pin) {
+    BTN_onoff_handle();
   } else if (GPIO_Pin == BTN_AUX1_Pin) {
     BTN_aux1_handle();
   } else if (GPIO_Pin == BTN_AUX2_Pin) {
@@ -243,6 +266,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
 void BTN_reset() {
   enc_click = 0;
+  onoff_click = 0;
   aux1_click = 0;
   aux2_click = 0;
 }
@@ -617,12 +641,16 @@ void GUI_Process(void) {
   }
 
   static btn_t btn_enc;
+  static btn_t btn_onoff;
   static btn_t btn_aux1;
   static btn_t btn_aux2;
   static uint8_t inited = 0;
 
   if (!inited) {
     BTN_Init(&btn_enc, HAL_GPIO_ReadPin(ENC_BTN_GPIO_Port, ENC_BTN_Pin), 1u);
+    BTN_Init(&btn_onoff,
+             HAL_GPIO_ReadPin(BTN_ON_OFF_GPIO_Port, BTN_ON_OFF_Pin),
+             (onoff_pressed_state == GPIO_PIN_SET) ? 1u : 0u);
     BTN_Init(&btn_aux1, HAL_GPIO_ReadPin(BTN_AUX1_GPIO_Port, BTN_AUX1_Pin), 0u);
     BTN_Init(&btn_aux2, HAL_GPIO_ReadPin(BTN_AUX2_GPIO_Port, BTN_AUX2_Pin), 0u);
     inited = 1;
@@ -631,6 +659,10 @@ void GUI_Process(void) {
   if (BTN_Click(&btn_enc, HAL_GPIO_ReadPin(ENC_BTN_GPIO_Port, ENC_BTN_Pin),
                 &enc_last_ms)) {
     enc_click = 1;
+  }
+  if (BTN_Click(&btn_onoff, HAL_GPIO_ReadPin(BTN_ON_OFF_GPIO_Port, BTN_ON_OFF_Pin),
+                &onoff_last_ms)) {
+    onoff_click = 1;
   }
   if (BTN_Click(&btn_aux1, HAL_GPIO_ReadPin(BTN_AUX1_GPIO_Port, BTN_AUX1_Pin),
                 &aux1_last_ms)) {
@@ -665,12 +697,13 @@ void GUI_Process(void) {
 
   GUI_HandleEncoder();
 
-  /* ENC: toggle output + hardware pin */
-  if (enc_click) {
+  /* ON/OFF: akceptuj dedykowany przycisk i klik ENC. */
+  if (enc_click || onoff_click) {
     GUI_SetOutputEnabled(!output_enabled);
     psu_output_enabled = (PSU_IsRunning() != 0U);
     output_enabled = psu_output_enabled;
     enc_click = 0;
+    onoff_click = 0;
   }
 
   /* Edycja pozycji cyfry */

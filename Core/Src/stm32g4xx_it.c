@@ -261,6 +261,62 @@ void ADC1_2_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles EXTI line0 interrupt.
+  */
+void EXTI0_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI0_IRQn 0 */
+
+  /* USER CODE END EXTI0_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(BTN_ON_OFF_Pin);
+  /* USER CODE BEGIN EXTI0_IRQn 1 */
+
+  /* USER CODE END EXTI0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line1 interrupt.
+  */
+void EXTI1_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI1_IRQn 0 */
+
+  /* USER CODE END EXTI1_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(BTN_AUX1_Pin);
+  /* USER CODE BEGIN EXTI1_IRQn 1 */
+
+  /* USER CODE END EXTI1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line2 interrupt.
+  */
+void EXTI2_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI2_IRQn 0 */
+
+  /* USER CODE END EXTI2_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(BTN_AUX2_Pin);
+  /* USER CODE BEGIN EXTI2_IRQn 1 */
+
+  /* USER CODE END EXTI2_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line[9:5] interrupt.
+  */
+void EXTI9_5_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI9_5_IRQn 0 */
+
+  /* USER CODE END EXTI9_5_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(ENC_BTN_Pin);
+  /* USER CODE BEGIN EXTI9_5_IRQn 1 */
+
+  /* USER CODE END EXTI9_5_IRQn 1 */
+}
+
+/**
   * @brief This function handles I2C3 event interrupt / I2C3 wake-up interrupt through EXTI line 27.
   */
 void I2C3_EV_IRQHandler(void)

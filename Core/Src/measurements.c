@@ -17,7 +17,9 @@
  */
 #define MEAS_VIN_DIVIDER_RATIO           11.0f
 #define MEAS_VOUT_DIVIDER_RATIO          11.0f
-#define MEAS_IOUT_A_PER_V                1.0f
+/* Kalibracja 1-punktowa: wskazanie 3.06 A -> rzeczywiste 5.58 A. */
+#define MEAS_IOUT_CAL_GAIN               1.823529f
+#define MEAS_IOUT_A_PER_V                (1.0f * MEAS_IOUT_CAL_GAIN)
 #define MEAS_IOUT_OFFSET_A               0.0f
 
 typedef struct {

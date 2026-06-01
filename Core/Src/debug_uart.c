@@ -5,7 +5,7 @@
 #include <stdarg.h>
 
 #define DEBUG_UART_BUFFER_SIZE      1024U
-#define DEBUG_UART_TIMEOUT_MS       100U
+#define DEBUG_UART_TIMEOUT_MS       2U
 
 static UART_HandleTypeDef *debug_uart = NULL;
 
