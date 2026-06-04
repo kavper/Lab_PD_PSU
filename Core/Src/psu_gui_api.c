@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define PSU_GUI_VOLTAGE_MAX_V 30.0f
-#define PSU_GUI_CURRENT_MAX_A 8.0f
+#define PSU_GUI_CURRENT_MAX_A 5.8f
 
 static float clampf(float value, float min_value, float max_value)
 {

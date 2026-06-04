@@ -21,6 +21,7 @@
 #define VOUT_SETPOINT_DEFAULT_V              10.00f
 #define VOUT_OVP_LIMIT                       35.00f
 #define IOUT_OCP_LIMIT                       4.00f
+#define IOUT_LIMIT_MAX                       5.80f
 #define VIN_UVLO_LIMIT                       7.00f
 
 #define DUTY_MIN_ABS                         0.000f
@@ -333,6 +334,11 @@ static bool App_IsDriverAwake(void)
            (HAL_GPIO_ReadPin(SD_GPIO_Port, SD_Pin) == GPIO_PIN_SET);
 }
 
+static bool App_IsZeroSetpointTarget(void)
+{
+    return app.cv_user_setpoint <= OFF_RAMP_DONE_V;
+}
+
 static void App_GetDutyLimitsForRegion(PowerStage_Region_t region,
                                        float *min_duty,
                                        float *max_duty)
@@ -348,6 +354,10 @@ static void App_GetDutyLimitsForRegion(PowerStage_Region_t region,
         max_value = App_Clamp(app.buck_boost_duty_c_cap,
                               BUCK_BOOST_DUTY_C_MIN,
                               BUCK_BOOST_DUTY_C_MAX);
+    }
+
+    if ((region == POWER_REGION_BUCK) && App_IsZeroSetpointTarget()) {
+        min_value = 0.0f;
     }
 
     if (min_duty != NULL) {
@@ -402,6 +412,10 @@ static void App_UpdateBuckBoostSoftstart(PowerStage_Region_t region)
 
 static bool App_IsLowSetpointTarget(void)
 {
+    if (App_IsZeroSetpointTarget()) {
+        return false;
+    }
+
     return app.cv_user_setpoint < CV_LOW_SETPOINT_START_THRESHOLD_V;
 }
 
@@ -421,6 +435,10 @@ static bool App_IsLowSetpointStartupActive(void)
 
 static bool App_ShouldForceLowSetpointBuck(float ramped_setpoint_v)
 {
+    if (App_IsZeroSetpointTarget()) {
+        return true;
+    }
+
     if (!App_IsLowSetpointTarget()) {
         return false;
     }
@@ -491,20 +509,25 @@ static void App_EstimateDutyForRegion(PowerStage_Region_t region,
 {
     float local_a = 0.0f;
     float local_c = 0.0f;
+    float effective_setpoint_v;
     float denom;
 
     vin = App_MaxFloat(vin, 0.10f);
-    setpoint_v = App_MaxFloat(setpoint_v, 0.01f);
+    effective_setpoint_v = App_MaxFloat(setpoint_v, 0.01f);
 
     switch (region) {
         case POWER_REGION_BUCK:
-            local_a = App_Clamp(setpoint_v / vin, DUTY_BUCK_MIN, DUTY_BUCK_MAX);
+            if (setpoint_v <= OFF_RAMP_DONE_V) {
+                local_a = 0.0f;
+            } else {
+                local_a = App_Clamp(effective_setpoint_v / vin, DUTY_BUCK_MIN, DUTY_BUCK_MAX);
+            }
             local_c = 0.0f;
             break;
 
         case POWER_REGION_BOOST:
             local_a = 1.0f;
-            denom = App_MaxFloat(setpoint_v, vin + 0.10f);
+            denom = App_MaxFloat(effective_setpoint_v, vin + 0.10f);
             local_c = 1.0f - (vin / denom);
             local_c = App_Clamp(local_c,
                                 DUTY_BOOST_MIN,
@@ -514,7 +537,7 @@ static void App_EstimateDutyForRegion(PowerStage_Region_t region,
         case POWER_REGION_BUCK_BOOST:
         default:
             local_a = BUCK_BOOST_DUTY_A_BASE;
-            denom = App_MaxFloat(setpoint_v, (BUCK_BOOST_DUTY_A_BASE * vin) + 0.10f);
+            denom = App_MaxFloat(effective_setpoint_v, (BUCK_BOOST_DUTY_A_BASE * vin) + 0.10f);
             local_c = 1.0f - ((BUCK_BOOST_DUTY_A_BASE * vin) / denom);
             local_c = App_Clamp(local_c, BUCK_BOOST_DUTY_C_MIN, BUCK_BOOST_DUTY_C_MAX);
             break;
@@ -1061,6 +1084,7 @@ static bool App_EnableStageSlow(void)
     float duty_ff_a;
     float duty_ff_c;
     float control_ff;
+    bool zero_setpoint;
     bool low_setpoint_start;
     uint32_t now_ms;
 
@@ -1068,8 +1092,11 @@ static bool App_EnableStageSlow(void)
         return true;
     }
 
+    zero_setpoint = App_IsZeroSetpointTarget();
     setpoint_v = ControlCv_GetRampedSetpoint(&app.cv);
-    if (setpoint_v < 0.10f) {
+    if (zero_setpoint) {
+        setpoint_v = 0.0f;
+    } else if (setpoint_v < 0.10f) {
         setpoint_v = App_MaxFloat(app.cv_user_setpoint * 0.2f, 0.10f);
     }
 
@@ -1079,12 +1106,19 @@ static bool App_EnableStageSlow(void)
         app.low_setpoint_start_active = false;
     }
 
-    region = low_setpoint_start ?
+    region = zero_setpoint ?
+             POWER_REGION_BUCK :
+             low_setpoint_start ?
              POWER_REGION_BUCK :
              App_SelectRegionBase(app.meas.vin, setpoint_v);
     App_EstimateDutyForRegion(region, app.meas.vin, setpoint_v, &duty_ff_a, &duty_ff_c);
 
-    if (low_setpoint_start) {
+    if (zero_setpoint) {
+        duty_ff_a = 0.0f;
+        duty_ff_c = 0.0f;
+        app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
+        app.low_setpoint_start_active = false;
+    } else if (low_setpoint_start) {
         duty_ff_a = CV_LOW_SETPOINT_START_DUTY;
         duty_ff_c = 0.0f;
         app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
@@ -1608,6 +1642,9 @@ void App_SetCurrentLimit(float current_limit_a)
 {
     if (current_limit_a < 0.0f) {
         current_limit_a = 0.0f;
+    }
+    if (current_limit_a > IOUT_LIMIT_MAX) {
+        current_limit_a = IOUT_LIMIT_MAX;
     }
 
     app.current_limit_a = current_limit_a;

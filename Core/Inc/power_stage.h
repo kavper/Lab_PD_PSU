@@ -37,7 +37,7 @@
 
 /* Bootstrap refresh frequency is set here; this is not PWM switching frequency. */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ
-#define POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ    10000U
+#define POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ    50000U
 #endif
 
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_PULSE_NS

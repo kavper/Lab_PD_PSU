@@ -465,8 +465,8 @@ static void GUI_HandleEncoder(void) {
 
     if (i_target_local < 0.0f)
       i_target_local = 0.0f;
-    if (i_target_local > 8.0f)
-      i_target_local = 8.0f;
+    if (i_target_local > 5.8f)
+      i_target_local = 5.8f;
 
     PSU_GuiSetTargetCurrent(i_target_local);
   }
