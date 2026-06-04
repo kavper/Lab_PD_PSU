@@ -13,14 +13,14 @@
 /*
  * TODO: ustaw zgodnie z realnym torem pomiarowym.
  * Tymczasowe 11:1 daje sensowny zakres bring-up ok. 0..36 V z ADC 3.3 V.
- * Po pomiarze rezystorow dzielnikow trzeba wpisac tutaj realne wartosci.
+ * VOUT skorygowane po wydluzeniu sample time: FW 30.00 V -> miernik 28.85 V.
  */
 #define MEAS_VIN_DIVIDER_RATIO           11.0f
-#define MEAS_VOUT_DIVIDER_RATIO          11.0f
-/* Kalibracja 1-punktowa: wskazanie 3.06 A -> rzeczywiste 5.58 A. */
-#define MEAS_IOUT_CAL_GAIN               1.823529f
+#define MEAS_VOUT_DIVIDER_RATIO          10.807530f
+/* Kalibracja 2-punktowa: 0.008 A -> 0.000 A, 2.764 A -> 2.741 A. */
+#define MEAS_IOUT_CAL_GAIN               1.813604f
 #define MEAS_IOUT_A_PER_V                (1.0f * MEAS_IOUT_CAL_GAIN)
-#define MEAS_IOUT_OFFSET_A               0.0f
+#define MEAS_IOUT_OFFSET_A               -0.007956f
 
 typedef struct {
     ADC_HandleTypeDef *hadc1;

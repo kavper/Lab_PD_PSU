@@ -1214,12 +1214,12 @@ static void App_DebugTask(void)
     float pi_integrator;
     uint8_t sat_hi_debug;
     uint8_t sat_lo_debug;
-    int32_t vin_x100;
-    int32_t vout_x100;
-    int32_t iout_x100;
-    int32_t set_x100;
-    int32_t rset_x100;
-    int32_t err_x100;
+    int32_t vin_x1000;
+    int32_t vout_x1000;
+    int32_t iout_x1000;
+    int32_t set_x1000;
+    int32_t rset_x1000;
+    int32_t err_x1000;
     int32_t duty_a_hw_x10;
     int32_t duty_c_hw_x10;
     int32_t cmd_c_x10;
@@ -1280,12 +1280,12 @@ static void App_DebugTask(void)
     }
 
     cv_error_v = ramped_setpoint_v - vout;
-    vin_x100 = App_ToFixed(vin, 100);
-    vout_x100 = App_ToFixed(vout, 100);
-    iout_x100 = App_ToFixed(iout, 100);
-    set_x100 = App_ToFixed(setpoint_v, 100);
-    rset_x100 = App_ToFixed(ramped_setpoint_v, 100);
-    err_x100 = App_ToFixed(cv_error_v, 100);
+    vin_x1000 = App_ToFixed(vin, 1000);
+    vout_x1000 = App_ToFixed(vout, 1000);
+    iout_x1000 = App_ToFixed(iout, 1000);
+    set_x1000 = App_ToFixed(setpoint_v, 1000);
+    rset_x1000 = App_ToFixed(ramped_setpoint_v, 1000);
+    err_x1000 = App_ToFixed(cv_error_v, 1000);
     duty_a_hw_x10 = App_ToFixed((float)duty_a_10k / 100.0f, 10);
     duty_c_hw_x10 = App_ToFixed((float)duty_c_phys_10k / 100.0f, 10);
     cmd_c_x10 = App_ToFixed(duty_cmd_c * 100.0f, 10);
@@ -1296,41 +1296,41 @@ static void App_DebugTask(void)
 
     App_FaultText(fault_flags, fault_text, sizeof(fault_text));
 
-    Debug_Printf("[APP] mode=%s req=%s region=%s vin=%s%ld.%02ldV vout=%s%ld.%02ldV set=%s%ld.%02ldV rset=%s%ld.%02ldV err=%s%ld.%02ldV iout=%s%ld.%02ldA fault=%s en=%u",
+    Debug_Printf("[APP] mode=%s req=%s region=%s vin=%s%ld.%03ldV vout=%s%ld.%03ldV set=%s%ld.%03ldV rset=%s%ld.%03ldV err=%s%ld.%03ldV iout=%s%ld.%03ldA fault=%s en=%u",
                  App_ModeText(active_mode),
                  App_ModeText(requested_mode),
                  App_RegionText(active_region),
-                 (vin_x100 < 0) ? "-" : "",
-                 App_IntPart(vin_x100, 100),
-                 App_FracPart(vin_x100, 100),
-                 (vout_x100 < 0) ? "-" : "",
-                 App_IntPart(vout_x100, 100),
-                 App_FracPart(vout_x100, 100),
-                 (set_x100 < 0) ? "-" : "",
-                 App_IntPart(set_x100, 100),
-                 App_FracPart(set_x100, 100),
-                 (rset_x100 < 0) ? "-" : "",
-                 App_IntPart(rset_x100, 100),
-                 App_FracPart(rset_x100, 100),
-                 (err_x100 < 0) ? "-" : "",
-                 App_IntPart(err_x100, 100),
-                 App_FracPart(err_x100, 100),
-                 (iout_x100 < 0) ? "-" : "",
-                 App_IntPart(iout_x100, 100),
-                 App_FracPart(iout_x100, 100),
+                 (vin_x1000 < 0) ? "-" : "",
+                 App_IntPart(vin_x1000, 1000),
+                 App_FracPart(vin_x1000, 1000),
+                 (vout_x1000 < 0) ? "-" : "",
+                 App_IntPart(vout_x1000, 1000),
+                 App_FracPart(vout_x1000, 1000),
+                 (set_x1000 < 0) ? "-" : "",
+                 App_IntPart(set_x1000, 1000),
+                 App_FracPart(set_x1000, 1000),
+                 (rset_x1000 < 0) ? "-" : "",
+                 App_IntPart(rset_x1000, 1000),
+                 App_FracPart(rset_x1000, 1000),
+                 (err_x1000 < 0) ? "-" : "",
+                 App_IntPart(err_x1000, 1000),
+                 App_FracPart(err_x1000, 1000),
+                 (iout_x1000 < 0) ? "-" : "",
+                 App_IntPart(iout_x1000, 1000),
+                 App_FracPart(iout_x1000, 1000),
                  fault_text,
                  stage_enabled ? 1U : 0U);
 
-    Debug_Printf("[CTRL] dt=%luus max=%luus ov=%lu adc_age=%luus SAT_HI=%u SAT_LO=%u CV_ERR=%s%ld.%02ldV PI_INT=%s%ld.%03ld pwm_updates=%lu",
+    Debug_Printf("[CTRL] dt=%luus max=%luus ov=%lu adc_age=%luus SAT_HI=%u SAT_LO=%u CV_ERR=%s%ld.%03ldV PI_INT=%s%ld.%03ld pwm_updates=%lu",
                  (unsigned long)ctrl_dt_us,
                  (unsigned long)ctrl_dt_max_us,
                  (unsigned long)ctrl_overrun,
                  (unsigned long)adc_age_us,
                  (unsigned int)sat_hi_debug,
                  (unsigned int)sat_lo_debug,
-                 (err_x100 < 0) ? "-" : "",
-                 App_IntPart(err_x100, 100),
-                 App_FracPart(err_x100, 100),
+                 (err_x1000 < 0) ? "-" : "",
+                 App_IntPart(err_x1000, 1000),
+                 App_FracPart(err_x1000, 1000),
                  (pi_x1000 < 0) ? "-" : "",
                  App_IntPart(pi_x1000, 1000),
                  App_FracPart(pi_x1000, 1000),
