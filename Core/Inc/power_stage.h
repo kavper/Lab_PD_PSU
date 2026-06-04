@@ -29,6 +29,7 @@
 #define POWER_STAGE_HRTIM_TICK_HZ                  1000000000U
 #endif
 
+/* PWM switching frequency is set here. */
 #ifndef POWER_STAGE_FSW_HZ
 #define POWER_STAGE_FSW_HZ                         183824U
 #endif

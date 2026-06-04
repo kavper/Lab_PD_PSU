@@ -11,7 +11,8 @@
 
 #define APP_CTRL_FREQ_HZ                     4000U
 #define APP_CTRL_PERIOD_US                   (1000000U / APP_CTRL_FREQ_HZ)
-#define APP_DEBUG_PERIOD_MS                  500U
+/* UART debug print period is set here. */
+#define APP_DEBUG_PERIOD_MS                  200U
 #define APP_DEBUG_VERBOSE                    0U
 #define APP_STARTUP_HOLD_MS                  2000U
 #define APP_LED_BLINK_MS                     250U
@@ -28,9 +29,13 @@
 #define DUTY_BUCK_MIN                        0.020f
 #define DUTY_BUCK_MAX                        0.950f
 
-#define BUCK_BOOST_DUTY_A_BASE               0.80f
-#define BUCK_BOOST_DUTY_C_MIN                0.03f
-#define BUCK_BOOST_DUTY_C_MAX                0.65f
+/* BUCK_BOOST mixed-mode duty limits are set here. */
+#define DUTY_MIXED_A                         0.80f
+#define DUTY_MIXED_B_MIN                     0.03f
+#define DUTY_MIXED_B_MAX                     0.80f
+#define BUCK_BOOST_DUTY_A_BASE               DUTY_MIXED_A
+#define BUCK_BOOST_DUTY_C_MIN                DUTY_MIXED_B_MIN
+#define BUCK_BOOST_DUTY_C_MAX                DUTY_MIXED_B_MAX
 #define BUCK_BOOST_DUTY_C_INIT_MIN           0.05f
 #define BUCK_BOOST_DUTY_C_INIT_MAX           0.30f
 #define BUCK_BOOST_DUTY_C_SLEW_PER_CTRL      0.0008f
@@ -44,7 +49,7 @@
 #define DUTY_STARTUP_MAX                     0.100f
 
 #ifndef BOOST_DUTY_MAX_BRINGUP
-#define BOOST_DUTY_MAX_BRINGUP               0.65f
+#define BOOST_DUTY_MAX_BRINGUP               DUTY_MIXED_B_MAX
 #endif
 
 #ifndef POWER_STAGE_TEST_BOOST_PWM_FIXED
@@ -59,6 +64,11 @@
 #define CV_KI                                18.0f
 #define CV_SLEW_UP_V_PER_S                   25.0f
 #define CV_SLEW_DOWN_V_PER_S                 25.0f
+
+/* Low-setpoint startup threshold and first-duty step are set here. */
+#define CV_LOW_SETPOINT_START_THRESHOLD_V    2.0f
+#define CV_LOW_SETPOINT_START_DUTY           0.02f
+#define CV_LOW_SETPOINT_START_TIME_MS        10U
 
 #define CV_2P2Z_B0                           0.0500f
 #define CV_2P2Z_B1                           0.0000f
@@ -114,6 +124,7 @@ typedef struct {
     uint32_t off_ramp_done_ticks;
     uint32_t region_hold_until_ms;
     uint32_t buck_boost_softstart_tick_ms;
+    uint32_t low_setpoint_start_until_ms;
 
     PowerStage_Region_t region_candidate;
     uint32_t region_candidate_count;
@@ -142,6 +153,7 @@ typedef struct {
     bool fast_loop_running;
     bool timebase_glitch;
     bool led_blink_state;
+    bool low_setpoint_start_active;
 } App_Context_t;
 
 static App_Context_t app;
@@ -216,14 +228,6 @@ static const char *App_ModeText(App_Mode_t mode)
         default:
             return "IDLE";
     }
-}
-
-static const char *App_RunStateText(bool stage_enabled, uint32_t faults)
-{
-    if (faults != FAULT_NONE) {
-        return "FAULT";
-    }
-    return stage_enabled ? "RUN" : "IDLE";
 }
 
 static const char *App_RegionText(PowerStage_Region_t region)
@@ -396,8 +400,42 @@ static void App_UpdateBuckBoostSoftstart(PowerStage_Region_t region)
                                           BUCK_BOOST_DUTY_C_MAX);
 }
 
+static bool App_IsLowSetpointTarget(void)
+{
+    return app.cv_user_setpoint < CV_LOW_SETPOINT_START_THRESHOLD_V;
+}
+
+static bool App_IsLowSetpointStartupActive(void)
+{
+    if (!app.low_setpoint_start_active) {
+        return false;
+    }
+
+    if ((int32_t)(HAL_GetTick() - app.low_setpoint_start_until_ms) >= 0) {
+        app.low_setpoint_start_active = false;
+        return false;
+    }
+
+    return true;
+}
+
+static bool App_ShouldForceLowSetpointBuck(float ramped_setpoint_v)
+{
+    if (!App_IsLowSetpointTarget()) {
+        return false;
+    }
+
+    return App_IsLowSetpointStartupActive() ||
+           (!app.stage_enabled) ||
+           (ramped_setpoint_v < CV_LOW_SETPOINT_START_THRESHOLD_V);
+}
+
 static PowerStage_Region_t App_SelectRegionBase(float vin, float setpoint_v)
 {
+    if (setpoint_v < CV_LOW_SETPOINT_START_THRESHOLD_V) {
+        return POWER_REGION_BUCK;
+    }
+
     if (setpoint_v < (vin - REGION_BUCK_ENTER_MARGIN_V)) {
         return POWER_REGION_BUCK;
     }
@@ -587,8 +625,23 @@ static PowerStage_Region_t App_UpdateRegionHysteresis(float vin,
                                                        float setpoint_v)
 {
     PowerStage_Region_t current = PowerStage_GetRegion();
-    PowerStage_Region_t candidate = App_SelectRegionWithHysteresis(current, vin, setpoint_v);
+    PowerStage_Region_t candidate;
     uint32_t now_ms = HAL_GetTick();
+
+    if (App_ShouldForceLowSetpointBuck(setpoint_v)) {
+        candidate = POWER_REGION_BUCK;
+    } else {
+        candidate = App_SelectRegionWithHysteresis(current, vin, setpoint_v);
+    }
+
+    if ((candidate == POWER_REGION_BUCK) &&
+        App_ShouldForceLowSetpointBuck(setpoint_v) &&
+        (current != POWER_REGION_BUCK)) {
+        App_OnRegionChange(current, POWER_REGION_BUCK, vin, setpoint_v);
+        app.region_candidate = POWER_REGION_BUCK;
+        app.region_candidate_count = 0U;
+        return POWER_REGION_BUCK;
+    }
 
     if (current == POWER_REGION_BOOST) {
         App_OnRegionChange(current, POWER_REGION_BUCK_BOOST, vin, setpoint_v);
@@ -738,6 +791,7 @@ static void App_FaultShutdown(uint32_t reason)
     app.stage_enabled = false;
     app.pending_disable_request = false;
     app.active_mode = MODE_IDLE;
+    app.low_setpoint_start_active = false;
 
     ControlCv_SetTarget(&app.cv, 0.0f);
     app.cv.ramped_setpoint = 0.0f;
@@ -823,6 +877,8 @@ static void App_RunCvLoopFast(float dt_s)
                                   &ff_duty_c);
         (void)ff_duty_a;
 
+        app.duty_ff_a = ff_duty_a;
+        app.duty_ff_c = ff_duty_c;
         ctrl_cmd = ff_duty_c + ((ctrl_cmd - ff_duty_c) * ctrl_gain);
     }
 
@@ -1005,6 +1061,8 @@ static bool App_EnableStageSlow(void)
     float duty_ff_a;
     float duty_ff_c;
     float control_ff;
+    bool low_setpoint_start;
+    uint32_t now_ms;
 
     if (app.stage_enabled) {
         return true;
@@ -1015,10 +1073,24 @@ static bool App_EnableStageSlow(void)
         setpoint_v = App_MaxFloat(app.cv_user_setpoint * 0.2f, 0.10f);
     }
 
-    region = App_SelectRegionBase(app.meas.vin, setpoint_v);
+    low_setpoint_start = App_IsLowSetpointTarget();
+    now_ms = HAL_GetTick();
+    if (!low_setpoint_start) {
+        app.low_setpoint_start_active = false;
+    }
+
+    region = low_setpoint_start ?
+             POWER_REGION_BUCK :
+             App_SelectRegionBase(app.meas.vin, setpoint_v);
     App_EstimateDutyForRegion(region, app.meas.vin, setpoint_v, &duty_ff_a, &duty_ff_c);
 
-    if (region == POWER_REGION_BUCK) {
+    if (low_setpoint_start) {
+        duty_ff_a = CV_LOW_SETPOINT_START_DUTY;
+        duty_ff_c = 0.0f;
+        app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
+        app.low_setpoint_start_active = true;
+        app.low_setpoint_start_until_ms = now_ms + CV_LOW_SETPOINT_START_TIME_MS;
+    } else if (region == POWER_REGION_BUCK) {
         duty_ff_a = App_Clamp(duty_ff_a, DUTY_STARTUP_MIN, DUTY_STARTUP_MAX);
         app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
     } else if (region == POWER_REGION_BUCK_BOOST) {
@@ -1041,7 +1113,7 @@ static bool App_EnableStageSlow(void)
     app.region_last_confirm_count = 0U;
     app.region_old_debug = region;
     app.region_new_debug = region;
-    app.region_hold_until_ms = HAL_GetTick() + REGION_MIN_DWELL_MS;
+    app.region_hold_until_ms = now_ms + REGION_MIN_DWELL_MS;
 
     App_SetCvLimitsForRegion(region);
     ControlCv_Reset(&app.cv, control_ff);
@@ -1073,6 +1145,7 @@ static void App_DisableStageSlow(void)
     app.pending_disable_request = false;
     app.off_ramp_done_ticks = 0U;
     app.active_mode = MODE_IDLE;
+    app.low_setpoint_start_active = false;
 
     ControlCv_Reset(&app.cv, DUTY_STARTUP_MIN);
 #if (CONTROL_CV_USE_2P2Z != 0)
@@ -1112,23 +1185,48 @@ static void App_DebugTask(void)
     uint32_t now_ms = HAL_GetTick();
     uint32_t primask;
     uint32_t fault_flags;
+    uint32_t ctrl_overrun;
+    uint32_t ctrl_dt_us;
+    uint32_t ctrl_dt_max_us;
+    uint32_t adc_age_us;
+    uint32_t pwm_update_cnt;
+    uint32_t hrtim_period;
+    uint32_t cmp_a;
+    uint32_t cmp_c;
+    uint32_t duty_a_10k;
+    uint32_t duty_c_phys_10k;
+    uint32_t uart_buf_used;
+    uint32_t uart_dropped;
     bool stage_enabled;
     App_Mode_t active_mode;
+    App_Mode_t requested_mode;
     PowerStage_Region_t active_region;
     float vin;
     float vout;
     float iout;
     float setpoint_v;
     float ramped_setpoint_v;
-    float duty_cmd_a;
     float duty_cmd_c;
+    float duty_ff_c;
+    float duty_c_limit_min;
+    float duty_c_limit_max;
+    float cv_error_v;
+    float pi_integrator;
+    uint8_t sat_hi_debug;
+    uint8_t sat_lo_debug;
     int32_t vin_x100;
     int32_t vout_x100;
     int32_t iout_x100;
     int32_t set_x100;
     int32_t rset_x100;
-    int32_t cmd_a_x10;
+    int32_t err_x100;
+    int32_t duty_a_hw_x10;
+    int32_t duty_c_hw_x10;
     int32_t cmd_c_x10;
+    int32_t ff_c_x10;
+    int32_t duty_c_limit_min_x10;
+    int32_t duty_c_limit_max_x10;
+    int32_t pi_x1000;
     char fault_text[48];
 
     if ((uint32_t)(now_ms - app.last_debug_tick_ms) < APP_DEBUG_PERIOD_MS) {
@@ -1145,32 +1243,62 @@ static void App_DebugTask(void)
     iout = app.meas.iout;
     setpoint_v = app.cv_user_setpoint;
     ramped_setpoint_v = ControlCv_GetRampedSetpoint(&app.cv);
-    duty_cmd_a = app.duty_cmd_a;
     duty_cmd_c = app.duty_cmd_c;
+    duty_ff_c = app.duty_ff_c;
+    pi_integrator = app.cv.integrator;
     active_mode = app.active_mode;
+    requested_mode = app.requested_mode;
     stage_enabled = app.stage_enabled;
     fault_flags = app.fault_flags;
+    ctrl_overrun = app.ctrl_overrun;
+    ctrl_dt_us = app.ctrl_dt_us;
+    ctrl_dt_max_us = app.ctrl_dt_max_us;
+    adc_age_us = app.adc_age_us;
+    pwm_update_cnt = app.pwm_update_cnt;
+    sat_hi_debug = app.sat_hi_debug;
+    sat_lo_debug = app.sat_lo_debug;
 
     active_region = PowerStage_GetRegion();
+    hrtim_period = PowerStage_GetPeriodTicks();
+    cmp_a = PowerStage_GetCmpA();
+    cmp_c = PowerStage_GetCmpC();
+    duty_a_10k = PowerStage_GetDutyA10k();
+    duty_c_phys_10k = PowerStage_GetDutyCPhys10k();
 
     if (primask == 0U) {
         __enable_irq();
     }
 
+    if ((active_region == POWER_REGION_BUCK_BOOST) ||
+        (active_region == POWER_REGION_BOOST)) {
+        App_GetDutyLimitsForRegion(active_region,
+                                   &duty_c_limit_min,
+                                   &duty_c_limit_max);
+    } else {
+        duty_c_limit_min = 0.0f;
+        duty_c_limit_max = 0.0f;
+    }
+
+    cv_error_v = ramped_setpoint_v - vout;
     vin_x100 = App_ToFixed(vin, 100);
     vout_x100 = App_ToFixed(vout, 100);
     iout_x100 = App_ToFixed(iout, 100);
     set_x100 = App_ToFixed(setpoint_v, 100);
     rset_x100 = App_ToFixed(ramped_setpoint_v, 100);
-    cmd_a_x10 = App_ToFixed(duty_cmd_a * 100.0f, 10);
+    err_x100 = App_ToFixed(cv_error_v, 100);
+    duty_a_hw_x10 = App_ToFixed((float)duty_a_10k / 100.0f, 10);
+    duty_c_hw_x10 = App_ToFixed((float)duty_c_phys_10k / 100.0f, 10);
     cmd_c_x10 = App_ToFixed(duty_cmd_c * 100.0f, 10);
+    ff_c_x10 = App_ToFixed(duty_ff_c * 100.0f, 10);
+    duty_c_limit_min_x10 = App_ToFixed(duty_c_limit_min * 100.0f, 10);
+    duty_c_limit_max_x10 = App_ToFixed(duty_c_limit_max * 100.0f, 10);
+    pi_x1000 = App_ToFixed(pi_integrator, 1000);
 
     App_FaultText(fault_flags, fault_text, sizeof(fault_text));
 
-    Debug_Printf("PSU %s | %s | %s | Vin=%s%ld.%02ldV Vout=%s%ld.%02ldV Iout=%s%ld.%02ldA | "
-                 "Set=%s%ld.%02ldV Ramp=%s%ld.%02ldV | DA=%s%ld.%01ld%% DC=%s%ld.%01ld%% | Fault=%s",
+    Debug_Printf("[APP] mode=%s req=%s region=%s vin=%s%ld.%02ldV vout=%s%ld.%02ldV set=%s%ld.%02ldV rset=%s%ld.%02ldV err=%s%ld.%02ldV iout=%s%ld.%02ldA fault=%s en=%u",
                  App_ModeText(active_mode),
-                 App_RunStateText(stage_enabled, fault_flags),
+                 App_ModeText(requested_mode),
                  App_RegionText(active_region),
                  (vin_x100 < 0) ? "-" : "",
                  App_IntPart(vin_x100, 100),
@@ -1178,123 +1306,64 @@ static void App_DebugTask(void)
                  (vout_x100 < 0) ? "-" : "",
                  App_IntPart(vout_x100, 100),
                  App_FracPart(vout_x100, 100),
-                 (iout_x100 < 0) ? "-" : "",
-                 App_IntPart(iout_x100, 100),
-                 App_FracPart(iout_x100, 100),
                  (set_x100 < 0) ? "-" : "",
                  App_IntPart(set_x100, 100),
                  App_FracPart(set_x100, 100),
                  (rset_x100 < 0) ? "-" : "",
                  App_IntPart(rset_x100, 100),
                  App_FracPart(rset_x100, 100),
-                 (cmd_a_x10 < 0) ? "-" : "",
-                 App_IntPart(cmd_a_x10, 10),
-                 App_FracPart(cmd_a_x10, 10),
+                 (err_x100 < 0) ? "-" : "",
+                 App_IntPart(err_x100, 100),
+                 App_FracPart(err_x100, 100),
+                 (iout_x100 < 0) ? "-" : "",
+                 App_IntPart(iout_x100, 100),
+                 App_FracPart(iout_x100, 100),
+                 fault_text,
+                 stage_enabled ? 1U : 0U);
+
+    Debug_Printf("[CTRL] dt=%luus max=%luus ov=%lu adc_age=%luus SAT_HI=%u SAT_LO=%u CV_ERR=%s%ld.%02ldV PI_INT=%s%ld.%03ld pwm_updates=%lu",
+                 (unsigned long)ctrl_dt_us,
+                 (unsigned long)ctrl_dt_max_us,
+                 (unsigned long)ctrl_overrun,
+                 (unsigned long)adc_age_us,
+                 (unsigned int)sat_hi_debug,
+                 (unsigned int)sat_lo_debug,
+                 (err_x100 < 0) ? "-" : "",
+                 App_IntPart(err_x100, 100),
+                 App_FracPart(err_x100, 100),
+                 (pi_x1000 < 0) ? "-" : "",
+                 App_IntPart(pi_x1000, 1000),
+                 App_FracPart(pi_x1000, 1000),
+                 (unsigned long)pwm_update_cnt);
+
+    Debug_Printf("[PWM] fsw=%luHz per=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
+                 (unsigned long)POWER_STAGE_FSW_HZ,
+                 (unsigned long)hrtim_period,
+                 App_IntPart(duty_a_hw_x10, 10),
+                 App_FracPart(duty_a_hw_x10, 10),
+                 App_IntPart(duty_c_hw_x10, 10),
+                 App_FracPart(duty_c_hw_x10, 10),
+                 (unsigned long)cmp_a,
+                 (unsigned long)cmp_c,
                  (cmd_c_x10 < 0) ? "-" : "",
                  App_IntPart(cmd_c_x10, 10),
                  App_FracPart(cmd_c_x10, 10),
-                 fault_text);
+                 (ff_c_x10 < 0) ? "-" : "",
+                 App_IntPart(ff_c_x10, 10),
+                 App_FracPart(ff_c_x10, 10),
+                 (duty_c_limit_min_x10 < 0) ? "-" : "",
+                 App_IntPart(duty_c_limit_min_x10, 10),
+                 App_FracPart(duty_c_limit_min_x10, 10),
+                 (duty_c_limit_max_x10 < 0) ? "-" : "",
+                 App_IntPart(duty_c_limit_max_x10, 10),
+                 App_FracPart(duty_c_limit_max_x10, 10));
 
-    if (active_region == POWER_REGION_BOOST) {
-        Debug_Printf("WARN: BOOST region should not be used in normal CV mode");
-    }
-
-#if (APP_DEBUG_VERBOSE != 0U)
-    {
-        uint32_t ctrl_overrun;
-        uint32_t ctrl_dt_us;
-        uint32_t ctrl_dt_max_us;
-        uint32_t adc_age_us;
-        uint32_t pwm_update_cnt;
-        uint32_t region_trans_cnt;
-        uint32_t region_candidate_count;
-        uint32_t hrtim_period;
-        uint32_t cmp_a;
-        uint32_t cmp_c;
-        uint32_t duty_a_10k;
-        uint32_t duty_c_cmd_10k;
-        uint32_t duty_c_phys_10k;
-        float buck_boost_duty_c_cap;
-        uint8_t timebase_glitch;
-        uint8_t sat_hi_debug;
-        uint8_t sat_lo_debug;
-        uint8_t region_trans_debug;
-        uint32_t timebase_glitch_cnt;
-        PowerStage_Region_t region_old_debug;
-        PowerStage_Region_t region_new_debug;
-        int32_t duty_a_hw_x10;
-        int32_t duty_c_cmd_hw_x10;
-        int32_t duty_c_hw_x10;
-        int32_t duty_c_cap_x10;
-
-        primask = __get_PRIMASK();
-        __disable_irq();
-        ctrl_overrun = app.ctrl_overrun;
-        ctrl_dt_us = app.ctrl_dt_us;
-        ctrl_dt_max_us = app.ctrl_dt_max_us;
-        adc_age_us = app.adc_age_us;
-        pwm_update_cnt = app.pwm_update_cnt;
-        region_trans_cnt = app.region_trans_cnt;
-        region_candidate_count = app.region_candidate_count;
-        timebase_glitch = app.timebase_glitch ? 1U : 0U;
-        timebase_glitch_cnt = app.timebase_glitch_cnt;
-        sat_hi_debug = app.sat_hi_debug;
-        sat_lo_debug = app.sat_lo_debug;
-        region_trans_debug = app.region_trans_debug;
-        region_old_debug = app.region_old_debug;
-        region_new_debug = app.region_new_debug;
-        hrtim_period = PowerStage_GetPeriodTicks();
-        cmp_a = PowerStage_GetCmpA();
-        cmp_c = PowerStage_GetCmpC();
-        duty_a_10k = PowerStage_GetDutyA10k();
-        duty_c_cmd_10k = PowerStage_GetDutyCCmd10k();
-        duty_c_phys_10k = PowerStage_GetDutyCPhys10k();
-        buck_boost_duty_c_cap = app.buck_boost_duty_c_cap;
-        if (primask == 0U) {
-            __enable_irq();
-        }
-
-        duty_a_hw_x10 = App_ToFixed((float)duty_a_10k / 100.0f, 10);
-        duty_c_cmd_hw_x10 = App_ToFixed((float)duty_c_cmd_10k / 100.0f, 10);
-        duty_c_hw_x10 = App_ToFixed((float)duty_c_phys_10k / 100.0f, 10);
-        duty_c_cap_x10 = App_ToFixed(buck_boost_duty_c_cap * 100.0f, 10);
-
-        Debug_Printf("TIMING: dt=%luus max=%luus overrun=%lu adc_age=%luus pwm_updates=%lu",
-                     (unsigned long)ctrl_dt_us,
-                     (unsigned long)ctrl_dt_max_us,
-                     (unsigned long)ctrl_overrun,
-                     (unsigned long)adc_age_us,
-                     (unsigned long)pwm_update_cnt);
-
-        Debug_Printf("PWM: period=%lu cmpA=%lu cmpC=%lu dutyA=%ld.%01ld%% dutyC_cmd=%ld.%01ld%% dutyC=%ld.%01ld%% dutyC_cap=%ld.%01ld%%",
-                     (unsigned long)hrtim_period,
-                     (unsigned long)cmp_a,
-                     (unsigned long)cmp_c,
-                     App_IntPart(duty_a_hw_x10, 10),
-                     App_FracPart(duty_a_hw_x10, 10),
-                     App_IntPart(duty_c_cmd_hw_x10, 10),
-                     App_FracPart(duty_c_cmd_hw_x10, 10),
-                     App_IntPart(duty_c_hw_x10, 10),
-                     App_FracPart(duty_c_hw_x10, 10),
-                     App_IntPart(duty_c_cap_x10, 10),
-                     App_FracPart(duty_c_cap_x10, 10));
-
-        Debug_Printf("REGION: old=%s new=%s transitions=%lu pending=%lu changed=%u sat_hi=%u sat_lo=%u",
-                     App_RegionText(region_old_debug),
-                     App_RegionText(region_new_debug),
-                     (unsigned long)region_trans_cnt,
-                     (unsigned long)region_candidate_count,
-                     (unsigned int)region_trans_debug,
-                     (unsigned int)sat_hi_debug,
-                     (unsigned int)sat_lo_debug);
-
-        if (timebase_glitch != 0U) {
-            Debug_Printf("WARN: TIMEBASE glitch count=%lu",
-                         (unsigned long)timebase_glitch_cnt);
-        }
-    }
-#endif
-    Debug_Printf("-----");
+    uart_buf_used = Debug_GetTxBufferUsed();
+    uart_dropped = Debug_GetDroppedCount();
+    Debug_Printf("[UART] UART_BUSY=%u UART_BUF_USED=%lu UART_DROPPED=%lu",
+                 Debug_IsTxBusy() ? 1U : 0U,
+                 (unsigned long)uart_buf_used,
+                 (unsigned long)uart_dropped);
 }
 
 static void App_ControlTimerInit(void)
