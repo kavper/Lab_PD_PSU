@@ -40,8 +40,8 @@
 #define BUCK_BOOST_DUTY_C_INIT_MAX           0.30f
 #define BUCK_BOOST_DUTY_C_SLEW_PER_CTRL      0.0008f
 #define BUCK_BOOST_DUTY_C_SOFTSTART_MS       700U
-#define BUCK_BOOST_CTRL_GAIN_NEAR_VIN         0.55f
-#define BUCK_BOOST_CTRL_GAIN_ABOVE_VIN        0.80f
+#define BUCK_BOOST_CTRL_GAIN_NEAR_VIN        0.55f
+#define BUCK_BOOST_CTRL_GAIN_ABOVE_VIN       0.80f
 
 #define DUTY_BOOST_MIN                       0.050f
 #define DUTY_BOOST_MAX                       0.900f
@@ -1190,7 +1190,11 @@ static void App_DebugTask(void)
     uint32_t ctrl_dt_max_us;
     uint32_t adc_age_us;
     uint32_t pwm_update_cnt;
+    uint32_t fsw_hz;
     uint32_t hrtim_period;
+    uint32_t refresh_hz;
+    uint32_t refresh_period;
+    uint32_t refresh_pulse;
     uint32_t cmp_a;
     uint32_t cmp_c;
     uint32_t duty_a_10k;
@@ -1198,6 +1202,7 @@ static void App_DebugTask(void)
     uint32_t uart_buf_used;
     uint32_t uart_dropped;
     bool stage_enabled;
+    bool refresh_active;
     App_Mode_t active_mode;
     App_Mode_t requested_mode;
     PowerStage_Region_t active_region;
@@ -1259,7 +1264,12 @@ static void App_DebugTask(void)
     sat_lo_debug = app.sat_lo_debug;
 
     active_region = PowerStage_GetRegion();
+    fsw_hz = PowerStage_GetFswHz();
     hrtim_period = PowerStage_GetPeriodTicks();
+    refresh_active = PowerStage_IsBootstrapRefreshActive();
+    refresh_hz = PowerStage_GetBootstrapRefreshHz();
+    refresh_period = PowerStage_GetBootstrapRefreshPeriodTicks();
+    refresh_pulse = PowerStage_GetBootstrapRefreshPulseTicks();
     cmp_a = PowerStage_GetCmpA();
     cmp_c = PowerStage_GetCmpC();
     duty_a_10k = PowerStage_GetDutyA10k();
@@ -1336,9 +1346,13 @@ static void App_DebugTask(void)
                  App_FracPart(pi_x1000, 1000),
                  (unsigned long)pwm_update_cnt);
 
-    Debug_Printf("[PWM] fsw=%luHz per=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
-                 (unsigned long)POWER_STAGE_FSW_HZ,
+    Debug_Printf("[PWM] fsw=%luHz per=%lu refresh=%luHz ref_act=%u ref_per=%lu ref_pulse=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
+                 (unsigned long)fsw_hz,
                  (unsigned long)hrtim_period,
+                 (unsigned long)refresh_hz,
+                 refresh_active ? 1U : 0U,
+                 (unsigned long)refresh_period,
+                 (unsigned long)refresh_pulse,
                  App_IntPart(duty_a_hw_x10, 10),
                  App_FracPart(duty_a_hw_x10, 10),
                  App_IntPart(duty_c_hw_x10, 10),

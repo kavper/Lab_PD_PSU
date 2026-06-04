@@ -4,7 +4,6 @@
 
 #define POWER_STAGE_DUTY_SCALE               10000U
 #define POWER_STAGE_MASTER_REFRESH_PRESCALER HRTIM_PRESCALERRATIO_DIV4
-#define POWER_STAGE_MASTER_REFRESH_DIV       128U
 #define POWER_STAGE_MASTER_MAX_PERIOD        0xFFFFU
 #define POWER_STAGE_ENABLE_DELAY_MS          1U
 #define POWER_STAGE_PERIOD_MIN_TICKS         64U
@@ -65,16 +64,89 @@ static float PowerStage_Clamp(float value, float min_value, float max_value)
     return value;
 }
 
+static uint64_t PowerStage_HrtimBaseHz(void)
+{
+    uint64_t hrtim_hz = HAL_RCC_GetPCLK2Freq();
+
+    if (hrtim_hz == 0ULL) {
+        hrtim_hz = SystemCoreClock;
+    }
+    if (hrtim_hz == 0ULL) {
+        hrtim_hz = 1ULL;
+    }
+
+    return hrtim_hz;
+}
+
+static uint64_t PowerStage_HrtimTickHzForPrescaler(uint32_t prescaler_ratio)
+{
+    uint64_t hrtim_hz = PowerStage_HrtimBaseHz();
+
+    switch (prescaler_ratio) {
+        case HRTIM_PRESCALERRATIO_MUL32:
+            return hrtim_hz * 32ULL;
+        case HRTIM_PRESCALERRATIO_MUL16:
+            return hrtim_hz * 16ULL;
+        case HRTIM_PRESCALERRATIO_MUL8:
+            return hrtim_hz * 8ULL;
+        case HRTIM_PRESCALERRATIO_MUL4:
+            return hrtim_hz * 4ULL;
+        case HRTIM_PRESCALERRATIO_MUL2:
+            return hrtim_hz * 2ULL;
+        case HRTIM_PRESCALERRATIO_DIV2:
+            return hrtim_hz / 2ULL;
+        case HRTIM_PRESCALERRATIO_DIV4:
+            return hrtim_hz / 4ULL;
+        case HRTIM_PRESCALERRATIO_DIV1:
+        default:
+            return hrtim_hz;
+    }
+}
+
+static uint64_t PowerStage_HrtimTickHz(void)
+{
+    return PowerStage_HrtimTickHzForPrescaler(POWER_STAGE_HRTIM_PRESCALER_RATIO);
+}
+
+static uint32_t PowerStage_NsToTicksAtHz(uint32_t ns, uint64_t tick_hz)
+{
+    uint64_t ticks;
+    uint64_t whole;
+    uint64_t frac;
+
+    if (ns == 0U) {
+        ns = 1U;
+    }
+    if (tick_hz == 0ULL) {
+        tick_hz = 1ULL;
+    }
+
+    whole = (tick_hz / 1000000000ULL) * (uint64_t)ns;
+    frac = (((tick_hz % 1000000000ULL) * (uint64_t)ns) + 500000000ULL) /
+           1000000000ULL;
+    ticks = whole + frac;
+
+    if (ticks == 0ULL) {
+        ticks = 1ULL;
+    } else if (ticks > UINT32_MAX) {
+        ticks = UINT32_MAX;
+    }
+
+    return (uint32_t)ticks;
+}
+
 static uint32_t PowerStage_PeriodFromFsw(void)
 {
     uint64_t ticks;
+    uint64_t hrtim_tick_hz;
     uint32_t fsw_hz = POWER_STAGE_FSW_HZ;
 
     if (fsw_hz == 0U) {
         fsw_hz = 1U;
     }
 
-    ticks = ((uint64_t)POWER_STAGE_HRTIM_TICK_HZ + ((uint64_t)fsw_hz / 2ULL)) /
+    hrtim_tick_hz = PowerStage_HrtimTickHz();
+    ticks = (hrtim_tick_hz + ((uint64_t)fsw_hz / 2ULL)) /
             (uint64_t)fsw_hz;
 
     if (ticks < (uint64_t)POWER_STAGE_PERIOD_MIN_TICKS) {
@@ -102,6 +174,25 @@ static uint32_t PowerStage_PeriodTicksRaw(void)
     return period;
 }
 
+uint32_t PowerStage_GetConfiguredPeriodTicks(void)
+{
+    return PowerStage_PeriodFromFsw();
+}
+
+uint32_t PowerStage_GetFswHz(void)
+{
+    uint32_t period = PowerStage_PeriodTicksRaw();
+    uint64_t hrtim_tick_hz;
+
+    if (period == 0U) {
+        return 0U;
+    }
+
+    hrtim_tick_hz = PowerStage_HrtimTickHz();
+    return (uint32_t)((hrtim_tick_hz + ((uint64_t)period / 2ULL)) /
+                      (uint64_t)period);
+}
+
 uint32_t PowerStage_GetPeriodTicks(void)
 {
     return PowerStage_PeriodTicksRaw();
@@ -120,6 +211,33 @@ static uint32_t PowerStage_FloatTo10k(float duty)
 {
     duty = PowerStage_Clamp(duty, 0.0f, 1.0f);
     return (uint32_t)((duty * (float)POWER_STAGE_DUTY_SCALE) + 0.5f);
+}
+
+static uint32_t PowerStage_Duty10kToSafeCmp(uint32_t duty_10k)
+{
+    uint32_t period = PowerStage_PeriodFromFsw();
+    uint32_t cmp;
+
+    duty_10k = PowerStage_Clamp10k(duty_10k);
+    cmp = (duty_10k * period) / POWER_STAGE_DUTY_SCALE;
+
+    if (cmp == 0U) {
+        cmp = 1U;
+    } else if (cmp >= period) {
+        cmp = period - 1U;
+    }
+
+    return cmp;
+}
+
+uint32_t PowerStage_GetConfiguredAdcTriggerTicks(void)
+{
+    return PowerStage_Duty10kToSafeCmp(POWER_STAGE_ADC_TRIGGER_10K);
+}
+
+uint32_t PowerStage_GetSafeInitCompareTicks(void)
+{
+    return PowerStage_Duty10kToSafeCmp(1U);
 }
 
 static float PowerStage_10kToFloat(uint32_t duty_10k)
@@ -175,15 +293,7 @@ static uint32_t PowerStage_NsToTicks(uint32_t pulse_ns)
     uint32_t period = PowerStage_PeriodTicksRaw();
     uint32_t ticks;
 
-    if (pulse_ns == 0U) {
-        pulse_ns = 1U;
-    }
-
-    /*
-     * Przeliczenie bazuje na 1 MHz DPWM (okres ~1000 ns przy PER=1000).
-     * Dla innego PER dalej daje bezpieczny, krotki impuls refresh.
-     */
-    ticks = (period * pulse_ns) / 1000U;
+    ticks = PowerStage_NsToTicksAtHz(pulse_ns, PowerStage_HrtimTickHz());
     if (ticks == 0U) {
         ticks = 1U;
     } else if (ticks >= period) {
@@ -302,8 +412,8 @@ static void PowerStage_ConfigureComplementaryOutputs(void)
 
 static uint32_t PowerStage_MasterRefreshPeriodTicks(void)
 {
-    uint32_t period = PowerStage_PeriodTicksRaw();
     uint32_t refresh_hz = POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ;
+    uint64_t refresh_tick_hz;
     uint64_t ticks_calc;
     uint32_t ticks;
 
@@ -311,8 +421,9 @@ static uint32_t PowerStage_MasterRefreshPeriodTicks(void)
         refresh_hz = 1U;
     }
 
-    ticks_calc = ((uint64_t)period * 1000000ULL) /
-                 ((uint64_t)POWER_STAGE_MASTER_REFRESH_DIV * (uint64_t)refresh_hz);
+    refresh_tick_hz = PowerStage_HrtimTickHzForPrescaler(POWER_STAGE_MASTER_REFRESH_PRESCALER);
+    ticks_calc = (refresh_tick_hz + ((uint64_t)refresh_hz / 2ULL)) /
+                 (uint64_t)refresh_hz;
     ticks = (ticks_calc > UINT32_MAX) ? UINT32_MAX : (uint32_t)ticks_calc;
 
     if (ticks < 4U) {
@@ -326,12 +437,11 @@ static uint32_t PowerStage_MasterRefreshPeriodTicks(void)
 
 static uint32_t PowerStage_MasterRefreshPulseTicks(void)
 {
-    uint32_t period = PowerStage_PeriodTicksRaw();
     uint32_t ticks;
     uint32_t max_ticks;
 
-    ticks = (period * POWER_STAGE_BOOTSTRAP_REFRESH_PULSE_NS) /
-            (1000U * POWER_STAGE_MASTER_REFRESH_DIV);
+    ticks = PowerStage_NsToTicksAtHz(POWER_STAGE_BOOTSTRAP_REFRESH_PULSE_NS,
+                                     PowerStage_HrtimTickHzForPrescaler(POWER_STAGE_MASTER_REFRESH_PRESCALER));
     if (ticks == 0U) {
         ticks = 1U;
     }
@@ -345,6 +455,34 @@ static uint32_t PowerStage_MasterRefreshPulseTicks(void)
     }
 
     return ticks;
+}
+
+uint32_t PowerStage_GetBootstrapRefreshHz(void)
+{
+    return POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ;
+}
+
+uint32_t PowerStage_GetBootstrapRefreshPeriodTicks(void)
+{
+    if (ps.refresh_master_active) {
+        return ps.refresh_period_ticks;
+    }
+
+    return PowerStage_MasterRefreshPeriodTicks();
+}
+
+uint32_t PowerStage_GetBootstrapRefreshPulseTicks(void)
+{
+    if (ps.refresh_master_active) {
+        return ps.refresh_pulse_ticks;
+    }
+
+    return PowerStage_MasterRefreshPulseTicks();
+}
+
+bool PowerStage_IsBootstrapRefreshActive(void)
+{
+    return ps.refresh_master_active;
 }
 
 static void PowerStage_ConfigBootstrapRefreshMaster(void)

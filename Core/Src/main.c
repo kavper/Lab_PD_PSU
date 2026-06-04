@@ -7,6 +7,7 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "gui.h"
+#include "power_stage.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -308,6 +309,9 @@ static void MX_HRTIM1_Init(void)
   HRTIM_CompareCfgTypeDef pCompareCfg = {0};
   HRTIM_DeadTimeCfgTypeDef pDeadTimeCfg = {0};
   HRTIM_OutputCfgTypeDef pOutputCfg = {0};
+  uint32_t pwm_period_ticks = PowerStage_GetConfiguredPeriodTicks();
+  uint32_t pwm_init_compare_ticks = PowerStage_GetSafeInitCompareTicks();
+  uint32_t adc_trigger_ticks = PowerStage_GetConfiguredAdcTriggerTicks();
 
   /* USER CODE BEGIN HRTIM1_Init 1 */
 
@@ -337,9 +341,9 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
-  pTimeBaseCfg.Period = 0xFFDF;
+  pTimeBaseCfg.Period = pwm_period_ticks;
   pTimeBaseCfg.RepetitionCounter = 0x00;
-  pTimeBaseCfg.PrescalerRatio = HRTIM_PRESCALERRATIO_MUL32;
+  pTimeBaseCfg.PrescalerRatio = POWER_STAGE_HRTIM_PRESCALER_RATIO;
   pTimeBaseCfg.Mode = HRTIM_MODE_CONTINUOUS;
   if (HAL_HRTIM_TimeBaseConfig(&hhrtim1, HRTIM_TIMERINDEX_MASTER, &pTimeBaseCfg) != HAL_OK)
   {
@@ -364,7 +368,7 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
-  pTimeBaseCfg.Period = 5440;
+  pTimeBaseCfg.Period = pwm_period_ticks;
   if (HAL_HRTIM_TimeBaseConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_A, &pTimeBaseCfg) != HAL_OK)
   {
     Error_Handler();
@@ -395,11 +399,12 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
-  pCompareCfg.CompareValue = 2000;
+  pCompareCfg.CompareValue = pwm_init_compare_ticks;
   if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_A, HRTIM_COMPAREUNIT_1, &pCompareCfg) != HAL_OK)
   {
     Error_Handler();
   }
+  pCompareCfg.CompareValue = adc_trigger_ticks;
   if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_A, HRTIM_COMPAREUNIT_3, &pCompareCfg) != HAL_OK)
   {
     Error_Handler();
@@ -455,6 +460,7 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
+  pCompareCfg.CompareValue = pwm_init_compare_ticks;
   if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_C, HRTIM_COMPAREUNIT_1, &pCompareCfg) != HAL_OK)
   {
     Error_Handler();

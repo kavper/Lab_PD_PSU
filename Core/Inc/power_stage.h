@@ -5,6 +5,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * ZMIENIAJ TYLKO TO, zeby ustawic czestotliwosc kluczowania PWM.
+ * Przy 200 kHz kod automatycznie liczy HRTIM period = 27200 tickow
+ * dla aktualnego zegara 170 MHz i HRTIM_PRESCALERRATIO_MUL32.
+ * Przy tym preskalerze nie schodz ponizej ok. 83 kHz, bo HRTIM ma 16-bit period.
+ */
+#ifndef PSU_PWM_SWITCHING_FREQUENCY_HZ
+#define PSU_PWM_SWITCHING_FREQUENCY_HZ             500000U
+#endif
+
+#ifndef POWER_STAGE_FSW_HZ
+#define POWER_STAGE_FSW_HZ                         PSU_PWM_SWITCHING_FREQUENCY_HZ
+#endif
+
+#ifndef POWER_STAGE_HRTIM_PRESCALER_RATIO
+#define POWER_STAGE_HRTIM_PRESCALER_RATIO          HRTIM_PRESCALERRATIO_MUL32
+#endif
+
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
 #endif
@@ -17,22 +35,20 @@
 #define POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE 0U
 #endif
 
+/* Bootstrap refresh frequency is set here; this is not PWM switching frequency. */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ
-#define POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ    20000U
+#define POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ    10000U
 #endif
 
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_PULSE_NS
 #define POWER_STAGE_BOOTSTRAP_REFRESH_PULSE_NS     1000U
 #endif
 
-#ifndef POWER_STAGE_HRTIM_TICK_HZ
-#define POWER_STAGE_HRTIM_TICK_HZ                  1000000000U
-#endif
-
-/* PWM switching frequency is set here. */
-#ifndef POWER_STAGE_FSW_HZ
-#define POWER_STAGE_FSW_HZ                         183824U
-#endif
+/*
+ * HRTIM period, startup compare values and ADC trigger ticks are derived from
+ * this value and POWER_STAGE_HRTIM_PRESCALER_RATIO by PowerStage_GetConfigured*
+ * helpers; do not hardcode PWM period in main.c.
+ */
 
 typedef enum {
     POWER_REGION_BUCK = 0,
@@ -54,6 +70,14 @@ void PowerStage_Disable(void);
 void PowerStage_SuspendOutputsKeepDriverOn(void);
 void PowerStage_ForceSafeState(void);
 void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods);
+uint32_t PowerStage_GetConfiguredPeriodTicks(void);
+uint32_t PowerStage_GetConfiguredAdcTriggerTicks(void);
+uint32_t PowerStage_GetSafeInitCompareTicks(void);
+uint32_t PowerStage_GetFswHz(void);
+bool PowerStage_IsBootstrapRefreshActive(void);
+uint32_t PowerStage_GetBootstrapRefreshHz(void);
+uint32_t PowerStage_GetBootstrapRefreshPeriodTicks(void);
+uint32_t PowerStage_GetBootstrapRefreshPulseTicks(void);
 
 /* Konfiguracje pol-mostkow: static high lub klasyczne PWM. */
 void PowerStage_ConfigHalfBridgeA_StaticHigh(bool enable_refresh);
