@@ -66,8 +66,10 @@ typedef struct {
     bool pd_was_connected;
     bool pd_caps_valid;
     bool pd_max_power_attempted;
+    bool pd_source_swap_attempted;
     bool bq_adc_running_confirmed;
     bool bq_charging_enabled;
+    bool bq_otg_enabled;
     uint32_t bq_applied_input_current_ma;
     uint8_t bq_adc_attempts;
     TPS25751_Mode_t last_logged_tps_mode;
@@ -81,6 +83,131 @@ typedef struct {
 
 static PowerManager_Context_t g_pm;
 
+static void PowerManager_DisableBqOtg(void)
+{
+    /* Hardware gate first: converter stops even if the I2C bridge is lost. */
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    if (g_pm.bq_otg_enabled) {
+        BQ25731_Status_t status = BQ25731_DisableOtg(&g_pm.bq);
+        Debug_Printf("[BQ-OTG] disabled: pin=LOW register=%s",
+                     BQ25731_StatusToString(status));
+    }
+    g_pm.bq_otg_enabled = false;
+}
+
+static void PowerManager_AutoSourcePolicy(void)
+{
+    TPS25751_Status_t status;
+    uint8_t i;
+    bool only_5v = true;
+
+    if (!g_pm.pd_snapshot.attached) {
+        PowerManager_DisableBqOtg();
+        g_pm.pd_source_swap_attempted = false;
+        return;
+    }
+
+    /* A DRP connection can resolve directly as Source, without first making
+     * a 5 V Sink contract and without an MCU-issued SWSr. PPHV must then be
+     * brought up immediately from BQ. */
+    if (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE) {
+        if (!g_pm.bq_otg_enabled) {
+            g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
+            (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
+            HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+            if (g_pm.bq_status == BQ25731_OK)
+                g_pm.bq_status = BQ25731_DisableOtg(&g_pm.bq);
+            if (g_pm.bq_status == BQ25731_OK)
+                g_pm.bq_status = BQ25731_EnableOtg(
+                    &g_pm.bq, BQ_USER_OTG_INITIAL_VOLTAGE_MV,
+                    BQ_USER_OTG_INITIAL_CURRENT_MA, false);
+            if (g_pm.bq_status == BQ25731_OK) {
+                HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
+                HAL_Delay(20U);
+                g_pm.bq_otg_enabled = true;
+                g_pm.bq_charging_enabled = false;
+                g_pm.bq_applied_input_current_ma = 0U;
+                Debug_Printf("[BQ-OTG] direct Source: pin=HIGH voltage=%lumV current_limit=%lumA",
+                             (unsigned long)BQ_USER_OTG_INITIAL_VOLTAGE_MV,
+                             (unsigned long)BQ_USER_OTG_INITIAL_CURRENT_MA);
+            } else {
+                HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+                Debug_Printf("[BQ-OTG] direct Source start FAILED: %s",
+                             BQ25731_StatusToString(g_pm.bq_status));
+            }
+        }
+        return;
+    }
+    /* Do not shut OTG down on a transient role indication without a valid
+     * Sink contract. During PR_SWAP TPS briefly reports Sink/no-contract;
+     * removing PPHV there collapses VBUS and creates an endless attach loop.
+     * A real Sink contract is handled below by the charging policy, which
+     * disables OTG before enabling charge. Detach is handled above. */
+    if (g_pm.pd_source_swap_attempted ||
+        (g_pm.pd_snapshot.power_role != POWER_MANAGER_PD_ROLE_SINK) ||
+        (g_pm.pd_snapshot.active_rdo_raw == 0U) ||
+        (g_pm.pd_snapshot.contract_voltage_mv > 5500U)) return;
+
+    status = TPS25751_ReadCapabilityLists(&g_pm.tps, &g_pm.tps_telemetry);
+    if ((status != TPS25751_OK) ||
+        (g_pm.tps_telemetry.rx_source_caps.count == 0U)) return;
+
+    for (i = 0U; i < g_pm.tps_telemetry.rx_source_caps.count; ++i) {
+        const TPS25751_PdoInfo_t *pdo = &g_pm.tps_telemetry.rx_source_caps.pdo[i];
+        uint32_t highest_mv = (pdo->type == TPS25751_SUPPLY_FIXED) ?
+                              pdo->voltage_mv : pdo->max_mv;
+        if (highest_mv > 5500U) {
+            only_5v = false;
+            break;
+        }
+    }
+    if (!only_5v) return;
+
+    g_pm.pd_source_swap_attempted = true;
+    g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
+    (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
+    g_pm.bq_charging_enabled = false;
+    g_pm.bq_applied_input_current_ma = 0U;
+    if (g_pm.bq_status != BQ25731_OK) {
+        Debug_Printf("[PD-AUTO-SOURCE] blocked: BQ inhibit failed (%s)",
+                     BQ25731_StatusToString(g_pm.bq_status));
+        return;
+    }
+
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    g_pm.bq_status = BQ25731_DisableOtg(&g_pm.bq);
+    if (g_pm.bq_status == BQ25731_OK) {
+        g_pm.bq_status = BQ25731_EnableOtg(&g_pm.bq,
+                                            BQ_USER_OTG_INITIAL_VOLTAGE_MV,
+                                            BQ_USER_OTG_INITIAL_CURRENT_MA,
+                                            false);
+    }
+    if (g_pm.bq_status != BQ25731_OK) {
+        Debug_Printf("[PD-AUTO-SOURCE] blocked: BQ OTG configuration failed (%s)",
+                     BQ25731_StatusToString(g_pm.bq_status));
+        return;
+    }
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
+    HAL_Delay(20U);
+    g_pm.bq_otg_enabled = true;
+    Debug_Printf("[BQ-OTG] enabled: pin=HIGH voltage=%lumV current_limit=%lumA",
+                 (unsigned long)BQ_USER_OTG_INITIAL_VOLTAGE_MV,
+                 (unsigned long)BQ_USER_OTG_INITIAL_CURRENT_MA);
+
+    Debug_Printf("[PD-AUTO-SOURCE] partner offers only 5V; requesting PR_SWAP to Source via BQ/PPHV");
+    status = TPS25751_RequestPowerRoleSource(&g_pm.tps);
+    /* The cached snapshot still describes the old 5 V Sink contract until
+     * the next telemetry read. Invalidate it now so the charging policy can
+     * never re-enable BQ during the PR_SWAP transition. */
+    g_pm.pd_snapshot.power_role = POWER_MANAGER_PD_ROLE_SOURCE;
+    g_pm.pd_snapshot.active_rdo_raw = 0U;
+    g_pm.pd_snapshot.contract_voltage_mv = 0U;
+    g_pm.pd_snapshot.contract_current_ma = 0U;
+    g_pm.pd_snapshot.contract_power_mw = 0U;
+    Debug_Printf("[PD-AUTO-SOURCE] SWSr command=%s; partner may still accept or reject the swap",
+                 TPS25751_StatusToString(status));
+}
+
 static void PowerManager_UpdateBqChargingPolicy(void)
 {
     uint32_t input_ma = 0U;
@@ -90,6 +217,10 @@ static void PowerManager_UpdateBqChargingPolicy(void)
         (g_pm.pd_snapshot.active_rdo_raw != 0U) &&
         (g_pm.pd_snapshot.contract_voltage_mv != 0U) &&
         (g_pm.pd_snapshot.contract_current_ma > BQ_USER_PD_CURRENT_MARGIN_MA);
+
+    if (valid_contract && g_pm.bq_otg_enabled) {
+        PowerManager_DisableBqOtg();
+    }
 
     if (valid_contract) {
         input_ma = g_pm.pd_snapshot.contract_current_ma - BQ_USER_PD_CURRENT_MARGIN_MA;
@@ -1156,7 +1287,7 @@ static void PowerManager_DebugLine(uint32_t now_ms)
     PowerManager_FormatVoltage(vbus_text, sizeof(vbus_text), tps->vbus_mv);
     PowerManager_FormatCurrent(ibus_text, sizeof(ibus_text), tps->ibus_ma);
 
-    Debug_Printf("[PD] cable=%s %s %s/%s contract=%s active=%s VBUS=%s IBUS=%s CC=%s/%s",
+    Debug_Printf("[PD] cable=%s %s %s/%s contract=%s active=%s VBUS=%s IBUS=%s CC=%s/%s PP1=%s PP3=%s OCP1=%u",
                  pd_connected ? "YES" : "NO",
                  TPS25751_ModeToString(tps->mode),
                  PowerManager_PortRoleText(tps),
@@ -1166,7 +1297,10 @@ static void PowerManager_DebugLine(uint32_t now_ms)
                  vbus_text,
                  ibus_text,
                  TPS25751_CcStateToString(tps->cc1_state),
-                 TPS25751_CcStateToString(tps->cc2_state));
+                 TPS25751_CcStateToString(tps->cc2_state),
+                 TPS25751_PowerPathSwitchToString(tps->pp1_switch),
+                 TPS25751_PowerPathSwitchToString(tps->pp3_switch),
+                 tps->pp1_overcurrent ? 1U : 0U);
 
     Debug_Printf("[PD-SNAPSHOT] attached=%u PDO=0x%08lX RDO=0x%08lX contract=%lumV/%lumA/%lumW class=%s",
                  g_pm.pd_snapshot.attached ? 1U : 0U,
@@ -1191,7 +1325,7 @@ static void PowerManager_DebugLine(uint32_t now_ms)
     }
 #else
     if (g_pm.bq_status == BQ25731_OK) {
-        Debug_Printf("[BQ] adc=%u VBAT=%lu.%03luV VSYS=%lu.%03luV VBUS=%lu.%03luV IBAT=%ldmA IIN=%lumA CHG=%lumA/%lu.%03luV",
+        Debug_Printf("[BQ] adc=%u VBAT=%lu.%03luV VSYS=%lu.%03luV VBUS=%lu.%03luV IBAT=%ldmA IIN=%lumA CHG=%lumA/%lu.%03luV EN_OTG=%u IN_OTG=%u OPT3=0x%04X PIN=%u",
                      (unsigned int)bq->adc_enabled,
                      (unsigned long)PowerManager_IntPart(bq->vbat_mv, 1000U),
                      (unsigned long)PowerManager_FracPart(bq->vbat_mv, 1000U),
@@ -1203,7 +1337,11 @@ static void PowerManager_DebugLine(uint32_t now_ms)
                      (unsigned long)bq->iin_ma,
                      (unsigned long)bq->charge_current_ma,
                      (unsigned long)PowerManager_IntPart(bq->charge_voltage_mv, 1000U),
-                     (unsigned long)PowerManager_FracPart(bq->charge_voltage_mv, 1000U));
+                     (unsigned long)PowerManager_FracPart(bq->charge_voltage_mv, 1000U),
+                     bq->otg_enabled ? 1U : 0U,
+                     bq->in_otg ? 1U : 0U,
+                     bq->charge_option3_raw,
+                     HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin) == GPIO_PIN_SET ? 1U : 0U);
     }
 #endif
 
@@ -1213,6 +1351,7 @@ static void PowerManager_DebugLine(uint32_t now_ms)
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c)
 {
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
     memset(&g_pm, 0, sizeof(g_pm));
 
     g_pm.hi2c = hi2c;
@@ -1460,6 +1599,13 @@ void PowerManager_Task(void)
             g_pm.bq_status = BQ25731_SetSenseResistors(&g_pm.bq,
                                                         BQ25731_RAC_MOHM == 5U,
                                                         BQ25731_RSR_MOHM == 5U);
+            /* Program the battery-safe CV target while charging is still
+             * inhibited and ICHG=0. This removes the 21 V 5S POR/EEPROM
+             * value even when USB-C is present before the battery. */
+            if (g_pm.bq_status == BQ25731_OK) {
+                g_pm.bq_status = BQ25731_SetChargeVoltage(
+                    &g_pm.bq, BQ_USER_CHARGE_VOLTAGE_MV, NULL, NULL);
+            }
             if (g_pm.bq_status == BQ25731_OK) {
                 g_pm.bq_status = BQ25731_ConfigureForMonitoring(&g_pm.bq);
             }
@@ -1474,7 +1620,8 @@ void PowerManager_Task(void)
                 g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
                 break;
             }
-            Debug_Printf("[BQ] STM32 owns charger monitoring; watchdog=OFF low_power=OFF ADC=continuous");
+            Debug_Printf("[BQ] STM32 owns charger; safe idle VREG=%lumV ICHG=0mA inhibit=1 ADC=continuous",
+                         (unsigned long)BQ_USER_CHARGE_VOLTAGE_MV);
             g_pm.state = POWER_MANAGER_SAFE_MONITORING;
             g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
             break;
@@ -1499,6 +1646,7 @@ void PowerManager_Task(void)
             }
 
             PowerManager_UpdatePdSnapshot();
+            PowerManager_AutoSourcePolicy();
 
 #if (POWER_MANAGER_PD_REQUEST_MAX_POWER != 0U)
             if (!g_pm.pd_snapshot.attached) {
@@ -1621,8 +1769,8 @@ void PowerManager_Task(void)
                              BQ25731_StatusToString(g_pm.bq_status));
             }
 #if (BQ25731_CONTROL_OWNER_TPS_EEPROM == 0U)
-            else if (g_pm.bq_telemetry.in_otg ||
-                       ((!g_pm.bq_charging_enabled) &&
+            else if ((g_pm.bq_telemetry.in_otg && !g_pm.bq_otg_enabled) ||
+                       ((!g_pm.bq_charging_enabled) && !g_pm.bq_otg_enabled &&
                         (g_pm.bq_telemetry.in_fast_charge ||
                          !g_pm.bq_telemetry.charge_inhibited))) {
                 Debug_Printf("[FAULT] unsafe BQ state in monitoring: OTG=%u FCHRG=%u inhibit=%u",
@@ -1641,6 +1789,7 @@ void PowerManager_Task(void)
             break;
 
         case POWER_MANAGER_FAULT:
+            PowerManager_DisableBqOtg();
             /* A BQ fault must not freeze USB-C PD observability.  Continue
              * read-only TPS monitoring so hot-plug and detach reach the GUI. */
             if ((g_pm.tps_addr_selected == TPS25751_I2C_ADDR_DEFAULT) &&

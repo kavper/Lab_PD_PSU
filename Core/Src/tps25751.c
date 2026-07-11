@@ -1213,6 +1213,13 @@ TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
     return status;
 }
 
+TPS25751_Status_t TPS25751_RequestPowerRoleSource(TPS25751_Device_t *dev)
+{
+    if (dev == NULL) return TPS25751_INVALID_ARG;
+    /* TPS25751 TRM: SWSr initiates a USB-PD Power Role Swap to Source. */
+    return TPS25751_RunNoDataCommand(dev, "SWSr");
+}
+
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
                                                 TPS25751_TypecStateMachine_t *mode)
 {

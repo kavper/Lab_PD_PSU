@@ -32,6 +32,10 @@
 #define BQ_USER_LOW_PTM_RIPPLE_ENABLE                 1U
 /* Watchdog stays off; enabling it requires a periodic register refresh. */
 #define BQ_USER_WATCHDOG_ENABLE                       0U
+/* Initial USB-C Source contract. Higher PDO transitions are coordinated by
+ * TPS25751 after the 5 V source path is established. */
+#define BQ_USER_OTG_INITIAL_VOLTAGE_MV              5000U
+#define BQ_USER_OTG_INITIAL_CURRENT_MA              3000U
 
 #if ((BQ_USER_RAC_MOHM != 5U) && (BQ_USER_RAC_MOHM != 10U)) || \
     ((BQ_USER_RSR_MOHM != 5U) && (BQ_USER_RSR_MOHM != 10U))
@@ -69,8 +73,8 @@
 #error "BQ25731_CELL_COUNT must be 4 or 5 for this firmware"
 #endif
 
-/* Digital PD PSU V2.0 bring-up: OTG/VAP/FRS has a 100k pulldown. */
-#define BQ25731_HW_OTG_ALLOWED                        0U
+/* OTG/VAP/FRS is driven by STM32 PA4 (OTG_EN), with 100k pulldown. */
+#define BQ25731_HW_OTG_ALLOWED                        1U
 
 #define BQ25731_RAC_MOHM                              BQ_USER_RAC_MOHM
 #define BQ25731_RSR_MOHM                              BQ_USER_RSR_MOHM

@@ -246,6 +246,8 @@ TPS25751_Status_t TPS25751_RequestSinkVoltageMv(TPS25751_Device_t *dev,
                                                 uint32_t timeout_ms);
 TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
                                                uint32_t timeout_ms);
+/* Ask the connected PD partner to swap this port from Sink to Source. */
+TPS25751_Status_t TPS25751_RequestPowerRoleSource(TPS25751_Device_t *dev);
 
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
                                                 TPS25751_TypecStateMachine_t *mode);

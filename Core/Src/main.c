@@ -755,7 +755,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, OTG_EN_Pin|SD_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LED2_Pin LED1_Pin FLT_Pin STBY_Pin */
   GPIO_InitStruct.Pin = LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin;
@@ -770,12 +770,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(RESET_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SD_Pin */
-  GPIO_InitStruct.Pin = SD_Pin;
+  /*Configure GPIO pins : OTG_EN_Pin SD_Pin */
+  GPIO_InitStruct.Pin = OTG_EN_Pin|SD_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SD_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BTN_ON_OFF_Pin BTN_AUX1_Pin BTN_AUX2_Pin ENC_BTN_Pin */
   GPIO_InitStruct.Pin = BTN_ON_OFF_Pin|BTN_AUX1_Pin|BTN_AUX2_Pin|ENC_BTN_Pin;

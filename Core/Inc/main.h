@@ -69,6 +69,8 @@ void Error_Handler(void);
 #define ADC_VBAT_GPIO_Port GPIOA
 #define ADC_VOUT_Pin GPIO_PIN_2
 #define ADC_VOUT_GPIO_Port GPIOA
+#define OTG_EN_Pin GPIO_PIN_4
+#define OTG_EN_GPIO_Port GPIOA
 #define ADC_IOUT_Pin GPIO_PIN_6
 #define ADC_IOUT_GPIO_Port GPIOA
 #define SD_Pin GPIO_PIN_7

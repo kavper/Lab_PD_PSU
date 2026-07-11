@@ -230,7 +230,11 @@ void Debug_Printf(const char *fmt, ...)
     }
 
 #if (DEBUG_LOG_NON_BQ == 0U)
-    if (strncmp(fmt, "[BQ", 3U) != 0) {
+    if ((strncmp(fmt, "[BQ", 3U) != 0) &&
+        (strncmp(fmt, "[TPS", 4U) != 0) &&
+        (strncmp(fmt, "[PD", 3U) != 0) &&
+        (strncmp(fmt, "[FAULT", 6U) != 0) &&
+        (strncmp(fmt, "[PM-ERR", 7U) != 0)) {
         return;
     }
 #endif
@@ -263,9 +267,11 @@ void Debug_Printf(const char *fmt, ...)
 
 void Debug_BlankLine(void)
 {
+#if (DEBUG_LOG_NON_BQ != 0U)
     static const uint8_t blank_line[] = "\r\n";
 
     Debug_EnqueueBytes(blank_line, (uint32_t)(sizeof(blank_line) - 1U));
+#endif
 }
 
 uint32_t Debug_GetTxBufferUsed(void)
