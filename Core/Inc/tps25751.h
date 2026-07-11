@@ -8,6 +8,10 @@
 
 #define TPS25751_I2C_ADDR_DEFAULT              0x21U
 
+#ifndef TPS25751_I2C_BRIDGE_DEBUG
+#define TPS25751_I2C_BRIDGE_DEBUG              0U
+#endif
+
 #define TPS25751_MAX_REG_PAYLOAD              64U
 
 #define TPS25751_ADC_RESULTS_LEN              12U
@@ -16,6 +20,7 @@
 #define TPS25751_RX_SINK_CAPS_MAX_LEN         29U
 #define TPS25751_TX_SOURCE_CAPS_MAX_LEN       31U
 #define TPS25751_TX_SINK_CAPS_MAX_LEN         29U
+#define TPS25751_AUTO_NEGOTIATE_SINK_LEN       24U
 
 typedef enum {
     TPS25751_OK = 0,
@@ -23,7 +28,9 @@ typedef enum {
     TPS25751_I2C_ERROR,
     TPS25751_INVALID_ARG,
     TPS25751_BAD_LENGTH,
-    TPS25751_COMMAND_ERROR
+    TPS25751_COMMAND_ERROR,
+    TPS25751_NOT_AVAILABLE,
+    TPS25751_TIMEOUT
 } TPS25751_Status_t;
 
 typedef enum {
@@ -99,6 +106,24 @@ typedef struct {
 } TPS25751_RdoInfo_t;
 
 typedef struct {
+    uint8_t raw[TPS25751_AUTO_NEGOTIATE_SINK_LEN];
+    uint32_t min_voltage_mv;
+    uint32_t max_voltage_mv;
+    uint32_t sink_min_required_power_mw;
+    uint32_t capability_mismatch_power_mw;
+    uint32_t pps_output_voltage_mv;
+    uint32_t pps_operating_current_ma;
+    bool pps_sink_enabled;
+    bool auto_compute_min_voltage;
+    bool auto_compute_max_voltage;
+    bool auto_compute_min_power;
+    bool no_capability_mismatch;
+    bool auto_disable_sink_on_mismatch;
+    bool no_usb_suspend;
+    bool prefer_lower_voltage_on_tie;
+} TPS25751_AutoNegotiateSink_t;
+
+typedef struct {
     TPS25751_Status_t status;
 
     char mode_ascii[5];
@@ -171,8 +196,22 @@ TPS25751_Status_t TPS25751_ReadPayload(TPS25751_Device_t *dev,
                                        uint8_t payload_capacity,
                                        uint8_t *payload_len);
 
+TPS25751_Status_t TPS25751_ReadMode(TPS25751_Device_t *dev,
+                                    TPS25751_Mode_t *mode,
+                                    char mode_ascii[5]);
+
 TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
                                          TPS25751_Telemetry_t *t);
+
+TPS25751_Status_t TPS25751_ReadTelemetryBasic(TPS25751_Device_t *dev,
+                                              TPS25751_Telemetry_t *t);
+
+TPS25751_Status_t TPS25751_ReadCapabilityLists(TPS25751_Device_t *dev,
+                                               TPS25751_Telemetry_t *t);
+
+TPS25751_Status_t TPS25751_ReadAutoNegotiateSink(
+    TPS25751_Device_t *dev,
+    TPS25751_AutoNegotiateSink_t *policy);
 
 TPS25751_Status_t TPS25751_I2cControllerRead(TPS25751_Device_t *dev,
                                              uint8_t target_addr_7bit,
@@ -185,6 +224,28 @@ TPS25751_Status_t TPS25751_I2cControllerWrite(TPS25751_Device_t *dev,
                                               uint8_t target_register,
                                               const uint8_t *data,
                                               uint8_t length);
+
+/* Access to devices on the TPS25751 I2Cc controller port.  These helpers
+ * verify MODE == "APP " before issuing the I2Cr/I2Cw 4CC task. */
+TPS25751_Status_t TPS25751_I2CcRead(TPS25751_Device_t *dev,
+                                    uint8_t device_addr_7bit,
+                                    uint8_t reg,
+                                    uint8_t *data,
+                                    uint8_t length);
+
+TPS25751_Status_t TPS25751_I2CcWrite(TPS25751_Device_t *dev,
+                                     uint8_t device_addr_7bit,
+                                     uint8_t reg,
+                                     const uint8_t *data,
+                                     uint8_t length);
+
+/* Diagnostic Sink-policy request. Uses AUTO_NEGOTIATE_SINK + GSrC and never
+ * constructs or writes an RDO directly. */
+TPS25751_Status_t TPS25751_RequestSinkVoltageMv(TPS25751_Device_t *dev,
+                                                uint32_t voltage_mv,
+                                                uint32_t timeout_ms);
+TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
+                                               uint32_t timeout_ms);
 
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
                                                 TPS25751_TypecStateMachine_t *mode);

@@ -14,9 +14,11 @@
 /* UART debug print period is set here. */
 #define APP_DEBUG_PERIOD_MS                  200U
 #define APP_DEBUG_VERBOSE                    0U
+#ifndef APP_RUNTIME_DEBUG
+#define APP_RUNTIME_DEBUG                    0U
+#endif
 #define APP_STARTUP_HOLD_MS                  2000U
 #define APP_LED_BLINK_MS                     250U
-#define APP_MAX_POWER_W                      100U
 
 #define VOUT_SETPOINT_DEFAULT_V              10.00f
 #define VOUT_OVP_LIMIT                       35.00f
@@ -1412,6 +1414,7 @@ static void App_DebugTask(void)
                  Debug_IsTxBusy() ? 1U : 0U,
                  (unsigned long)uart_buf_used,
                  (unsigned long)uart_dropped);
+    Debug_BlankLine();
 }
 
 static void App_ControlTimerInit(void)
@@ -1567,7 +1570,9 @@ void App_Run(void)
     App_LedTask();
     App_ControlSlowTask();
     PowerManager_Task();
+#if (APP_RUNTIME_DEBUG != 0U)
     App_DebugTask();
+#endif
 }
 
 void App_SetRequestedMode(App_Mode_t mode)
@@ -1668,11 +1673,6 @@ float App_GetOutputVoltage(void)
 float App_GetOutputCurrent(void)
 {
     return app.meas.iout;
-}
-
-uint32_t APP_GetPower(void)
-{
-    return APP_MAX_POWER_W;
 }
 
 void TIM6_DAC_IRQHandler(void)

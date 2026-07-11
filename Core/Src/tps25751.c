@@ -1,4 +1,5 @@
 #include "tps25751.h"
+#include "debug_uart.h"
 
 #include <string.h>
 
@@ -16,6 +17,7 @@
 #define TPS25751_REG_TX_SINK_CAPS             0x33U
 #define TPS25751_REG_ACTIVE_PDO               0x34U
 #define TPS25751_REG_ACTIVE_RDO               0x35U
+#define TPS25751_REG_AUTO_NEGOTIATE_SINK      0x37U
 #define TPS25751_REG_POWER_STATUS             0x3FU
 #define TPS25751_REG_PD_STATUS                0x40U
 #define TPS25751_REG_TYPEC_STATUS             0x69U
@@ -26,6 +28,12 @@
 #define TPS25751_DATA1_MAX_PAYLOAD            64U
 #define TPS25751_PORT_CONFIG_READ_LEN         17U
 #define TPS25751_PORT_CONFIG_TYPEC_SM_MASK    0x03U
+#define TPS25751_AUTO_MIN_VOLTAGE_BIT         42U
+#define TPS25751_AUTO_MAX_VOLTAGE_BIT         32U
+#define TPS25751_AUTO_VOLTAGE_WIDTH           10U
+#define TPS25751_AUTO_COMPUTE_MAX_V_BIT       5U
+#define TPS25751_AUTO_COMPUTE_MIN_V_BIT       4U
+#define TPS25751_AUTO_PPS_ENABLE_BIT          64U
 
 static uint16_t TPS25751_ReadLe16(const uint8_t *data)
 {
@@ -65,6 +73,43 @@ static void TPS25751_WriteLe32(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
 
+static void TPS25751_SetLeBitField(uint8_t *data,
+                                   uint16_t start_bit,
+                                   uint8_t width,
+                                   uint32_t value)
+{
+    uint8_t bit;
+
+    for (bit = 0U; bit < width; ++bit) {
+        uint16_t target_bit = (uint16_t)(start_bit + bit);
+        uint8_t mask = (uint8_t)(1U << (target_bit & 7U));
+
+        if ((value & (1UL << bit)) != 0U) {
+            data[target_bit >> 3] |= mask;
+        } else {
+            data[target_bit >> 3] &= (uint8_t)~mask;
+        }
+    }
+}
+
+static uint32_t TPS25751_GetLeBitField(const uint8_t *data,
+                                       uint16_t start_bit,
+                                       uint8_t width)
+{
+    uint32_t value = 0U;
+    uint8_t bit;
+
+    for (bit = 0U; bit < width; ++bit) {
+        uint16_t source_bit = (uint16_t)(start_bit + bit);
+        if ((data[source_bit >> 3] &
+             (uint8_t)(1U << (source_bit & 7U))) != 0U) {
+            value |= 1UL << bit;
+        }
+    }
+
+    return value;
+}
+
 static uint32_t TPS25751_FourCc(const char text[4])
 {
     return ((uint32_t)(uint8_t)text[0]) |
@@ -73,7 +118,7 @@ static uint32_t TPS25751_FourCc(const char text[4])
            ((uint32_t)(uint8_t)text[3] << 24);
 }
 
-static TPS25751_Mode_t TPS25751_DecodeMode(const uint8_t mode_ascii[5])
+static TPS25751_Mode_t TPS25751_DecodeMode(const uint8_t mode_ascii[4])
 {
     if ((mode_ascii[0] == 'A') &&
         (mode_ascii[1] == 'P') &&
@@ -355,8 +400,147 @@ TPS25751_Status_t TPS25751_ReadPayload(TPS25751_Device_t *dev,
     return TPS25751_OK;
 }
 
-TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
-                                         TPS25751_Telemetry_t *t)
+TPS25751_Status_t TPS25751_ReadMode(TPS25751_Device_t *dev,
+                                    TPS25751_Mode_t *mode,
+                                    char mode_ascii[5])
+{
+    TPS25751_Status_t status;
+    uint8_t payload[4];
+    uint8_t len = 0U;
+
+    if ((dev == NULL) || (mode == NULL) || (mode_ascii == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_MODE,
+                                  payload, sizeof(payload), &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+    if (len != sizeof(payload)) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    memcpy(mode_ascii, payload, sizeof(payload));
+    mode_ascii[4] = '\0';
+    *mode = TPS25751_DecodeMode(payload);
+    return TPS25751_OK;
+}
+
+static TPS25751_Status_t TPS25751_ReadCapabilityListsInternal(TPS25751_Device_t *dev,
+                                                              TPS25751_Telemetry_t *t)
+{
+    TPS25751_Status_t result = TPS25751_OK;
+    TPS25751_Status_t status;
+    uint8_t payload[TPS25751_MAX_REG_PAYLOAD];
+    uint8_t len;
+
+    if ((dev == NULL) || (t == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    memset(&t->rx_source_caps, 0, sizeof(t->rx_source_caps));
+    memset(&t->rx_sink_caps, 0, sizeof(t->rx_sink_caps));
+    memset(&t->tx_source_caps, 0, sizeof(t->tx_source_caps));
+    memset(&t->tx_sink_caps, 0, sizeof(t->tx_sink_caps));
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_RX_SOURCE_CAPS, payload, TPS25751_RX_SOURCE_CAPS_MAX_LEN, &len);
+    if (status == TPS25751_OK) {
+        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->rx_source_caps);
+    } else if (result == TPS25751_OK) {
+        result = status;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_RX_SINK_CAPS, payload, TPS25751_RX_SINK_CAPS_MAX_LEN, &len);
+    if (status == TPS25751_OK) {
+        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->rx_sink_caps);
+    } else if (result == TPS25751_OK) {
+        result = status;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_TX_SOURCE_CAPS, payload, TPS25751_TX_SOURCE_CAPS_MAX_LEN, &len);
+    if (status == TPS25751_OK) {
+        TPS25751_DecodeCapsRegister(payload, len, 3U, &t->tx_source_caps);
+    } else if (result == TPS25751_OK) {
+        result = status;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_TX_SINK_CAPS, payload, TPS25751_TX_SINK_CAPS_MAX_LEN, &len);
+    if (status == TPS25751_OK) {
+        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->tx_sink_caps);
+    } else if (result == TPS25751_OK) {
+        result = status;
+    }
+
+    return result;
+}
+
+TPS25751_Status_t TPS25751_ReadCapabilityLists(TPS25751_Device_t *dev,
+                                               TPS25751_Telemetry_t *t)
+{
+    return TPS25751_ReadCapabilityListsInternal(dev, t);
+}
+
+TPS25751_Status_t TPS25751_ReadAutoNegotiateSink(
+    TPS25751_Device_t *dev,
+    TPS25751_AutoNegotiateSink_t *policy)
+{
+    TPS25751_Status_t status;
+    uint8_t len = 0U;
+
+    if ((dev == NULL) || (policy == NULL)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    memset(policy, 0, sizeof(*policy));
+    status = TPS25751_ReadPayload(dev,
+                                  TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                                  policy->raw,
+                                  sizeof(policy->raw),
+                                  &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+    if (len != sizeof(policy->raw)) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    /* TPS25751 TRM, AUTO_NEGOTIATE_SINK (0x37), bits 115:0. */
+    policy->pps_output_voltage_mv =
+        TPS25751_GetLeBitField(policy->raw, 105U, 11U) * 20U;
+    policy->pps_operating_current_ma =
+        TPS25751_GetLeBitField(policy->raw, 96U, 7U) * 50U;
+    policy->pps_sink_enabled =
+        TPS25751_GetLeBitField(policy->raw, 64U, 1U) != 0U;
+    policy->capability_mismatch_power_mw =
+        TPS25751_GetLeBitField(policy->raw, 52U, 10U) * 250U;
+    policy->min_voltage_mv =
+        TPS25751_GetLeBitField(policy->raw, 42U, 10U) * 50U;
+    policy->max_voltage_mv =
+        TPS25751_GetLeBitField(policy->raw, 32U, 10U) * 50U;
+    policy->sink_min_required_power_mw =
+        TPS25751_GetLeBitField(policy->raw, 22U, 10U) * 250U;
+    policy->auto_disable_sink_on_mismatch =
+        TPS25751_GetLeBitField(policy->raw, 6U, 1U) != 0U;
+    policy->auto_compute_max_voltage =
+        TPS25751_GetLeBitField(policy->raw, 5U, 1U) != 0U;
+    policy->auto_compute_min_voltage =
+        TPS25751_GetLeBitField(policy->raw, 4U, 1U) != 0U;
+    policy->no_capability_mismatch =
+        TPS25751_GetLeBitField(policy->raw, 3U, 1U) != 0U;
+    policy->auto_compute_min_power =
+        TPS25751_GetLeBitField(policy->raw, 2U, 1U) != 0U;
+    policy->no_usb_suspend =
+        TPS25751_GetLeBitField(policy->raw, 1U, 1U) != 0U;
+    policy->prefer_lower_voltage_on_tie =
+        TPS25751_GetLeBitField(policy->raw, 0U, 1U) != 0U;
+
+    return TPS25751_OK;
+}
+
+static TPS25751_Status_t TPS25751_ReadTelemetryInternal(TPS25751_Device_t *dev,
+                                                       TPS25751_Telemetry_t *t,
+                                                       bool read_caps)
 {
     TPS25751_Status_t status;
     uint8_t payload[TPS25751_MAX_REG_PAYLOAD];
@@ -415,24 +599,8 @@ TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
         t->ibus_mean_ma = ((uint32_t)payload[11] * 165U) / 10U;
     }
 
-    status = TPS25751_ReadPayload(dev, TPS25751_REG_RX_SOURCE_CAPS, payload, TPS25751_RX_SOURCE_CAPS_MAX_LEN, &len);
-    if (status == TPS25751_OK) {
-        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->rx_source_caps);
-    }
-
-    status = TPS25751_ReadPayload(dev, TPS25751_REG_RX_SINK_CAPS, payload, TPS25751_RX_SINK_CAPS_MAX_LEN, &len);
-    if (status == TPS25751_OK) {
-        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->rx_sink_caps);
-    }
-
-    status = TPS25751_ReadPayload(dev, TPS25751_REG_TX_SOURCE_CAPS, payload, TPS25751_TX_SOURCE_CAPS_MAX_LEN, &len);
-    if (status == TPS25751_OK) {
-        TPS25751_DecodeCapsRegister(payload, len, 3U, &t->tx_source_caps);
-    }
-
-    status = TPS25751_ReadPayload(dev, TPS25751_REG_TX_SINK_CAPS, payload, TPS25751_TX_SINK_CAPS_MAX_LEN, &len);
-    if (status == TPS25751_OK) {
-        TPS25751_DecodeCapsRegister(payload, len, 1U, &t->tx_sink_caps);
+    if (read_caps) {
+        (void)TPS25751_ReadCapabilityListsInternal(dev, t);
     }
 
     status = TPS25751_ReadPayload(dev, TPS25751_REG_ACTIVE_PDO, payload, 6U, &len);
@@ -451,6 +619,18 @@ TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
 
     t->status = TPS25751_OK;
     return TPS25751_OK;
+}
+
+TPS25751_Status_t TPS25751_ReadTelemetryBasic(TPS25751_Device_t *dev,
+                                              TPS25751_Telemetry_t *t)
+{
+    return TPS25751_ReadTelemetryInternal(dev, t, false);
+}
+
+TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
+                                         TPS25751_Telemetry_t *t)
+{
+    return TPS25751_ReadTelemetryInternal(dev, t, true);
 }
 
 static TPS25751_Status_t TPS25751_WritePayload(TPS25751_Device_t *dev,
@@ -636,6 +816,13 @@ TPS25751_Status_t TPS25751_I2cControllerRead(TPS25751_Device_t *dev,
     data1_in[1] = target_register;
     data1_in[2] = length;
 
+#if (TPS25751_I2C_BRIDGE_DEBUG != 0U)
+    Debug_Printf("[TPS-I2CR] target=0x%02X reg=0x%02X len=%u", target_addr_7bit,
+                 target_register, length);
+    Debug_Printf("[TPS-I2CR] DATA1 tx payload: %02X %02X %02X",
+                 data1_in[0], data1_in[1], data1_in[2]);
+#endif
+
     status = TPS25751_WritePayload(dev,
                                    TPS25751_REG_DATA1,
                                    data1_in,
@@ -688,6 +875,14 @@ TPS25751_Status_t TPS25751_I2cControllerRead(TPS25751_Device_t *dev,
 
     memcpy(data, &data1_out[1], length);
 
+#if (TPS25751_I2C_BRIDGE_DEBUG != 0U)
+    Debug_Printf("[TPS-I2CR] CMD=I2Cr status=OK task=%u DATA1_len=%u",
+                 task_return_code, data1_len);
+    if (length == 2U)
+        Debug_Printf("[TPS-I2CR] DATA1 rx payload: %02X %02X %02X raw=0x%02X%02X",
+                     data1_out[0], data1_out[1], data1_out[2], data[1], data[0]);
+#endif
+
     return TPS25751_I2cControllerReturn(dev, TPS25751_OK);
 }
 
@@ -724,23 +919,38 @@ TPS25751_Status_t TPS25751_I2cControllerWrite(TPS25751_Device_t *dev,
     memset(data1_out, 0, sizeof(data1_out));
 
     /*
-     * TRM Table 4-18 ('I2Cw'):
-     * Byte1 = target address, Bytes2-3 = length (LSB/MSB), Byte4 = register offset,
-     * Bytes5-14 = payload.
+     * Corrected TPS25751 I2Cw format (TI E2E erratum to TRM Table 4-18):
+     * Byte1 = target address, Byte2 = I2Cc transaction length,
+     * Byte3 = register offset, Bytes4-13 = data.  The reserved length-high
+     * byte shown in SLVUCR8A is not present in the actual TPS25751 command.
+     *
+     * Crucial detail: transaction length includes the register-offset byte.
+     * For example TI uses length=3 for a 16-bit register write (offset + two
+     * data bytes).  Using length=2 silently sends only offset + one data byte;
+     * the 4CC task still returns success, but BQ25731 rejects the incomplete
+     * 16-bit register write.
      */
     data1_in[0] = target_addr_7bit & 0x7FU;
-    data1_in[1] = length;
-    data1_in[2] = 0U;
-    data1_in[3] = target_register;
+    data1_in[1] = (uint8_t)(length + 1U);
+    data1_in[2] = target_register;
 
     if (length > 0U) {
-        memcpy(&data1_in[4], data, length);
+        memcpy(&data1_in[3], data, length);
     }
+
+#if (TPS25751_I2C_BRIDGE_DEBUG != 0U)
+    Debug_Printf("[TPS-I2CW] target=0x%02X reg=0x%02X data_len=%u transaction_len=%u data=%02X %02X",
+                 target_addr_7bit, target_register, length, length + 1U,
+                 length > 0U ? data[0] : 0U, length > 1U ? data[1] : 0U);
+    Debug_Printf("[TPS-I2CW] DATA1 tx payload: %02X %02X %02X %02X %02X",
+                 data1_in[0], data1_in[1], data1_in[2], data1_in[3],
+                 data1_in[4]);
+#endif
 
     status = TPS25751_WritePayload(dev,
                                    TPS25751_REG_DATA1,
                                    data1_in,
-                                   (uint8_t)(length + 4U));
+                                   (uint8_t)(length + 3U));
     if (status != TPS25751_OK) {
         return TPS25751_I2cControllerReturn(dev, status);
     }
@@ -783,7 +993,224 @@ TPS25751_Status_t TPS25751_I2cControllerWrite(TPS25751_Device_t *dev,
         return TPS25751_I2cControllerReturn(dev, wait_status);
     }
 
+#if (TPS25751_I2C_BRIDGE_DEBUG != 0U)
+    Debug_Printf("[TPS-I2CW] CMD=I2Cw status=OK task=%u (queued; readback required)",
+                 task_return_code);
+#endif
+
     return TPS25751_I2cControllerReturn(dev, TPS25751_OK);
+}
+
+static TPS25751_Status_t TPS25751_RequireAppMode(TPS25751_Device_t *dev)
+{
+    TPS25751_Status_t status;
+    uint8_t mode_ascii[4];
+    uint8_t len = 0U;
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_MODE,
+                                  mode_ascii, sizeof(mode_ascii), &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    if ((len != sizeof(mode_ascii)) ||
+        (TPS25751_DecodeMode(mode_ascii) != TPS25751_MODE_APP)) {
+        return TPS25751_COMMAND_ERROR;
+    }
+
+    return TPS25751_OK;
+}
+
+TPS25751_Status_t TPS25751_I2CcRead(TPS25751_Device_t *dev,
+                                    uint8_t device_addr_7bit,
+                                    uint8_t reg,
+                                    uint8_t *data,
+                                    uint8_t length)
+{
+    TPS25751_Status_t status = TPS25751_RequireAppMode(dev);
+
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    return TPS25751_I2cControllerRead(dev, device_addr_7bit, reg, data, length);
+}
+
+TPS25751_Status_t TPS25751_I2CcWrite(TPS25751_Device_t *dev,
+                                     uint8_t device_addr_7bit,
+                                     uint8_t reg,
+                                     const uint8_t *data,
+                                     uint8_t length)
+{
+    TPS25751_Status_t status = TPS25751_RequireAppMode(dev);
+
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    return TPS25751_I2cControllerWrite(dev, device_addr_7bit, reg, data, length);
+}
+
+static TPS25751_Status_t TPS25751_RunNoDataCommand(TPS25751_Device_t *dev,
+                                                   const char command[4])
+{
+    TPS25751_Status_t status;
+    uint8_t result[1];
+    uint8_t len = 0U;
+
+    status = TPS25751_RequireAppMode(dev);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_SendCommand(dev, command);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_WaitCommandDone(dev);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_DATA1,
+                                  result, sizeof(result), &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    return ((len >= 1U) && (result[0] == 0U)) ?
+           TPS25751_OK : TPS25751_COMMAND_ERROR;
+}
+
+TPS25751_Status_t TPS25751_RequestSinkVoltageMv(TPS25751_Device_t *dev,
+                                                uint32_t voltage_mv,
+                                                uint32_t timeout_ms)
+{
+    TPS25751_Status_t status;
+    TPS25751_Telemetry_t telemetry;
+    uint8_t auto_sink[TPS25751_AUTO_NEGOTIATE_SINK_LEN];
+    uint8_t active_pdo[6];
+    uint8_t len = 0U;
+    uint16_t voltage_code;
+    uint32_t start_ms;
+    uint8_t i;
+    bool available = false;
+
+    if ((dev == NULL) || (timeout_ms == 0U) ||
+        (voltage_mv < 5000U) || (voltage_mv > 20000U) ||
+        ((voltage_mv % 50U) != 0U)) {
+        return TPS25751_INVALID_ARG;
+    }
+
+    status = TPS25751_RequireAppMode(dev);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_ReadTelemetryBasic(dev, &telemetry);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+    if ((!telemetry.plug_present) || telemetry.pd_role_source) {
+        return TPS25751_NOT_AVAILABLE;
+    }
+
+    status = TPS25751_ReadCapabilityLists(dev, &telemetry);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    for (i = 0U; i < telemetry.rx_source_caps.count; ++i) {
+        const TPS25751_PdoInfo_t *pdo = &telemetry.rx_source_caps.pdo[i];
+        if ((pdo->type == TPS25751_SUPPLY_FIXED) &&
+            (pdo->voltage_mv == voltage_mv)) {
+            available = true;
+            break;
+        }
+    }
+    if (!available) {
+        return TPS25751_NOT_AVAILABLE;
+    }
+
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                                  auto_sink, sizeof(auto_sink), &len);
+    if (status != TPS25751_OK) {
+        return status;
+    }
+    if (len != sizeof(auto_sink)) {
+        return TPS25751_BAD_LENGTH;
+    }
+
+    voltage_code = (uint16_t)(voltage_mv / 50U);
+    TPS25751_SetLeBitField(auto_sink, TPS25751_AUTO_MIN_VOLTAGE_BIT,
+                           TPS25751_AUTO_VOLTAGE_WIDTH, voltage_code);
+    TPS25751_SetLeBitField(auto_sink, TPS25751_AUTO_MAX_VOLTAGE_BIT,
+                           TPS25751_AUTO_VOLTAGE_WIDTH, voltage_code);
+    TPS25751_SetLeBitField(auto_sink, TPS25751_AUTO_COMPUTE_MIN_V_BIT, 1U, 0U);
+    TPS25751_SetLeBitField(auto_sink, TPS25751_AUTO_COMPUTE_MAX_V_BIT, 1U, 0U);
+    TPS25751_SetLeBitField(auto_sink, TPS25751_AUTO_PPS_ENABLE_BIT, 1U, 0U);
+
+    status = TPS25751_WritePayload(dev, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                                   auto_sink, sizeof(auto_sink));
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    status = TPS25751_RunNoDataCommand(dev, "GSrC");
+    if (status != TPS25751_OK) {
+        return status;
+    }
+
+    start_ms = HAL_GetTick();
+    while ((uint32_t)(HAL_GetTick() - start_ms) < timeout_ms) {
+        uint32_t raw;
+        uint32_t active_voltage_mv;
+
+        status = TPS25751_ReadPayload(dev, TPS25751_REG_ACTIVE_PDO,
+                                      active_pdo, sizeof(active_pdo), &len);
+        if ((status == TPS25751_OK) && (len >= 4U)) {
+            raw = TPS25751_ReadLe32(active_pdo);
+            if (((raw >> 30) & 0x03U) == 0U) {
+                active_voltage_mv = ((raw >> 10) & 0x3FFU) * 50U;
+                if (active_voltage_mv == voltage_mv) {
+                    return TPS25751_OK;
+                }
+            }
+        }
+        HAL_Delay(50U);
+    }
+
+    return TPS25751_TIMEOUT;
+}
+
+TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
+                                               uint32_t timeout_ms)
+{
+    TPS25751_Status_t status;
+    uint8_t auto_sink[TPS25751_AUTO_NEGOTIATE_SINK_LEN];
+    uint8_t len = 0U;
+
+    if ((dev == NULL) || (timeout_ms == 0U)) return TPS25751_INVALID_ARG;
+    status = TPS25751_RequireAppMode(dev);
+    if (status != TPS25751_OK) return status;
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                                  auto_sink, sizeof(auto_sink), &len);
+    if ((status != TPS25751_OK) || (len != sizeof(auto_sink)))
+        return (status != TPS25751_OK) ? status : TPS25751_BAD_LENGTH;
+
+    /* Ask explicitly for 100 W. Auto-compute used TX_SINK_CAPS from EEPROM,
+     * which is 65 W in this project and therefore kept producing 3.25 A. */
+    TPS25751_SetLeBitField(auto_sink, 2U, 1U, 0U);
+    TPS25751_SetLeBitField(auto_sink, 22U, 10U, 400U); /* 400 * 250 mW */
+    TPS25751_SetLeBitField(auto_sink, 3U, 1U, 1U);    /* no mismatch */
+    status = TPS25751_WritePayload(dev, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                                   auto_sink, sizeof(auto_sink));
+    if (status != TPS25751_OK) return status;
+    status = TPS25751_RunNoDataCommand(dev, "GSrC");
+    /* Renegotiation is asynchronous. PowerManager reads ACTIVE_RDO on its
+     * normal ticks, so never freeze the UI waiting for the partner here. */
+    return status;
 }
 
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
@@ -901,6 +1328,10 @@ const char *TPS25751_StatusToString(TPS25751_Status_t status)
             return "BAD_LENGTH";
         case TPS25751_COMMAND_ERROR:
             return "COMMAND_ERROR";
+        case TPS25751_NOT_AVAILABLE:
+            return "NOT_AVAILABLE";
+        case TPS25751_TIMEOUT:
+            return "TIMEOUT";
         default:
             return "UNKNOWN";
     }

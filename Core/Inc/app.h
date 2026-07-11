@@ -42,6 +42,5 @@ float App_GetCurrentLimit(void);
 float App_GetInputVoltage(void);
 float App_GetOutputVoltage(void);
 float App_GetOutputCurrent(void);
-uint32_t APP_GetPower(void);
 
 #endif

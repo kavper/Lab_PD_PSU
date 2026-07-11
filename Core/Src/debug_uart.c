@@ -229,6 +229,12 @@ void Debug_Printf(const char *fmt, ...)
         return;
     }
 
+#if (DEBUG_LOG_NON_BQ == 0U)
+    if (strncmp(fmt, "[BQ", 3U) != 0) {
+        return;
+    }
+#endif
+
     va_start(args, fmt);
     length = vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
@@ -253,6 +259,13 @@ void Debug_Printf(const char *fmt, ...)
     }
 
     Debug_EnqueueBytes((const uint8_t *)buffer, tx_length);
+}
+
+void Debug_BlankLine(void)
+{
+    static const uint8_t blank_line[] = "\r\n";
+
+    Debug_EnqueueBytes(blank_line, (uint32_t)(sizeof(blank_line) - 1U));
 }
 
 uint32_t Debug_GetTxBufferUsed(void)

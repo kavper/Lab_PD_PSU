@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "app.h"
+#include "debug_uart.h"
 #include "logo.h"
 #include "main.h"
 #include "psu_gui_api.h"
@@ -23,6 +24,11 @@ static float v_out = 0.0f;
 static float i_out = 0.0f;
 static float p_out = 0.0f;
 static float v_in = 0.0f;
+static float pd_voltage_v = 0.0f;
+static float pd_current_a = 0.0f;
+static float pd_power_w = 0.0f;
+static uint32_t pd_active_rdo_raw = 0U;
+static uint8_t pd_contract_valid = 0U;
 
 static float v_target_local = 0.0f;
 
@@ -472,6 +478,29 @@ static void GUI_HandleEncoder(void) {
   }
 }
 
+static void GUI_PollPdContract(void) {
+  float new_voltage_v = 0.0f;
+  float new_current_a = 0.0f;
+  float new_power_w = 0.0f;
+  uint32_t new_rdo_raw = 0U;
+  uint8_t new_valid = PSU_GuiGetPdContract(&new_voltage_v,
+                                            &new_current_a,
+                                            &new_power_w,
+                                            &new_rdo_raw);
+
+  if ((new_valid != pd_contract_valid) ||
+      (new_rdo_raw != pd_active_rdo_raw) ||
+      (new_power_w != pd_power_w)) {
+    gui_force_redraw = 1u;
+  }
+
+  pd_contract_valid = new_valid;
+  pd_active_rdo_raw = new_rdo_raw;
+  pd_voltage_v = new_voltage_v;
+  pd_current_a = new_current_a;
+  pd_power_w = new_power_w;
+}
+
 /* ================== GŁÓWNY EKRAN (128x128) ================== */
 /* UWAGA: wygląda tak jak u Ciebie, nie ruszam układu/fontów */
 static void GUI_DrawMain(void) {
@@ -502,8 +531,26 @@ static void GUI_DrawMain(void) {
   ssd1306_WriteString(buf, Font_6x8, White);
 
   ssd1306_SetCursor(2, 13);
-  uint8_t p_avail = APP_GetPower();
-  snprintf(buf, sizeof(buf), "MAX POWER: %uW", p_avail);
+  {
+    static uint32_t last_pd_draw_log_ms = 0U;
+    if (pd_contract_valid != 0U) {
+      snprintf(buf, sizeof(buf), "PD %uV %uW",
+               (unsigned int)(pd_voltage_v + 0.5f),
+               (unsigned int)(pd_power_w + 0.5f));
+    } else {
+      snprintf(buf, sizeof(buf), "PD --");
+    }
+
+#if (PSU_GUI_PD_DEBUG != 0U)
+    if ((uint32_t)(HAL_GetTick() - last_pd_draw_log_ms) >= 1000U) {
+      Debug_Printf("[GUI-DRAW] top_pd_text=\"%s\" valid=%u RDO=0x%08lX",
+                   buf,
+                   (unsigned int)pd_contract_valid,
+                   (unsigned long)pd_active_rdo_raw);
+      last_pd_draw_log_ms = HAL_GetTick();
+    }
+#endif
+  }
   ssd1306_WriteString(buf, Font_6x8, White);
 
   ssd1306_SetCursor(70, 3);
@@ -639,6 +686,8 @@ void GUI_Process(void) {
     output_enabled = psu_output_enabled;
     gui_force_redraw = 1u;
   }
+
+  GUI_PollPdContract();
 
   static btn_t btn_enc;
   static btn_t btn_onoff;
