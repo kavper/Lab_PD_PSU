@@ -2384,6 +2384,51 @@ BQ25731_Status_t BQ25731_ReadTelemetry(BQ25731_Device_t *ctx,
     return BQ25731_OK;
 }
 
+BQ25731_Status_t BQ25731_ReadAdcFast(BQ25731_Device_t *ctx,
+                                     BQ25731_Telemetry_t *telemetry)
+{
+    uint8_t raw[8];
+    BQ25731_Status_t status;
+
+    if ((ctx == NULL) || (telemetry == NULL)) return BQ25731_INVALID_ARG;
+
+    /* DecodeTelemetry also derives the safety state from ChargeOption0,
+     * ChargerStatus and ChargeOption3.  Leaving those fields at their old
+     * (often zero-initialized) values made the power manager believe that
+     * CHRG_INHIBIT had cleared and latch a false fault before it could start
+     * either charging or OTG.  Keep this read lighter than full telemetry,
+     * but always refresh every register used by the safety decision. */
+    status = BQ25731_Read16(ctx, BQ25731_REG_CHARGE_OPTION0,
+                            &telemetry->charge_option0_raw);
+    if (status != BQ25731_OK) return status;
+    status = BQ25731_Read16(ctx, BQ25731_REG_CHARGER_STATUS,
+                            &telemetry->charger_status_raw);
+    if (status != BQ25731_OK) return status;
+    status = BQ25731_Read16(ctx, BQ25731_REG_CHARGE_OPTION3,
+                            &telemetry->charge_option3_raw);
+    if (status != BQ25731_OK) return status;
+
+    status = BQ25731_ReadBlock(ctx, BQ25731_REG_ADC_VBUS_PSYS,
+                              raw, sizeof(raw));
+    if (status != BQ25731_OK) return status;
+
+    telemetry->adc_vbus_psys_raw = (uint16_t)raw[0] | ((uint16_t)raw[1] << 8);
+    telemetry->adc_ibat_raw = (uint16_t)raw[2] | ((uint16_t)raw[3] << 8);
+    telemetry->adc_iin_cmpin_raw = (uint16_t)raw[4] | ((uint16_t)raw[5] << 8);
+    telemetry->adc_vsys_vbat_raw = (uint16_t)raw[6] | ((uint16_t)raw[7] << 8);
+    telemetry->raw_adc_psys = (uint8_t)telemetry->adc_vbus_psys_raw;
+    telemetry->raw_adc_vbus = (uint8_t)(telemetry->adc_vbus_psys_raw >> 8);
+    telemetry->raw_adc_idchg = (uint8_t)telemetry->adc_ibat_raw;
+    telemetry->raw_adc_ichg = (uint8_t)(telemetry->adc_ibat_raw >> 8);
+    telemetry->raw_adc_cmpin = (uint8_t)telemetry->adc_iin_cmpin_raw;
+    telemetry->raw_adc_iin = (uint8_t)(telemetry->adc_iin_cmpin_raw >> 8);
+    telemetry->raw_adc_vbat = (uint8_t)telemetry->adc_vsys_vbat_raw;
+    telemetry->raw_adc_vsys = (uint8_t)(telemetry->adc_vsys_vbat_raw >> 8);
+    BQ25731_DecodeTelemetry(ctx, telemetry);
+    telemetry->status = BQ25731_OK;
+    return BQ25731_OK;
+}
+
 BQ25731_Status_t BQ25731_ReadMonitorSnapshot(BQ25731_Device_t *dev,
                                               BQ25731_MonitorSnapshot_t *out)
 {

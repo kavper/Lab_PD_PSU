@@ -385,6 +385,10 @@ BQ25731_Status_t BQ25731_DisableOtg(BQ25731_Device_t *ctx);
 
 BQ25731_Status_t BQ25731_ReadTelemetry(BQ25731_Device_t *ctx,
                                        BQ25731_Telemetry_t *telemetry);
+/* One TPS I2Cr transaction: update only the four contiguous ADC registers.
+ * Intended for responsive GUI monitoring after configuration is known. */
+BQ25731_Status_t BQ25731_ReadAdcFast(BQ25731_Device_t *ctx,
+                                     BQ25731_Telemetry_t *telemetry);
 BQ25731_Status_t BQ25731_ReadMonitorSnapshot(BQ25731_Device_t *dev,
                                               BQ25731_MonitorSnapshot_t *out);
 BQ25731_Status_t BQ25731_EnableMonitoringAdcOnly(BQ25731_Device_t *dev);

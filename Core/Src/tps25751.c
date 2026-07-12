@@ -1188,12 +1188,56 @@ TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
                                                uint32_t timeout_ms)
 {
     TPS25751_Status_t status;
+    uint8_t sink_caps[TPS25751_TX_SINK_CAPS_MAX_LEN];
     uint8_t auto_sink[TPS25751_AUTO_NEGOTIATE_SINK_LEN];
     uint8_t len = 0U;
+    uint8_t count;
+    uint8_t i;
+    bool found_20v = false;
 
     if ((dev == NULL) || (timeout_ms == 0U)) return TPS25751_INVALID_ARG;
     status = TPS25751_RequireAppMode(dev);
     if (status != TPS25751_OK) return status;
+
+    /* AUTO_NEGOTIATE cannot request more than our advertised Sink PDO.  The
+     * EEPROM image used by this board contains 20 V / 3.25 A (65 W), so
+     * merely asking register 0x37 for 100 W still creates a 3.25 A RDO.
+     * Raise only the current field of the existing 20 V fixed Sink PDO. */
+    status = TPS25751_ReadPayload(dev, TPS25751_REG_TX_SINK_CAPS,
+                                  sink_caps, sizeof(sink_caps), &len);
+    if ((status != TPS25751_OK) || (len < 5U))
+        return (status != TPS25751_OK) ? status : TPS25751_BAD_LENGTH;
+
+    count = (uint8_t)(sink_caps[0] & 0x07U);
+    if (count > 7U) count = 7U;
+    for (i = 0U; (i < count) && ((uint16_t)(1U + 4U * i + 4U) <= len); ++i) {
+        uint8_t *raw_ptr = &sink_caps[1U + 4U * i];
+        uint32_t raw = TPS25751_ReadLe32(raw_ptr);
+        uint32_t voltage_mv;
+        uint32_t old_current_ma;
+
+        if (((raw >> 30) & 0x03U) != 0U) continue;
+        voltage_mv = ((raw >> 10) & 0x03FFU) * 50U;
+        if (voltage_mv != 20000U) continue;
+
+        old_current_ma = (raw & 0x03FFU) * 10U;
+        raw = (raw & ~0x03FFUL) | 500U; /* 5.00 A in 10 mA units. */
+        TPS25751_WriteLe32(raw_ptr, raw);
+        found_20v = true;
+        Debug_Printf("[PD-MAX] my Sink PDO #%u: 20V current %lumA -> 5000mA",
+                     (unsigned int)(i + 1U), (unsigned long)old_current_ma);
+    }
+    if (!found_20v) {
+        Debug_Printf("[PD-MAX] cannot request 100W: my TX_SINK_CAPS has no 20V PDO");
+        return TPS25751_NOT_AVAILABLE;
+    }
+
+    /* Write only the count byte and the PDOs, not the unused register tail. */
+    len = (uint8_t)(1U + 4U * count);
+    status = TPS25751_WritePayload(dev, TPS25751_REG_TX_SINK_CAPS,
+                                   sink_caps, len);
+    if (status != TPS25751_OK) return status;
+
     status = TPS25751_ReadPayload(dev, TPS25751_REG_AUTO_NEGOTIATE_SINK,
                                   auto_sink, sizeof(auto_sink), &len);
     if ((status != TPS25751_OK) || (len != sizeof(auto_sink)))

@@ -23,6 +23,7 @@
 #define POWER_MANAGER_BQ_ADC_START_DELAY_MS 6000U
 #define POWER_MANAGER_BQ_ADC_RETRY_MS       6000U
 #define POWER_MANAGER_BQ_ADC_MAX_ATTEMPTS   5U
+#define USB_PD_FIXED_PDO_DUAL_ROLE_POWER     (1UL << 29)
 
 #define POWER_MANAGER_FAULT_TPS_NOT_AT_CONFIGURED_ADDRESS  0x1001U
 #define POWER_MANAGER_FAULT_TPS_APP_TIMEOUT                0x1002U
@@ -173,6 +174,7 @@ static void PowerManager_AutoSourcePolicy(void)
     TPS25751_Status_t status;
     uint8_t i;
     bool only_5v = true;
+    bool partner_accepts_power_role_swap = false;
 
     if (!g_pm.pd_snapshot.attached) {
         PowerManager_DisableBqOtg();
@@ -292,7 +294,7 @@ static void PowerManager_AutoSourcePolicy(void)
         }
         return;
     }
-    
+
     /* Do not shut OTG down on a transient role indication without a valid
      * Sink contract. During PR_SWAP TPS briefly reports Sink/no-contract;
      * removing PPHV there collapses VBUS and creates an endless attach loop.
@@ -314,15 +316,30 @@ static void PowerManager_AutoSourcePolicy(void)
         const TPS25751_PdoInfo_t *pdo = &g_pm.tps_telemetry.rx_source_caps.pdo[i];
         uint32_t highest_mv = (pdo->type == TPS25751_SUPPLY_FIXED) ?
                               pdo->voltage_mv : pdo->max_mv;
+        if ((i == 0U) && (pdo->type == TPS25751_SUPPLY_FIXED)) {
+            partner_accepts_power_role_swap =
+                (pdo->raw & USB_PD_FIXED_PDO_DUAL_ROLE_POWER) != 0U;
+        }
         if (highest_mv > 5500U) {
             only_5v = false;
             break;
         }
     }
-    if (!only_5v) return;
+    if (!only_5v) {
+        Debug_Printf("[PD-DECISION] partner offers >5V -> remain Sink and draw power");
+        g_pm.pd_source_swap_attempted = true;
+        return;
+    }
+    if (!partner_accepts_power_role_swap) {
+        /* A fixed Source PDO without Dual-Role Power is normally a charger.
+         * Do not repeatedly ask it to become Sink merely because it only
+         * advertises 5 V. */
+        Debug_Printf("[PD-DECISION] partner is 5V-only without Dual-Role Power -> remain Sink (charger)");
+        g_pm.pd_source_swap_attempted = true;
+        return;
+    }
 
-    g_pm.pd_source_swap_attempted = true;
-    Debug_Printf("[PD-DECISION] partner Source PDOs are 5V-only -> request PR_SWAP and power partner");
+    Debug_Printf("[PD-DECISION] partner is 5V-only and Dual-Role Power -> request PR_SWAP and power partner");
     Debug_Printf("[BQ-SET] CHRG_INHIBIT=1 ChargeCurrent=0mA reason=prepare_PR_SWAP");
     g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
     (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
@@ -342,6 +359,9 @@ static void PowerManager_AutoSourcePolicy(void)
     g_pm.bq_otg_enabled = false;
     Debug_Printf("[PD-AUTO-SOURCE] requesting PR_SWAP first; BQ OTG remains OFF until TPS role=SOURCE");
     status = TPS25751_RequestPowerRoleSource(&g_pm.tps);
+    if (status == TPS25751_OK) {
+        g_pm.pd_source_swap_attempted = true;
+    }
     /* The cached snapshot still describes the old 5 V Sink contract until
      * the next telemetry read. Invalidate it now so the charging policy can
      * never re-enable BQ during the PR_SWAP transition. */
@@ -867,7 +887,6 @@ static void PowerManager_FormatPdoShort(char *buffer,
 static bool PowerManager_DebugPdoList(const char *description,
                                       const TPS25751_PdoList_t *list)
 {
-    char line[POWER_MANAGER_PD_LINE_BUF_SIZE];
     char pdo_text[96];
     uint8_t i;
 
@@ -879,24 +898,15 @@ static bool PowerManager_DebugPdoList(const char *description,
         return false;
     }
 
-    line[0] = '\0';
-    PowerManager_Append(line,
-                        sizeof(line),
-                        "[PDO] %s: ",
-                        description);
-
     for (i = 0U; i < list->count; ++i) {
         PowerManager_FormatPdoShort(pdo_text,
                                     sizeof(pdo_text),
                                     (uint8_t)(i + 1U),
                                     &list->pdo[i]);
-        if (i > 0U) {
-            PowerManager_Append(line, sizeof(line), "  ");
-        }
-        PowerManager_Append(line, sizeof(line), "%s", pdo_text);
+        /* One PDO per UART message prevents the debug line buffer from
+         * truncating long seven-PDO capability lists. */
+        Debug_Printf("[PDO] %s %s", description, pdo_text);
     }
-
-    Debug_Printf("%s", line);
     return true;
 }
 
@@ -1236,6 +1246,9 @@ static void PowerManager_DebugPdCaps(uint32_t now_ms, bool pd_connected)
     bool interval_elapsed;
     bool changed;
     bool any_list = false;
+    uint32_t best_power_mw = 0U;
+    uint8_t best_index = 0U;
+    uint8_t i;
 
     if (!pd_connected) {
         return;
@@ -1274,6 +1287,27 @@ static void PowerManager_DebugPdCaps(uint32_t now_ms, bool pd_connected)
     any_list |= PowerManager_DebugPdoList("partner sink", &tps->rx_sink_caps);
     any_list |= PowerManager_DebugPdoList("my source", &tps->tx_source_caps);
     any_list |= PowerManager_DebugPdoList("my sink", &tps->tx_sink_caps);
+
+    for (i = 0U; i < tps->rx_source_caps.count; ++i) {
+        const TPS25751_PdoInfo_t *pdo = &tps->rx_source_caps.pdo[i];
+        uint32_t power_mw = pdo->power_mw;
+        if ((pdo->type == TPS25751_SUPPLY_FIXED) ||
+            (pdo->type == TPS25751_SUPPLY_VARIABLE))
+            power_mw = (pdo->voltage_mv != 0U ? pdo->voltage_mv : pdo->max_mv) *
+                       pdo->current_ma / 1000U;
+        if (power_mw > best_power_mw) {
+            best_power_mw = power_mw;
+            best_index = (uint8_t)(i + 1U);
+        }
+    }
+    if (best_index != 0U) {
+        const TPS25751_PdoInfo_t *best = &tps->rx_source_caps.pdo[best_index - 1U];
+        Debug_Printf("[PD-SELECT] best available PDO=#%u %lumV/%lumA %lumW; TPS requested via 100W sink policy",
+                     best_index,
+                     (unsigned long)(best->voltage_mv != 0U ? best->voltage_mv : best->max_mv),
+                     (unsigned long)best->current_ma,
+                     (unsigned long)best_power_mw);
+    }
 
     if (!any_list) {
         Debug_Printf("[PD-CAPS] no PDO received");
@@ -1557,12 +1591,14 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     g_pm.last_pd_caps_debug_tick_ms = HAL_GetTick();
     g_pm.initialized = (hi2c != NULL);
 
+    Debug_Printf("[FW] PD_BQ_FIX_2026-07-12_02 sink=100W source=5V3A");
     Debug_Printf("[PM] TPS25751 normal-operation I2Ct address: 0x%02X",
                  TPS25751_I2C_ADDR_DEFAULT);
-    Debug_Printf("[BQ] BQ25731 OTG/VAP/FRS pin has pulldown; OTG disabled in firmware for bring-up.");
+    Debug_Printf("[BQ] BQ25731 OTG/VAP/FRS pin has 100k pulldown and is driven by PA4.");
     Debug_Printf("[BQ-HW] BQ may be pre-configured by TPS/EEPROM");
     Debug_Printf("[BQ-HW] OTG/VAP/FRS pin: pulldown 100k to GND");
-    Debug_Printf("[BQ-HW] OTG allowed: NO");
+    Debug_Printf("[BQ-HW] OTG allowed: %s",
+                 (BQ25731_HW_OTG_ALLOWED != 0U) ? "YES" : "NO");
     Debug_Printf("[BQ-HW] RAC=%umOhm RSR=%umOhm", BQ25731_RAC_MOHM, BQ25731_RSR_MOHM);
     Debug_Printf("[BQ-HW] ILIM_HIZ/EN_EXTILIM not trusted during bring-up");
     Debug_Printf("[BQ-HW] ChargeVoltage may be configured by TPS EEPROM, e.g. 16800mV");
@@ -1810,7 +1846,10 @@ void PowerManager_Task(void)
             Debug_Printf("[BQ] safe state applied: CHRG_INHIBIT=1 EN_OTG=0 IIN=%umA ICHG=0mA warnings=0x%08lX",
                          BQ25731_SAFE_INPUT_CURRENT_MA,
                          (unsigned long)g_pm.bq_safe_start.warnings);
-            Debug_Printf("[BQ] OTG blocked by firmware for Digital PD PSU V2.0 hardware");
+            Debug_Printf("[BQ] OTG control: %s",
+                         (BQ25731_HW_OTG_ALLOWED != 0U) ?
+                         "enabled (EN_OTG plus PA4 hardware gate)" :
+                         "blocked by firmware");
 
             g_pm.bq_status = BQ25731_SetSenseResistors(&g_pm.bq,
                                                         BQ25731_RAC_MOHM == 5U,
@@ -1865,13 +1904,6 @@ void PowerManager_Task(void)
 
             PowerManager_UpdatePdSnapshot();
             
-            /* DEBUG: Log before AutoSourcePolicy to understand flow */
-            Debug_Printf("[STATE] SAFE_MONITORING: attached=%u role=%s OTG_enabled=%u",
-                         g_pm.pd_snapshot.attached,
-                         g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE ? "SOURCE" :
-                         g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK ? "SINK" : "UNKNOWN",
-                         g_pm.bq_otg_enabled);
-            
             /* Source diagnostics in bring-up */
             if ((PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) && 
                 (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE) &&
@@ -1894,16 +1926,18 @@ void PowerManager_Task(void)
             PowerManager_AutoSourcePolicy();
 
 #if (POWER_MANAGER_PD_REQUEST_MAX_POWER != 0U)
-            if (!g_pm.pd_snapshot.attached) {
+            if ((!g_pm.pd_snapshot.attached) ||
+                (g_pm.pd_snapshot.active_rdo_raw == 0U)) {
                 g_pm.pd_max_power_attempted = false;
             } else if ((!g_pm.pd_max_power_attempted) &&
+                       (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK) &&
                        (g_pm.tps_telemetry.active_pdo.type == TPS25751_SUPPLY_FIXED) &&
                        (g_pm.tps_telemetry.active_pdo.voltage_mv == 20000U) &&
-                       (g_pm.tps_telemetry.active_pdo.current_ma >= 5000U) &&
                        (g_pm.pd_snapshot.contract_power_mw < 90000U)) {
                 TPS25751_Status_t max_power_status;
                 g_pm.pd_max_power_attempted = true;
-                Debug_Printf("[PD-MAX] source/local policy supports 20V/5A; enabling AutoComputeSinkMinPower and requesting new source capabilities");
+                Debug_Printf("[PD-MAX] 20V Sink contract is below 90W; forcing one 100W request instead of current %lumW",
+                             (unsigned long)g_pm.pd_snapshot.contract_power_mw);
                 max_power_status = TPS25751_RequestMaxSinkPower(&g_pm.tps, 3000U);
                 Debug_Printf("[PD-MAX] renegotiation %s",
                              TPS25751_StatusToString(max_power_status));
@@ -2006,7 +2040,7 @@ void PowerManager_Task(void)
                 if (!m->vsys_valid) Debug_Printf("[BQ-ADC] VSYS unavailable");
             }
 #else
-            g_pm.bq_status = BQ25731_ReadTelemetry(&g_pm.bq, &g_pm.bq_telemetry);
+            g_pm.bq_status = BQ25731_ReadAdcFast(&g_pm.bq, &g_pm.bq_telemetry);
 #endif
             if (g_pm.bq_status != BQ25731_OK) {
                 PowerManager_SetErrorFromBq(&g_pm.bq);

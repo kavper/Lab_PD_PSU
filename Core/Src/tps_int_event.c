@@ -78,8 +78,10 @@ TPS25751_Status_t TPS_EnablePolledEvents(TPS25751_Device_t *dev)
 
 TPS25751_Status_t TPS_LimitSourceCapsTo5V(TPS25751_Device_t *dev)
 {
-    uint8_t caps[TPS25751_TX_SOURCE_CAPS_MAX_LEN], len;
-    uint8_t verify[TPS25751_TX_SOURCE_CAPS_MAX_LEN], verify_len;
+    /* Only the 31-byte useful prefix is needed for seven PDOs and routing.
+     * Do not write the full 63-byte register during startup. */
+    uint8_t caps[31U], len;
+    uint8_t verify[31U], verify_len;
     uint32_t pdo;
     TPS25751_Status_t st = TPS25751_ReadPayload(dev, 0x32U, caps,
                                                 sizeof(caps), &len);
