@@ -4,8 +4,18 @@
 #include "bq25731.h"
 #include "main.h"
 #include "tps25751.h"
+#include "tps_int_event.h"
 
 #include <stdint.h>
+
+/* Safe bring-up: Source operates only at 5V, no 9/15/20V PDO negotiation */
+#ifndef PD_SOURCE_HIGH_VOLTAGE_ENABLE
+#define PD_SOURCE_HIGH_VOLTAGE_ENABLE 0U
+#endif
+
+/* Safe Source initialization: 5V and limited current */
+#define PD_SOURCE_SAFE_VOLTAGE_MV   5000U
+#define PD_SOURCE_SAFE_CURRENT_MA    500U
 
 #ifndef POWER_MANAGER_PD_CYCLE_TEST
 #define POWER_MANAGER_PD_CYCLE_TEST 0U

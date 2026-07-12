@@ -633,7 +633,7 @@ TPS25751_Status_t TPS25751_ReadTelemetry(TPS25751_Device_t *dev,
     return TPS25751_ReadTelemetryInternal(dev, t, true);
 }
 
-static TPS25751_Status_t TPS25751_WritePayload(TPS25751_Device_t *dev,
+TPS25751_Status_t TPS25751_WritePayload(TPS25751_Device_t *dev,
                                                uint8_t reg,
                                                const uint8_t *payload,
                                                uint8_t payload_len)
@@ -1218,6 +1218,12 @@ TPS25751_Status_t TPS25751_RequestPowerRoleSource(TPS25751_Device_t *dev)
     if (dev == NULL) return TPS25751_INVALID_ARG;
     /* TPS25751 TRM: SWSr initiates a USB-PD Power Role Swap to Source. */
     return TPS25751_RunNoDataCommand(dev, "SWSr");
+}
+
+TPS25751_Status_t TPS25751_AdvertiseSourceCapabilities(TPS25751_Device_t *dev)
+{
+    /* Apply a host update of TX_SOURCE_CAPS (0x32). */
+    return TPS25751_RunNoDataCommand(dev, "SSrC");
 }
 
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,

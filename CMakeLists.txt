@@ -54,6 +54,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/power_stage.c
     Core/Src/psu_gui_api.c
     Core/Src/tps25751.c
+    Core/Src/tps_int_event.c
     Drivers/ssd1306/ssd1306.c
     Drivers/ssd1306/ssd1306_fonts.c
 )

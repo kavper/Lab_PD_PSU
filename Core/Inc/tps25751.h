@@ -196,6 +196,11 @@ TPS25751_Status_t TPS25751_ReadPayload(TPS25751_Device_t *dev,
                                        uint8_t payload_capacity,
                                        uint8_t *payload_len);
 
+TPS25751_Status_t TPS25751_WritePayload(TPS25751_Device_t *dev,
+                                        uint8_t reg,
+                                        const uint8_t *payload,
+                                        uint8_t payload_len);
+
 TPS25751_Status_t TPS25751_ReadMode(TPS25751_Device_t *dev,
                                     TPS25751_Mode_t *mode,
                                     char mode_ascii[5]);
@@ -248,6 +253,7 @@ TPS25751_Status_t TPS25751_RequestMaxSinkPower(TPS25751_Device_t *dev,
                                                uint32_t timeout_ms);
 /* Ask the connected PD partner to swap this port from Sink to Source. */
 TPS25751_Status_t TPS25751_RequestPowerRoleSource(TPS25751_Device_t *dev);
+TPS25751_Status_t TPS25751_AdvertiseSourceCapabilities(TPS25751_Device_t *dev);
 
 TPS25751_Status_t TPS25751_GetTypecStateMachine(TPS25751_Device_t *dev,
                                                 TPS25751_TypecStateMachine_t *mode);
