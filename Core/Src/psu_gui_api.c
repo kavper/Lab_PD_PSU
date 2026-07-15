@@ -192,6 +192,21 @@ uint8_t PSU_GuiIsPdContractValid(void)
     return PSU_GuiGetPdContract(NULL, NULL, NULL, NULL);
 }
 
+uint8_t PSU_GuiGetBatteryPower(float *power_w)
+{
+    PowerManager_Status_t status;
+    bool valid;
+
+    PowerManager_GetStatus(&status);
+    valid = status.bq.online && status.bq.adc_sample_valid;
+
+    if (power_w != NULL) {
+        *power_w = valid ? ((float)status.bq.battery_power_mw / 1000.0f) : 0.0f;
+    }
+
+    return valid ? 1U : 0U;
+}
+
 PSU_GuiControlMode_t PSU_GuiGetControlMode(void)
 {
     if (App_GetRequestedMode() == MODE_IDLE) {

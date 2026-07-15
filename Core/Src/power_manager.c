@@ -1,2152 +1,2135 @@
 #include "power_manager.h"
 
-#include "app.h"
 #include "debug_uart.h"
+#include "tps_int_event.h"
 
-#include <stdarg.h>
-#include <stdio.h>
 #include <string.h>
 
-#define POWER_MANAGER_TASK_MIN_PERIOD_MS   20U
-#define POWER_MANAGER_TPS_POLL_MS          200U
-#define POWER_MANAGER_TPS_APP_TIMEOUT_MS   5000U
-#define POWER_MANAGER_BQ_PROBE_RETRY_MS    1000U
-#define POWER_MANAGER_MONITOR_PERIOD_MS    120U
-#define POWER_MANAGER_DEBUG_PERIOD_MS      1000U
-#define POWER_MANAGER_PD_CAPS_DEBUG_MS     10000U
-#define POWER_MANAGER_TPS_ADDR_MIN         0x20U
-#define POWER_MANAGER_TPS_ADDR_MAX         0x27U
-#define POWER_MANAGER_TPS_PROBE_REG_MODE   0x03U
-#define POWER_MANAGER_PD_LINE_BUF_SIZE     384U
-#define POWER_MANAGER_PD_TEST_STEP_MS      5000U
-#define POWER_MANAGER_PD_TEST_TIMEOUT_MS   3000U
-#define POWER_MANAGER_BQ_ADC_START_DELAY_MS 6000U
-#define POWER_MANAGER_BQ_ADC_RETRY_MS       6000U
-#define POWER_MANAGER_BQ_ADC_MAX_ATTEMPTS   5U
-#define USB_PD_FIXED_PDO_DUAL_ROLE_POWER     (1UL << 29)
+#define PM_MODE_POLL_MS              100U
+#define PM_TPS_STEP_MS                20U
+#define PM_TPS_STATUS_STALE_MS       500U
+#define PM_PD_LOG_MS                1000U
+#define PM_BQ_START_DELAY_MS        1000U
+#define PM_BQ_INIT_STEP_MS           200U
+#define PM_BQ_RETRY_MS              2000U
+#define PM_BQ_TELEMETRY_MS          1000U
+#define PM_BQ_CONFIG_MS             5000U
+#define PM_HARD_RESET_HOLDOFF_MS     250U
+#define PM_ERROR_LOG_MS             1000U
+#define PM_POLICY_SETTLE_MS          500U
+#define PM_POLICY_STEP_MS             20U
+#define PM_POLICY_CAP_RETRY_MS       1500U
+#define PM_POLICY_ROLE_DRIFT_MS       750U
+#define PM_POLICY_SWAP_RETRY_MS      3000U
+#define PM_POLICY_MAX_CAP_ATTEMPTS      3U
+#define PM_SINK_TARGET_POWER_MW    100000U
 
-#define POWER_MANAGER_FAULT_TPS_NOT_AT_CONFIGURED_ADDRESS  0x1001U
-#define POWER_MANAGER_FAULT_TPS_APP_TIMEOUT                0x1002U
-#define POWER_MANAGER_FAULT_TPS_LOST_APP                   0x1003U
+typedef enum {
+    PM_JOB_NONE = 0,
+    PM_JOB_READ_MODE,
+    PM_JOB_READ_PORT_CONFIG,
+    PM_JOB_WRITE_PORT_CONFIG,
+    PM_JOB_READ_INT_MASK,
+    PM_JOB_WRITE_INT_MASK,
+    PM_JOB_READ_STATUS,
+    PM_JOB_READ_POWER_PATH,
+    PM_JOB_READ_POWER_STATUS,
+    PM_JOB_READ_PD_STATUS,
+    PM_JOB_READ_ADC,
+    PM_JOB_READ_ACTIVE_PDO,
+    PM_JOB_READ_ACTIVE_RDO,
+    PM_JOB_READ_EVENT,
+    PM_JOB_CLEAR_EVENT,
+    PM_JOB_GET_SINK_CAPS,
+    PM_JOB_READ_SINK_CAPS,
+    PM_JOB_READ_SOURCE_CAPS,
+    PM_JOB_READ_LOCAL_SINK_CAPS,
+    PM_JOB_READ_AUTO_SINK_POLICY,
+    PM_JOB_WRITE_AUTO_SINK_POLICY,
+    PM_JOB_RENEGOTIATE_SOURCE_CAPS,
+    PM_JOB_SWAP_TO_SOURCE,
+    PM_JOB_SWAP_TO_SINK,
+    PM_JOB_BQ_READ_OPTION0,
+    PM_JOB_BQ_WRITE_OPTION0,
+    PM_JOB_BQ_WRITE_CURRENT,
+    PM_JOB_BQ_WRITE_ADC,
+    PM_JOB_BQ_VERIFY_ADC,
+    PM_JOB_BQ_READ_CURRENT,
+    PM_JOB_BQ_READ_VOLTAGE,
+    PM_JOB_BQ_READ_IIN,
+    PM_JOB_BQ_READ_ID,
+    PM_JOB_BQ_READ_ADC,
+    PM_JOB_BQ_READ_CONFIG_BLOCK,
+    PM_JOB_BQ_READ_STATUS_BLOCK,
+    PM_JOB_BQ_READ_ADC_BLOCK,
+    PM_JOB_BQ_WRITE_IIN,
+    PM_JOB_BQ_APPLY_OPTION0,
+    PM_JOB_BQ_APPLY_CURRENT
+} PowerManager_Job_t;
 
-#ifndef POWER_MANAGER_DIAGNOSTIC_TPS_SCAN
-#define POWER_MANAGER_DIAGNOSTIC_TPS_SCAN   0U
-#endif
+typedef enum {
+    PM_BQ_INIT_WAIT = 0,
+    PM_BQ_INIT_READ_ID,
+    PM_BQ_INIT_READ_OPTION0,
+    PM_BQ_INIT_WRITE_OPTION0,
+    PM_BQ_INIT_WRITE_CURRENT,
+    PM_BQ_INIT_WRITE_ADC,
+    PM_BQ_INIT_VERIFY_ADC,
+    PM_BQ_INIT_DONE
+} PowerManager_BqInit_t;
 
-#ifndef POWER_MANAGER_PD_RAW_DEBUG
-#define POWER_MANAGER_PD_RAW_DEBUG         0U
-#endif
-
-#ifndef POWER_MANAGER_GENERAL_DEBUG
-#define POWER_MANAGER_GENERAL_DEBUG        1U
-#endif
+typedef enum {
+    PM_POLICY_IDLE = 0,
+    PM_POLICY_WAIT_SETTLE,
+    PM_POLICY_GET_SINK_CAPS,
+    PM_POLICY_READ_SINK_CAPS,
+    PM_POLICY_READ_SOURCE_CAPS,
+    PM_POLICY_READ_LOCAL_SINK_CAPS,
+    PM_POLICY_READ_AUTO_SINK_POLICY,
+    PM_POLICY_WRITE_AUTO_SINK_POLICY,
+    PM_POLICY_RENEGOTIATE_SOURCE_CAPS,
+    PM_POLICY_DECIDE,
+    PM_POLICY_SWAP_TO_SOURCE,
+    PM_POLICY_SWAP_TO_SINK,
+    PM_POLICY_DONE
+} PowerManager_PolicyPhase_t;
 
 typedef struct {
     I2C_HandleTypeDef *hi2c;
     TPS25751_Device_t tps;
     BQ25731_Device_t bq;
-    TPS25751_Telemetry_t tps_telemetry;
-    BQ25731_Telemetry_t bq_telemetry;
-    BQ25731_MonitorSnapshot_t bq_monitor;
-    BQ25731_SafeStartupResult_t bq_safe_start;
-    PowerManager_PdSnapshot_t pd_snapshot;
-    TPS25751_Status_t tps_status;
-    BQ25731_Status_t bq_status;
-    PowerManager_State_t state;
-    uint32_t next_task_tick_ms;
-    uint32_t last_debug_tick_ms;
-    uint32_t last_pd_caps_debug_tick_ms;
-    uint32_t last_pd_caps_signature;
-    uint32_t last_bq_monitor_tick_ms;
-    uint32_t last_tps_event_poll_ms;
-    uint32_t bq_adc_next_attempt_ms;
-    uint32_t tps_wait_start_tick_ms;
-    uint32_t last_tps_mode_log_tick_ms;
-    uint32_t last_error_reg;
-    uint32_t last_error_code;
-    uint8_t tps_addr_selected;
-    bool pd_was_connected;
-    bool pd_caps_valid;
-    bool pd_max_power_attempted;
-    bool pd_source_swap_attempted;
-    bool bq_adc_running_confirmed;
-    bool bq_charging_enabled;
-    bool bq_otg_enabled;
-    bool bq_otg_disable_pending;
-    bool tps_event_mask_ready;
-    bool source_caps_safe;
-    uint32_t bq_applied_input_current_ma;
-    uint8_t bq_adc_attempts;
-    TPS25751_Mode_t last_logged_tps_mode;
-#if (POWER_MANAGER_PD_CYCLE_TEST != 0U)
-    uint32_t pd_test_next_tick_ms;
-    uint32_t pd_test_last_blocked_log_ms;
-    uint8_t pd_test_step;
-#endif
+    PowerManager_Status_t status;
+
+    PowerManager_Job_t job;
+    PowerManager_Job_t last_job;
+    PowerManager_BqInit_t bq_init;
+    PowerManager_PolicyPhase_t policy_phase;
+    uint8_t telemetry_phase;
+    uint8_t bq_phase;
+    uint8_t bq_telemetry_phase;
+    uint8_t port_config[TPS25751_PORT_CONFIG_LEN];
+    uint8_t int_mask[TPS_INT_EVENT_BYTES];
+    uint8_t event_to_clear[TPS_INT_EVENT_BYTES];
+
     bool initialized;
+    bool mode_update_pending;
+    bool port_write_pending;
+    bool event_mask_ready;
+    bool event_mask_write_pending;
+    bool event_clear_pending;
+    bool bq_iin_write_pending;
+    bool bq_option0_write_pending;
+    bool bq_current_write_pending;
+
+    uint32_t next_mode_ms;
+    uint32_t next_tps_step_ms;
+    uint32_t next_bq_action_ms;
+    uint32_t next_bq_telemetry_ms;
+    uint32_t next_bq_config_ms;
+    uint32_t policy_next_ms;
+    uint32_t app_seen_ms;
+    uint32_t status_updated_ms;
+    uint32_t hard_reset_holdoff_until_ms;
+    uint32_t last_pd_log_ms;
+    uint32_t last_error_log_ms;
+    uint32_t tps_error_count;
+    uint32_t bq_error_count;
+    uint32_t bq_iin_target_ma;
+    uint32_t bq_iin_applied_ma;
+    uint32_t bq_iin_failed_rdo_raw;
+    uint32_t policy_role_mismatch_since_ms;
+    uint16_t bq_option0_target;
+    uint8_t previous_hard_reset_reason;
+    uint8_t policy_cap_attempts;
+    bool previous_attached;
+    bool policy_swap_attempted;
+    bool policy_100w_attempted;
+    bool partner_source_caps_current;
+    bool partner_sink_observed;
+    TPS25751_PowerRole_t policy_desired_role;
+    TPS25751_Capabilities_t partner_sink_caps;
+    TPS25751_Capabilities_t partner_source_caps;
+    TPS25751_Capabilities_t local_sink_caps;
+    TPS25751_AutoNegotiateSink_t auto_sink_policy;
 } PowerManager_Context_t;
 
 static PowerManager_Context_t g_pm;
 
-static void PowerManager_PollTpsEvents(uint32_t now_ms)
+static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role);
+
+static bool PowerManager_TickReached(uint32_t now_ms, uint32_t deadline_ms)
 {
-    uint8_t event[TPS_INT_EVENT_BYTES];
-    TPS_IntEventSnapshot_t snap;
-    TPS25751_Status_t st;
-    bool emergency;
-
-    /* Never touch INT_EVENT/INT_MASK while TPS is in BOOT/PTCH/APP startup
-     * or while the BQ bridge is being initialized. Those transactions used
-     * to race normal telemetry and could leave the whole manager UNKNOWN. */
-    if (((g_pm.state != POWER_MANAGER_SAFE_MONITORING) &&
-         (g_pm.state != POWER_MANAGER_DEGRADED_BQ)) ||
-        (g_pm.tps_telemetry.mode != TPS25751_MODE_APP) ||
-        (g_pm.tps_addr_selected == 0U) ||
-        ((uint32_t)(now_ms - g_pm.last_tps_event_poll_ms) < TPS_INT_EVENT_POLL_MS)) return;
-    g_pm.last_tps_event_poll_ms = now_ms;
-
-    if (!g_pm.tps_event_mask_ready) {
-        st = TPS_EnablePolledEvents(&g_pm.tps);
-        if (st == TPS25751_OK) {
-            g_pm.tps_event_mask_ready = true;
-            Debug_Printf("[SRC] state=POLLING_5MS");
-        }
-        return;
-    }
-
-    st = TPS_ReadIntEvent(&g_pm.tps, event);
-    if ((st != TPS25751_OK) || !TPS_IntEventAny(event)) return;
-
-    /* Bit 3 means "plug insertion OR removal". It must never directly kill
-     * OTG because it is also asserted on a valid attach (this previously
-     * produced EN_OTG=1/IN_OTG=1 with the physical OTG_EN pin already LOW).
-     * Detach is confirmed by normal TPS telemetry. Only unambiguous hard
-     * reset and unable-to-source are immediate hardware shutdowns. */
-    emergency = TPS_IntEventBit(event, 1U) || TPS_IntEventBit(event, 46U);
-    if (emergency) {
-        /* This GPIO write is deliberately first and does not use the slow
-         * TPS-to-BQ I2C controller bridge. */
-        HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-        g_pm.bq_otg_enabled = false;
-        g_pm.bq_otg_disable_pending = true;
-        Debug_Printf("[SRC] event=%s OTG_PIN=LOW",
-                     TPS_IntEventBit(event, 1U) ? "HARD_RESET" : "SOURCE_FAULT");
-    } else {
-        Debug_Printf("[SRC] event=%s raw=0x%02X%02X OTG_PIN=%u",
-                     TPS_IntEventBit(event, 3U) ? "PLUG_CHANGE" : "PD",
-                     event[1], event[0],
-                     HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin));
-    }
-
-    memset(&snap, 0, sizeof(snap));
-    if (TPS_ReadEventSnapshot(&g_pm.tps, &snap) == TPS25751_OK) {
-        Debug_Printf("[SRC] RDO=0x%08lX PDO=0x%08lX PP3=0x%08lX",
-                     (unsigned long)snap.active_rdo,
-                     (unsigned long)snap.active_pdo,
-                     (unsigned long)snap.power_path);
-#if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U)
-        /* Fixed PDO voltage is bits 19:10 in 50 mV units. */
-        if ((((snap.active_pdo >> 10) & 0x3FFU) * 50U) > 5500U) {
-            HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-            g_pm.bq_otg_enabled = false;
-            g_pm.bq_otg_disable_pending = true;
-            Debug_Printf("[SRC] higher voltage request seen but disabled in safe bring-up");
-        }
-#endif
-    }
-    (void)TPS_ClearIntEvent(&g_pm.tps, event);
+    return (int32_t)(now_ms - deadline_ms) >= 0;
 }
 
-static void PowerManager_DisableBqOtg(void)
-{
-    /* Hardware gate first: converter stops even if the I2C bridge is lost. */
-    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-    if (g_pm.bq_otg_enabled) {
-        BQ25731_Status_t status = BQ25731_DisableOtg(&g_pm.bq);
-        Debug_Printf("[SRC] detach: OTG disabled pin=LOW register=%s",
-                     BQ25731_StatusToString(status));
-    }
-    g_pm.bq_otg_enabled = false;
-}
-
-static void PowerManager_AutoSourcePolicy(void)
-{
-    TPS25751_Status_t status;
-    uint8_t i;
-    bool only_5v = true;
-    bool partner_accepts_power_role_swap = false;
-
-    if (!g_pm.pd_snapshot.attached) {
-        PowerManager_DisableBqOtg();
-        g_pm.pd_source_swap_attempted = false;
-        return;
-    }
-
-#if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U)
-    if (!g_pm.source_caps_safe) {
-        HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-        return;
-    }
-#endif
-
-    /* A DRP connection can resolve directly as Source, without first making
-     * a 5 V Sink contract and without an MCU-issued SWSr. PPHV must then be
-     * brought up immediately from BQ. */
-    if (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE) {
-        if (!g_pm.bq_otg_enabled) {
-            Debug_Printf("[PD-DECISION] TPS role=SOURCE -> use BQ through PP3 at safe 5V");
-            Debug_Printf("[BQ-SET] CHRG_INHIBIT=1 reason=enter_source");
-            g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
-            Debug_Printf("[BQ-SET] ChargeCurrent=0mA reason=enter_source");
-            (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
-            HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-            if (g_pm.bq_status == BQ25731_OK)
-                g_pm.bq_status = BQ25731_DisableOtg(&g_pm.bq);
-            
-            /* Safe Source initialization: always start at 5V in bring-up mode */
-            if (g_pm.bq_status == BQ25731_OK) {
-                uint32_t otg_voltage_mv = (PD_SOURCE_HIGH_VOLTAGE_ENABLE != 0U) ?
-                                          BQ_USER_OTG_INITIAL_VOLTAGE_MV :
-                                          PD_SOURCE_SAFE_VOLTAGE_MV;
-                uint32_t otg_current_ma = BQ_USER_OTG_INITIAL_CURRENT_MA;
-                
-                if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U)
-                    otg_current_ma = 3000U;
-                
-                Debug_Printf("[BQ-SET] OTGVoltage=%lumV OTGCurrent=%lumA EN_OTG=1",
-                             (unsigned long)otg_voltage_mv,
-                             (unsigned long)otg_current_ma);
-                g_pm.bq_status = BQ25731_EnableOtg(&g_pm.bq, otg_voltage_mv,
-                                                   otg_current_ma, false);
-            }
-            
-            if (g_pm.bq_status == BQ25731_OK) {
-                uint16_t charger_status = 0U;
-                HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
-                HAL_Delay(20U);
-
-                /* One diagnostic bridge read is allowed during the state
-                 * transition. Never regard PPHV as ready without IN_OTG. */
-                g_pm.bq_status = BQ25731_ReadReg16(&g_pm.bq, 0x20U,
-                                                   &charger_status);
-                if ((g_pm.bq_status != BQ25731_OK) ||
-                    ((charger_status & 0x00FFU) != 0U)) {
-                    uint16_t opt3 = 0U, otgv = 0U, otgi = 0U;
-                    (void)BQ25731_ReadReg16(&g_pm.bq, 0x34U, &opt3);
-                    (void)BQ25731_ReadReg16(&g_pm.bq, 0x06U, &otgv);
-                    (void)BQ25731_ReadReg16(&g_pm.bq, 0x08U, &otgi);
-                    Debug_Printf("[BQ-FAULT] STATUS=0x%04X OPT3=0x%04X OTGV=0x%04X OTGI=0x%04X UVP=%u OVP=%u FORCE_OFF=%u VSYS_UVP=%u SYS_OVP=%u ACOC=%u BATOC=%u ACOV=%u PIN=%u",
-                                 charger_status, opt3, otgv, otgi,
-                                 (charger_status & 0x0001U) != 0U,
-                                 (charger_status & 0x0002U) != 0U,
-                                 (charger_status & 0x0004U) != 0U,
-                                 (charger_status & 0x0008U) != 0U,
-                                 (charger_status & 0x0010U) != 0U,
-                                 (charger_status & 0x0020U) != 0U,
-                                 (charger_status & 0x0040U) != 0U,
-                                 (charger_status & 0x0080U) != 0U,
-                                 HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin));
-                    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin,
-                                      GPIO_PIN_RESET);
-                    (void)BQ25731_DisableOtg(&g_pm.bq);
-                    g_pm.bq_otg_enabled = false;
-                    Debug_Printf("[SRC] BQ_OTG=FAILED IN_OTG=0");
-                    return;
-                }
-
-                g_pm.bq_otg_enabled = true;
-                g_pm.bq_charging_enabled = false;
-                g_pm.bq_applied_input_current_ma = 0U;
-                
-                if ((charger_status & 0x0100U) != 0U) {
-                    Debug_Printf("[SRC] BQ_OTG=5000mV/%umA IN_OTG=1",
-                                 BQ_USER_OTG_INITIAL_CURRENT_MA);
-                    Debug_Printf("[BQ-OTG-CHECK] STATUS=0x%04X EN_OTG=1 IN_OTG=1 PIN=%u",
-                                 charger_status,
-                                 HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin));
-                } else {
-                    /* No BQ fault: soft-start is still in progress. Do not
-                     * tear OTG down and restart the entire slow bridge
-                     * sequence; normal telemetry confirms IN_OTG later. */
-                    Debug_Printf("[BQ-OTG-CHECK] STATUS=0x%04X EN_OTG=1 IN_OTG=0 STARTING PIN=%u",
-                                 charger_status,
-                                 HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin));
-                }
-                Debug_Printf("[SRC-INIT] EN_OTG=1 PIN=1 voltage=%umV current=%umA VBUS=%umV",
-                             PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U ? PD_SOURCE_SAFE_VOLTAGE_MV : BQ_USER_OTG_INITIAL_VOLTAGE_MV,
-                             BQ_USER_OTG_INITIAL_CURRENT_MA,
-                             g_pm.tps_telemetry.vbus_mv);
-                
-                if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) {
-                    Debug_Printf("[SRC] state=SOURCE voltage=%umV current_limit=%umA bringup_mode=YES",
-                                 PD_SOURCE_SAFE_VOLTAGE_MV,
-                                 BQ_USER_OTG_INITIAL_CURRENT_MA);
-                } else {
-                    Debug_Printf("[SRC] state=SOURCE voltage=%lumV current_limit=%lumA",
-                                 (unsigned long)BQ_USER_OTG_INITIAL_VOLTAGE_MV,
-                                 (unsigned long)BQ_USER_OTG_INITIAL_CURRENT_MA);
-                }
-            } else {
-                HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-                Debug_Printf("[SRC] FAILED: OTG init error %s",
-                             BQ25731_StatusToString(g_pm.bq_status));
-            }
-        }
-        return;
-    }
-
-    /* Do not shut OTG down on a transient role indication without a valid
-     * Sink contract. During PR_SWAP TPS briefly reports Sink/no-contract;
-     * removing PPHV there collapses VBUS and creates an endless attach loop.
-     * A real Sink contract is handled below by the charging policy, which
-     * disables OTG before enabling charge. Detach is handled above. */
-    if (g_pm.pd_source_swap_attempted ||
-        (g_pm.pd_snapshot.power_role != POWER_MANAGER_PD_ROLE_SINK) ||
-        (g_pm.pd_snapshot.active_rdo_raw == 0U) ||
-        (g_pm.pd_snapshot.contract_voltage_mv > 5500U)) return;
-
-    /* A partner which can source only 5 V is treated as a device that should
-     * be powered by us.  This PR_SWAP is also permitted in safe 5 V mode;
-     * our advertised Source capabilities are independently limited to 5 V. */
-    status = TPS25751_ReadCapabilityLists(&g_pm.tps, &g_pm.tps_telemetry);
-    if ((status != TPS25751_OK) ||
-        (g_pm.tps_telemetry.rx_source_caps.count == 0U)) return;
-
-    for (i = 0U; i < g_pm.tps_telemetry.rx_source_caps.count; ++i) {
-        const TPS25751_PdoInfo_t *pdo = &g_pm.tps_telemetry.rx_source_caps.pdo[i];
-        uint32_t highest_mv = (pdo->type == TPS25751_SUPPLY_FIXED) ?
-                              pdo->voltage_mv : pdo->max_mv;
-        if ((i == 0U) && (pdo->type == TPS25751_SUPPLY_FIXED)) {
-            partner_accepts_power_role_swap =
-                (pdo->raw & USB_PD_FIXED_PDO_DUAL_ROLE_POWER) != 0U;
-        }
-        if (highest_mv > 5500U) {
-            only_5v = false;
-            break;
-        }
-    }
-    if (!only_5v) {
-        Debug_Printf("[PD-DECISION] partner offers >5V -> remain Sink and draw power");
-        g_pm.pd_source_swap_attempted = true;
-        return;
-    }
-    if (!partner_accepts_power_role_swap) {
-        /* A fixed Source PDO without Dual-Role Power is normally a charger.
-         * Do not repeatedly ask it to become Sink merely because it only
-         * advertises 5 V. */
-        Debug_Printf("[PD-DECISION] partner is 5V-only without Dual-Role Power -> remain Sink (charger)");
-        g_pm.pd_source_swap_attempted = true;
-        return;
-    }
-
-    Debug_Printf("[PD-DECISION] partner is 5V-only and Dual-Role Power -> request PR_SWAP and power partner");
-    Debug_Printf("[BQ-SET] CHRG_INHIBIT=1 ChargeCurrent=0mA reason=prepare_PR_SWAP");
-    g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
-    (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
-    g_pm.bq_charging_enabled = false;
-    g_pm.bq_applied_input_current_ma = 0U;
-    if (g_pm.bq_status != BQ25731_OK) {
-        Debug_Printf("[PD-AUTO-SOURCE] blocked: BQ inhibit failed (%s)",
-                     BQ25731_StatusToString(g_pm.bq_status));
-        return;
-    }
-
-    /* Do not enable BQ OTG while TPS is still Sink and PP3 is an input.
-     * PP1/PP5V supplies Vsafe5V during PR_SWAP. BQ is enabled only after a
-     * subsequent TPS telemetry sample confirms the Source role. */
-    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-    (void)BQ25731_DisableOtg(&g_pm.bq);
-    g_pm.bq_otg_enabled = false;
-    Debug_Printf("[PD-AUTO-SOURCE] requesting PR_SWAP first; BQ OTG remains OFF until TPS role=SOURCE");
-    status = TPS25751_RequestPowerRoleSource(&g_pm.tps);
-    if (status == TPS25751_OK) {
-        g_pm.pd_source_swap_attempted = true;
-    }
-    /* The cached snapshot still describes the old 5 V Sink contract until
-     * the next telemetry read. Invalidate it now so the charging policy can
-     * never re-enable BQ during the PR_SWAP transition. */
-    g_pm.pd_snapshot.active_rdo_raw = 0U;
-    g_pm.pd_snapshot.contract_voltage_mv = 0U;
-    g_pm.pd_snapshot.contract_current_ma = 0U;
-    g_pm.pd_snapshot.contract_power_mw = 0U;
-    Debug_Printf("[PD-AUTO-SOURCE] SWSr command=%s; partner may still accept or reject the swap",
-                 TPS25751_StatusToString(status));
-}
-
-static void PowerManager_UpdateBqChargingPolicy(void)
-{
-    uint32_t input_ma = 0U;
-    
-    /* CRITICAL: In Source mode (OTG enabled), do NOT touch charging policy */
-    if ((PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) && g_pm.bq_otg_enabled) {
-        Debug_Printf("[SINK-POLICY] OTG active - skipping charging policy (Source mode)");
-        return;
-    }
-    
-    bool valid_contract = (BQ_USER_CHARGING_ENABLE != 0U) &&
-        g_pm.pd_snapshot.attached &&
-        (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK) &&
-        (g_pm.pd_snapshot.active_rdo_raw != 0U) &&
-        (g_pm.pd_snapshot.contract_voltage_mv != 0U) &&
-        (g_pm.pd_snapshot.contract_current_ma > BQ_USER_PD_CURRENT_MARGIN_MA);
-
-    if (valid_contract && g_pm.bq_otg_enabled) {
-        Debug_Printf("[SINK-POLICY] Disabling OTG because valid SINK contract detected");
-        PowerManager_DisableBqOtg();
-    }
-
-    if (valid_contract) {
-        input_ma = g_pm.pd_snapshot.contract_current_ma - BQ_USER_PD_CURRENT_MARGIN_MA;
-        if (input_ma > BQ_USER_MAX_INPUT_CURRENT_MA)
-            input_ma = BQ_USER_MAX_INPUT_CURRENT_MA;
-        if (input_ma < BQ_USER_MIN_INPUT_CURRENT_MA)
-            valid_contract = false;
-    }
-
-    if (!valid_contract) {
-        if (g_pm.bq_charging_enabled) {
-            g_pm.bq_status = BQ25731_InhibitCharging(&g_pm.bq, NULL, NULL);
-            (void)BQ25731_SetChargeCurrent(&g_pm.bq, 0U, NULL, NULL);
-            Debug_Printf("[BQ-CHARGE] disabled: USB-C sink contract lost/invalid (%s)",
-                         BQ25731_StatusToString(g_pm.bq_status));
-        }
-        g_pm.bq_charging_enabled = false;
-        g_pm.bq_applied_input_current_ma = 0U;
-        return;
-    }
-
-    if (g_pm.bq_charging_enabled &&
-        (g_pm.bq_applied_input_current_ma == input_ma)) return;
-
-    Debug_Printf("[PD-DECISION] partner supplies %lumV/%lumA -> remain SINK and charge battery",
-                 (unsigned long)g_pm.pd_snapshot.contract_voltage_mv,
-                 (unsigned long)g_pm.pd_snapshot.contract_current_ma);
-    Debug_Printf("[BQ-SET] ChargeVoltage=%lumV InputCurrent=%lumA ChargeCurrent=%lumA CHRG_INHIBIT=0",
-                 (unsigned long)BQ_USER_CHARGE_VOLTAGE_MV,
-                 (unsigned long)input_ma,
-                 (unsigned long)BQ_USER_MAX_CHARGE_CURRENT_MA);
-    Debug_Printf("[BQ-CHARGE] contract=%lumV/%lumA; applying VREG=%lumV IIN=%lumA ICHG_MAX=%lumA",
-                 (unsigned long)g_pm.pd_snapshot.contract_voltage_mv,
-                 (unsigned long)g_pm.pd_snapshot.contract_current_ma,
-                 (unsigned long)BQ_USER_CHARGE_VOLTAGE_MV,
-                 (unsigned long)input_ma,
-                 (unsigned long)BQ_USER_MAX_CHARGE_CURRENT_MA);
-    g_pm.bq_status = BQ25731_ConfigureForCharging(&g_pm.bq, input_ma,
-                                                  BQ_USER_MAX_CHARGE_CURRENT_MA,
-                                                  BQ_USER_CHARGE_VOLTAGE_MV);
-    g_pm.bq_charging_enabled = (g_pm.bq_status == BQ25731_OK);
-    g_pm.bq_applied_input_current_ma = g_pm.bq_charging_enabled ? input_ma : 0U;
-    Debug_Printf("[BQ-CHARGE] %s (%s)",
-                 g_pm.bq_charging_enabled ? "enabled" : "FAILED; charger remains inhibited",
-                 BQ25731_StatusToString(g_pm.bq_status));
-}
-
-static const char *PowerManager_StateText(PowerManager_State_t state)
+static const char *PowerManager_StateToString(PowerManager_State_t state)
 {
     switch (state) {
-        case POWER_MANAGER_INIT:
-            return "INIT";
-        case POWER_MANAGER_TPS_WAIT_APP:
-            return "TPS_WAIT_APP";
-        case POWER_MANAGER_TPS_READY:
-            return "TPS_READY";
-        case POWER_MANAGER_BQ_PROBE:
-            return "BQ_PROBE";
-        case POWER_MANAGER_BQ_SAFE_START:
-            return "BQ_SAFE_START";
-        case POWER_MANAGER_SAFE_MONITORING:
-            return "SAFE_MONITORING";
-        case POWER_MANAGER_DEGRADED_BQ:
-            return "DEGRADED_BQ";
-        case POWER_MANAGER_FAULT:
-        default:
-            return "FAULT";
+        case POWER_MANAGER_INIT: return "INIT";
+        case POWER_MANAGER_TPS_WAIT_APP: return "TPS_WAIT_APP";
+        case POWER_MANAGER_TPS_READY: return "TPS_READY";
+        case POWER_MANAGER_BQ_PROBE: return "BQ_PROBE";
+        case POWER_MANAGER_BQ_ADC_SETUP: return "BQ_ADC_SETUP";
+        case POWER_MANAGER_RUN: return "RUN";
+        case POWER_MANAGER_DEGRADED: return "DEGRADED";
+        default: return "FAULT";
     }
 }
 
-static const char *PowerManager_I2cText(const I2C_HandleTypeDef *hi2c)
+static const char *PowerManager_UserModeToString(PowerManager_UserMode_t mode)
 {
-    if ((hi2c == NULL) || (hi2c->Instance == NULL)) {
-        return "I2C?";
+    switch (mode) {
+        case POWER_MANAGER_USER_AUTO: return "AUTO";
+        case POWER_MANAGER_USER_SINK_ONLY: return "SINK_ONLY";
+        case POWER_MANAGER_USER_SOURCE_ONLY: return "SOURCE_ONLY";
+        default: return "OFF";
     }
-
-    if (hi2c->Instance == I2C3) {
-        return "I2C3";
-    }
-    if (hi2c->Instance == I2C4) {
-        return "I2C4";
-    }
-
-    return "I2C*";
 }
 
-static void PowerManager_DebugSeparator(const char *title)
+static const char *PowerManager_JobToString(PowerManager_Job_t job)
 {
-    if (title == NULL) {
-        Debug_Printf("-----");
+    switch (job) {
+        case PM_JOB_READ_MODE: return "READ_MODE";
+        case PM_JOB_READ_PORT_CONFIG: return "READ_PORT_CONFIG";
+        case PM_JOB_WRITE_PORT_CONFIG: return "WRITE_PORT_CONFIG";
+        case PM_JOB_READ_INT_MASK: return "READ_INT_MASK";
+        case PM_JOB_WRITE_INT_MASK: return "WRITE_INT_MASK";
+        case PM_JOB_READ_STATUS: return "READ_STATUS";
+        case PM_JOB_READ_POWER_PATH: return "READ_POWER_PATH";
+        case PM_JOB_READ_POWER_STATUS: return "READ_POWER_STATUS";
+        case PM_JOB_READ_PD_STATUS: return "READ_PD_STATUS";
+        case PM_JOB_READ_ADC: return "READ_TPS_ADC";
+        case PM_JOB_READ_ACTIVE_PDO: return "READ_ACTIVE_PDO";
+        case PM_JOB_READ_ACTIVE_RDO: return "READ_ACTIVE_RDO";
+        case PM_JOB_READ_EVENT: return "READ_EVENT";
+        case PM_JOB_CLEAR_EVENT: return "CLEAR_EVENT";
+        case PM_JOB_GET_SINK_CAPS: return "GET_SINK_CAPS";
+        case PM_JOB_READ_SINK_CAPS: return "READ_SINK_CAPS";
+        case PM_JOB_READ_SOURCE_CAPS: return "READ_SOURCE_CAPS";
+        case PM_JOB_READ_LOCAL_SINK_CAPS: return "READ_LOCAL_SINK_CAPS";
+        case PM_JOB_READ_AUTO_SINK_POLICY: return "READ_AUTO_SINK_POLICY";
+        case PM_JOB_WRITE_AUTO_SINK_POLICY: return "WRITE_AUTO_SINK_POLICY";
+        case PM_JOB_RENEGOTIATE_SOURCE_CAPS: return "RENEGOTIATE_SOURCE_CAPS";
+        case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
+        case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
+        case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
+        case PM_JOB_BQ_WRITE_OPTION0: return "BQ_WRITE_OPTION0";
+        case PM_JOB_BQ_WRITE_CURRENT: return "BQ_WRITE_CURRENT";
+        case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC";
+        case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
+        case PM_JOB_BQ_READ_CURRENT: return "BQ_READ_CURRENT";
+        case PM_JOB_BQ_READ_VOLTAGE: return "BQ_READ_VOLTAGE";
+        case PM_JOB_BQ_READ_IIN: return "BQ_READ_IIN";
+        case PM_JOB_BQ_READ_ID: return "BQ_READ_ID";
+        case PM_JOB_BQ_READ_ADC: return "BQ_READ_ADC";
+        case PM_JOB_BQ_READ_CONFIG_BLOCK: return "BQ_READ_CONFIG";
+        case PM_JOB_BQ_READ_STATUS_BLOCK: return "BQ_READ_STATUS";
+        case PM_JOB_BQ_READ_ADC_BLOCK: return "BQ_READ_ADC_BLOCK";
+        case PM_JOB_BQ_WRITE_IIN: return "BQ_WRITE_IIN";
+        case PM_JOB_BQ_APPLY_OPTION0: return "BQ_APPLY_OPTION0";
+        case PM_JOB_BQ_APPLY_CURRENT: return "BQ_APPLY_CURRENT";
+        default: return "NONE";
+    }
+}
+
+static void PowerManager_LogError(const char *source,
+                                  TPS25751_Status_t status,
+                                  uint32_t count,
+                                  uint32_t now_ms)
+{
+    if ((count != 1U) &&
+        !PowerManager_TickReached(now_ms,
+                                  g_pm.last_error_log_ms + PM_ERROR_LOG_MS)) {
         return;
     }
-
-    Debug_Printf("----- %s -----", title);
+    g_pm.last_error_log_ms = now_ms;
+    Debug_Printf("[PM-ERR] src=%s job=%s status=%s reg=0x%02X req=%u got=%u task=%u hal=0x%08lX i2c_state=0x%08lX count=%lu",
+                 source,
+                 PowerManager_JobToString(g_pm.last_job),
+                 TPS25751_StatusToString(status),
+                 g_pm.tps.register_address,
+                 g_pm.tps.requested_length,
+                 g_pm.tps.reported_length,
+                 g_pm.tps.task_return_code,
+                 (unsigned long)g_pm.tps.hal_error,
+                 (unsigned long)HAL_I2C_GetState(g_pm.hi2c),
+                 (unsigned long)count);
 }
 
-static uint32_t PowerManager_IntPart(uint32_t value, uint32_t scale)
+static void PowerManager_SetState(PowerManager_State_t state)
 {
-    if (scale == 0U) {
-        return value;
-    }
-
-    return value / scale;
-}
-
-static uint32_t PowerManager_FracPart(uint32_t value, uint32_t scale)
-{
-    if (scale == 0U) {
-        return 0U;
-    }
-
-    return value % scale;
-}
-
-static uint32_t PowerManager_RoundToNearest(uint32_t value, uint32_t quantum)
-{
-    if (quantum == 0U) {
-        return value;
-    }
-
-    return ((value + (quantum / 2U)) / quantum) * quantum;
-}
-
-static void PowerManager_Append(char *buffer, size_t buffer_len, const char *fmt, ...)
-{
-    size_t used;
-    va_list args;
-
-    if ((buffer == NULL) || (buffer_len == 0U) || (fmt == NULL)) {
-        return;
-    }
-
-    used = strlen(buffer);
-    if (used >= (buffer_len - 1U)) {
-        return;
-    }
-
-    va_start(args, fmt);
-    (void)vsnprintf(&buffer[used], buffer_len - used, fmt, args);
-    va_end(args);
-}
-
-static const char *PowerManager_PortRoleText(const TPS25751_Telemetry_t *tps)
-{
-    if ((tps != NULL) && tps->pd_role_source) {
-        return "SRC";
-    }
-
-    return "SNK";
-}
-
-static const char *PowerManager_DataRoleText(const TPS25751_Telemetry_t *tps)
-{
-    if ((tps != NULL) && tps->data_role_dfp) {
-        return "DFP";
-    }
-
-    return "UFP";
-}
-
-static const char *PowerManager_PdContractText(uint32_t pd_contract)
-{
-    return (pd_contract != 0U) ? "YES" : "NO";
-}
-
-static const char *PowerManager_RdoDirectionText(const TPS25751_Telemetry_t *tps)
-{
-    if ((tps != NULL) && tps->pd_role_source) {
-        return "sink requested from us";
-    }
-
-    return "we requested from source";
-}
-
-static bool PowerManager_IsPdConnected(const TPS25751_Telemetry_t *tps)
-{
-    if (tps == NULL) {
-        return false;
-    }
-
-    if (tps->plug_present || tps->power_connection || tps->active_rdo.valid) {
-        return true;
-    }
-
-    if ((tps->connection_state == 6U) || (tps->connection_state == 7U)) {
-        return true;
-    }
-
-    if ((tps->typec_state == 0x60U) || (tps->typec_state == 0x61U) ||
-        (tps->typec_state == 0x62U) || (tps->typec_state == 0x63U)) {
-        return true;
-    }
-
-    return (tps->vbus_mv > 4000U);
-}
-
-static const char *PowerManager_PowerClassText(PowerManager_PowerClass_t power_class)
-{
-    switch (power_class) {
-        case POWER_MANAGER_POWER_LOW:
-            return "LOW";
-        case POWER_MANAGER_POWER_MEDIUM:
-            return "MEDIUM";
-        case POWER_MANAGER_POWER_HIGH:
-            return "HIGH";
-        case POWER_MANAGER_POWER_FULL:
-            return "FULL";
-        case POWER_MANAGER_POWER_NO_INPUT:
-        default:
-            return "NO_INPUT";
+    if (g_pm.status.state != state) {
+        g_pm.status.state = state;
+        Debug_Printf("[PM] state=%s", PowerManager_StateToString(state));
     }
 }
 
-static PowerManager_PowerClass_t PowerManager_ClassifyPower(bool attached,
-                                                             uint32_t power_mw)
+static void PowerManager_RecordError(PowerManager_ErrorSource_t source,
+                                     uint32_t code,
+                                     uint8_t reg,
+                                     uint32_t now_ms)
 {
-    if ((!attached) || (power_mw == 0U)) {
-        return POWER_MANAGER_POWER_NO_INPUT;
+    g_pm.status.last_error.source = source;
+    g_pm.status.last_error.code = code;
+    g_pm.status.last_error.reg = reg;
+    g_pm.status.last_error.tick_ms = now_ms;
+}
+
+static TPS25751_PortMode_t PowerManager_MapPortMode(
+    PowerManager_UserMode_t mode)
+{
+    switch (mode) {
+        case POWER_MANAGER_USER_SINK_ONLY: return TPS25751_PORT_SINK_ONLY;
+        case POWER_MANAGER_USER_SOURCE_ONLY: return TPS25751_PORT_SOURCE_ONLY;
+        case POWER_MANAGER_USER_OFF: return TPS25751_PORT_DISABLED;
+        default: return TPS25751_PORT_DRP;
     }
-    if (power_mw < 15000U) {
-        return POWER_MANAGER_POWER_LOW;
+}
+
+static void PowerManager_SetOtgPin(bool high)
+{
+    if (g_pm.status.otg_pin_high != high) {
+        HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin,
+                          high ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        g_pm.status.otg_pin_high = high;
     }
-    if (power_mw < 45000U) {
-        return POWER_MANAGER_POWER_MEDIUM;
+}
+
+static void PowerManager_UpdateOtgGate(uint32_t now_ms)
+{
+    bool mode_allows_source;
+    bool status_is_fresh;
+    bool allow;
+
+    if ((!g_pm.status.tps.attached) ||
+        (g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
+        (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
+        (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF)) {
+        g_pm.status.source_fault_latched = false;
     }
-    if (power_mw <= 60000U) {
-        return POWER_MANAGER_POWER_HIGH;
+
+    mode_allows_source =
+        (g_pm.status.applied_mode == POWER_MANAGER_USER_AUTO) ||
+        (g_pm.status.applied_mode == POWER_MANAGER_USER_SOURCE_ONLY);
+    status_is_fresh = (g_pm.status_updated_ms != 0U) &&
+        ((uint32_t)(now_ms - g_pm.status_updated_ms) <=
+         PM_TPS_STATUS_STALE_MS);
+
+    allow = (g_pm.status.tps.mode == TPS25751_MODE_APP) &&
+            g_pm.status.applied_mode_valid && !g_pm.mode_update_pending &&
+            mode_allows_source && status_is_fresh &&
+            g_pm.status.tps.attached &&
+            (g_pm.status.tps.connection_state >= 6U) &&
+            (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+            !g_pm.status.source_fault_latched &&
+            PowerManager_TickReached(now_ms,
+                                     g_pm.hard_reset_holdoff_until_ms);
+    if (allow != g_pm.status.otg_pin_high) {
+        Debug_Printf("[PD-OTG] pin=%s attached=%u conn=%u role=%s fresh=%u fault=%u holdoff=%u",
+                     allow ? "HIGH" : "LOW",
+                     g_pm.status.tps.attached ? 1U : 0U,
+                     g_pm.status.tps.connection_state,
+                     PowerManager_RoleToString(g_pm.status.tps.role),
+                     status_is_fresh ? 1U : 0U,
+                     g_pm.status.source_fault_latched ? 1U : 0U,
+                     PowerManager_TickReached(
+                         now_ms, g_pm.hard_reset_holdoff_until_ms) ? 0U : 1U);
     }
-    return POWER_MANAGER_POWER_FULL;
+    PowerManager_SetOtgPin(allow);
 }
 
 static void PowerManager_UpdatePdSnapshot(void)
 {
-    const TPS25751_Telemetry_t *tps = &g_pm.tps_telemetry;
-    const TPS25751_PdoInfo_t *pdo = &tps->active_pdo;
-    const TPS25751_RdoInfo_t *rdo = &tps->active_rdo;
-    PowerManager_PdSnapshot_t *snapshot = &g_pm.pd_snapshot;
-#if (POWER_MANAGER_PD_POLICY_DEBUG != 0U)
-    PowerManager_PdSnapshot_t previous = *snapshot;
-#endif
+    PowerManager_PdSnapshot_t *snapshot = &g_pm.status.pd_snapshot;
+    const TPS25751_Telemetry_t *t = &g_pm.status.tps;
+    uint32_t current_ma = 0U;
 
     memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->attached = PowerManager_IsPdConnected(tps);
-    snapshot->power_role = snapshot->attached ?
-                           (tps->pd_role_source ? POWER_MANAGER_PD_ROLE_SOURCE :
-                                                  POWER_MANAGER_PD_ROLE_SINK) :
-                           POWER_MANAGER_PD_ROLE_UNKNOWN;
-    snapshot->data_role_dfp = tps->data_role_dfp;
-    snapshot->active_pdo_raw = tps->active_pdo_raw;
-    snapshot->active_rdo_raw = tps->active_rdo_raw;
+    snapshot->attached = t->attached;
+    snapshot->data_role_dfp = t->data_role_dfp;
+    snapshot->active_pdo_raw = t->active_pdo_raw;
+    snapshot->active_rdo_raw = t->active_rdo_raw;
 
-    /* DEBUG: Log detected role immediately after TPS read */
-    if ((PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) && snapshot->attached) {
-        Debug_Printf("[SNAPSHOT] attached=%u role=%s pd_role_source=%u",
-                     snapshot->attached,
-                     snapshot->power_role == POWER_MANAGER_PD_ROLE_SOURCE ? "SOURCE" : "SINK",
-                     tps->pd_role_source);
+    if (t->role == TPS25751_ROLE_SOURCE) {
+        snapshot->power_role = POWER_MANAGER_PD_ROLE_SOURCE;
+    } else if (t->role == TPS25751_ROLE_SINK) {
+        snapshot->power_role = POWER_MANAGER_PD_ROLE_SINK;
+    } else {
+        snapshot->power_role = POWER_MANAGER_PD_ROLE_UNKNOWN;
     }
 
-    if (snapshot->attached && rdo->valid) {
-        if (pdo->type == TPS25751_SUPPLY_FIXED) {
-            snapshot->contract_voltage_mv = pdo->voltage_mv;
-            snapshot->contract_current_ma = rdo->operating_current_ma;
-        } else if (pdo->type == TPS25751_SUPPLY_APDO_PPS) {
-            snapshot->contract_voltage_mv = ((rdo->raw >> 9) & 0x0FFFU) * 20U;
-            snapshot->contract_current_ma = (rdo->raw & 0x7FU) * 50U;
-        } else if (pdo->type == TPS25751_SUPPLY_BATTERY) {
-            snapshot->contract_voltage_mv = tps->vbus_mv;
-            snapshot->contract_power_mw = ((rdo->raw >> 10) & 0x3FFU) * 250U;
-            if (snapshot->contract_voltage_mv != 0U) {
-                snapshot->contract_current_ma =
-                    (snapshot->contract_power_mw * 1000U) /
-                    snapshot->contract_voltage_mv;
-            }
-        } else if (pdo->type == TPS25751_SUPPLY_VARIABLE) {
-            snapshot->contract_voltage_mv = tps->vbus_mv;
-            snapshot->contract_current_ma = rdo->operating_current_ma;
-        }
-        
-        /* Safe bring-up: reject high voltage requests */
-#if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U)
-        if ((snapshot->power_role == POWER_MANAGER_PD_ROLE_SOURCE) &&
-            (snapshot->contract_voltage_mv > 5500U)) {
-            Debug_Printf("[SRC] RDO=0x%08lX higher voltage request seen but disabled in safe bring-up",
-                         (unsigned long)snapshot->active_rdo_raw);
-            snapshot->contract_voltage_mv = PD_SOURCE_SAFE_VOLTAGE_MV;
-        }
-#endif
+    if (t->active_pdo.valid) {
+        snapshot->contract_voltage_mv = t->active_pdo.voltage_mv;
+        current_ma = t->active_pdo.current_ma;
     }
-
-    if (snapshot->contract_power_mw == 0U) {
-        snapshot->contract_power_mw =
-            (snapshot->contract_voltage_mv * snapshot->contract_current_ma) / 1000U;
+    if (t->active_rdo.valid &&
+        (t->active_rdo.operating_current_ma != 0U)) {
+        current_ma = t->active_rdo.operating_current_ma;
     }
+    snapshot->contract_current_ma = current_ma;
+    snapshot->contract_power_mw =
+        snapshot->contract_voltage_mv * current_ma / 1000U;
 
-    snapshot->power_class = PowerManager_ClassifyPower(snapshot->attached,
-                                                        snapshot->contract_power_mw);
-
-#if (POWER_MANAGER_PD_POLICY_DEBUG != 0U)
-    if ((previous.attached != snapshot->attached) ||
-        (previous.active_rdo_raw != snapshot->active_rdo_raw) ||
-        (previous.contract_power_mw != snapshot->contract_power_mw)) {
-        if (snapshot->attached && (snapshot->active_rdo_raw != 0U) &&
-            (snapshot->contract_voltage_mv != 0U) &&
-            (snapshot->contract_power_mw != 0U)) {
-            Debug_Printf("[PM-PD] snapshot valid: %lumV %lumA %lumW RDO=0x%08lX state=%s BQ=%s",
-                         (unsigned long)snapshot->contract_voltage_mv,
-                         (unsigned long)snapshot->contract_current_ma,
-                         (unsigned long)snapshot->contract_power_mw,
-                         (unsigned long)snapshot->active_rdo_raw,
-                         PowerManager_StateText(g_pm.state),
-                         BQ25731_StatusToString(g_pm.bq_status));
-        } else {
-            Debug_Printf("[PM-PD] snapshot cleared/invalid: attached=%u RDO=0x%08lX V=%lumV P=%lumW state=%s BQ=%s",
-                         snapshot->attached ? 1U : 0U,
-                         (unsigned long)snapshot->active_rdo_raw,
-                         (unsigned long)snapshot->contract_voltage_mv,
-                         (unsigned long)snapshot->contract_power_mw,
-                         PowerManager_StateText(g_pm.state),
-                         BQ25731_StatusToString(g_pm.bq_status));
-        }
+    if (!snapshot->attached || (snapshot->contract_power_mw == 0U)) {
+        snapshot->power_class = POWER_MANAGER_POWER_NO_INPUT;
+    } else if (snapshot->contract_power_mw <= 15000U) {
+        snapshot->power_class = POWER_MANAGER_POWER_LOW;
+    } else if (snapshot->contract_power_mw <= 30000U) {
+        snapshot->power_class = POWER_MANAGER_POWER_MEDIUM;
+    } else if (snapshot->contract_power_mw <= 60000U) {
+        snapshot->power_class = POWER_MANAGER_POWER_HIGH;
+    } else {
+        snapshot->power_class = POWER_MANAGER_POWER_FULL;
     }
-#endif
 }
 
-static void PowerManager_ClearPdCaps(void)
+static void PowerManager_UpdateBqInputLimit(void)
 {
-    memset(&g_pm.tps_telemetry.rx_source_caps, 0, sizeof(g_pm.tps_telemetry.rx_source_caps));
-    memset(&g_pm.tps_telemetry.rx_sink_caps, 0, sizeof(g_pm.tps_telemetry.rx_sink_caps));
-    memset(&g_pm.tps_telemetry.tx_source_caps, 0, sizeof(g_pm.tps_telemetry.tx_source_caps));
-    memset(&g_pm.tps_telemetry.tx_sink_caps, 0, sizeof(g_pm.tps_telemetry.tx_sink_caps));
+    uint32_t target_ma;
+    uint32_t supply_type;
+    uint16_t raw;
 
-    g_pm.last_pd_caps_signature = 0U;
-    g_pm.pd_caps_valid = false;
+    if (!g_pm.status.tps.attached ||
+        (g_pm.status.tps.connection_state < 6U) ||
+        (g_pm.status.tps.role != TPS25751_ROLE_SINK) ||
+        !g_pm.status.tps.active_rdo.valid) {
+        g_pm.bq_iin_applied_ma = 0U;
+        g_pm.bq_iin_failed_rdo_raw = 0U;
+        return;
+    }
+
+    supply_type = (g_pm.status.tps.active_pdo_raw >> 30) & 0x03U;
+    if (supply_type == 3U) {
+        target_ma = (g_pm.status.tps.active_rdo_raw & 0x7FU) * 50U;
+    } else if ((supply_type == 0U) || (supply_type == 2U)) {
+        target_ma = g_pm.status.tps.active_rdo.operating_current_ma;
+    } else {
+        return;
+    }
+    if (target_ma == 0U) {
+        target_ma = g_pm.status.tps.active_pdo.current_ma;
+    }
+    if (target_ma > BQ25731_MAX_INPUT_CURRENT_MA) {
+        target_ma = BQ25731_MAX_INPUT_CURRENT_MA;
+    }
+    raw = BQ25731_EncodeInputCurrentMa(target_ma);
+    target_ma = BQ25731_DecodeInputCurrentMa(raw);
+    if ((target_ma == 0U) ||
+        ((target_ma == g_pm.bq_iin_applied_ma) &&
+         ((target_ma == g_pm.status.bq.input_current_ma) ||
+          (target_ma == g_pm.status.bq.iin_dpm_ma))) ||
+        (g_pm.status.tps.active_rdo_raw ==
+         g_pm.bq_iin_failed_rdo_raw)) {
+        return;
+    }
+
+    g_pm.bq_iin_target_ma = target_ma;
+    g_pm.bq_iin_write_pending = true;
+    Debug_Printf("[PD-BQ] contract=%lumV/%lumA; scheduling IIN_HOST=%lumA",
+                 (unsigned long)g_pm.status.tps.active_pdo.voltage_mv,
+                 (unsigned long)g_pm.status.tps.active_rdo.operating_current_ma,
+                 (unsigned long)target_ma);
 }
 
-static void PowerManager_FormatCurrent(char *buffer, size_t buffer_len, uint32_t current_ma)
+static bool PowerManager_HasSinkContract(void)
 {
-    uint32_t rounded_ma;
-
-    if ((buffer == NULL) || (buffer_len == 0U)) {
-        return;
-    }
-
-    rounded_ma = PowerManager_RoundToNearest(current_ma, 100U);
-    (void)snprintf(buffer,
-                   buffer_len,
-                   "%lu.%luA",
-                   (unsigned long)PowerManager_IntPart(rounded_ma, 1000U),
-                   (unsigned long)(PowerManager_FracPart(rounded_ma, 1000U) / 100U));
+    return g_pm.status.tps.attached &&
+           (g_pm.status.tps.connection_state >= 6U) &&
+           (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+           g_pm.status.tps.active_pdo.valid &&
+           g_pm.status.tps.active_rdo.valid;
 }
 
-#if (POWER_MANAGER_PD_POLICY_DEBUG != 0U)
-static void PowerManager_FormatCurrentExact(char *buffer,
-                                            size_t buffer_len,
-                                            uint32_t current_ma)
+static void PowerManager_UpdateBqChargePolicy(void)
 {
-    if ((buffer == NULL) || (buffer_len == 0U)) {
+    uint16_t option0;
+    uint16_t charge_current;
+    bool charge = PowerManager_HasSinkContract();
+
+    if (g_pm.bq_init != PM_BQ_INIT_DONE) {
         return;
     }
 
-    (void)snprintf(buffer, buffer_len, "%lu.%03luA",
-                   (unsigned long)(current_ma / 1000U),
-                   (unsigned long)(current_ma % 1000U));
-}
-#endif
-
-static void PowerManager_FormatVoltage(char *buffer, size_t buffer_len, uint32_t voltage_mv)
-{
-    uint32_t rounded_mv;
-
-    if ((buffer == NULL) || (buffer_len == 0U)) {
-        return;
+    option0 = g_pm.status.bq.charge_option0;
+    option0 &= (uint16_t)~(BQ25731_CHARGE_OPTION0_LWPWR |
+                           BQ25731_CHARGE_OPTION0_WDT_MASK);
+    if (charge) {
+        option0 &= (uint16_t)~BQ25731_CHARGE_OPTION0_INHIBIT;
+    } else {
+        option0 |= BQ25731_CHARGE_OPTION0_INHIBIT;
+    }
+    if (option0 != g_pm.status.bq.charge_option0) {
+        g_pm.bq_option0_target = option0;
+        g_pm.bq_option0_write_pending = true;
     }
 
-    rounded_mv = PowerManager_RoundToNearest(voltage_mv, 100U);
-    (void)snprintf(buffer,
-                   buffer_len,
-                   "%lu.%luV",
-                   (unsigned long)PowerManager_IntPart(rounded_mv, 1000U),
-                   (unsigned long)(PowerManager_FracPart(rounded_mv, 1000U) / 100U));
-}
-
-static void PowerManager_FormatPower(char *buffer, size_t buffer_len, uint32_t power_mw)
-{
-    uint32_t rounded_mw;
-
-    if ((buffer == NULL) || (buffer_len == 0U)) {
-        return;
+    charge_current = BQ25731_EncodeChargeCurrentMa(
+        BQ25731_TARGET_CHARGE_CURRENT_MA);
+    if (charge &&
+        (g_pm.status.bq.charge_current != charge_current)) {
+        g_pm.bq_current_write_pending = true;
     }
-
-    rounded_mw = PowerManager_RoundToNearest(power_mw, 100U);
-    (void)snprintf(buffer,
-                   buffer_len,
-                   "%lu.%luW",
-                   (unsigned long)PowerManager_IntPart(rounded_mw, 1000U),
-                   (unsigned long)(PowerManager_FracPart(rounded_mw, 1000U) / 100U));
 }
 
-static void PowerManager_FormatPdoShort(char *buffer,
-                                        size_t buffer_len,
-                                        uint8_t index,
-                                        const TPS25751_PdoInfo_t *pdo)
+static void PowerManager_LogPd(uint32_t now_ms)
 {
-    char v[16];
-    char v_min[16];
-    char v_max[16];
-    char i[16];
-    char p[16];
+    const char *role = "NONE";
 
-    if ((buffer == NULL) || (buffer_len == 0U)) {
+    if (!PowerManager_TickReached(now_ms,
+                                  g_pm.last_pd_log_ms + PM_PD_LOG_MS)) {
         return;
     }
+    g_pm.last_pd_log_ms = now_ms;
 
-    buffer[0] = '\0';
-
-    if (pdo == NULL) {
-        return;
+    if (g_pm.status.tps.attached &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SOURCE)) {
+        role = "SOURCE";
+    } else if (g_pm.status.tps.attached &&
+               (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
+        role = "SINK";
     }
-
-    if (pdo->type == TPS25751_SUPPLY_FIXED) {
-        PowerManager_FormatVoltage(v, sizeof(v), pdo->voltage_mv);
-        PowerManager_FormatCurrent(i, sizeof(i), pdo->current_ma);
-        PowerManager_FormatPower(p, sizeof(p), pdo->power_mw);
-        (void)snprintf(buffer, buffer_len, "#%u FIXED %s %s %s", (unsigned int)index, v, i, p);
-        return;
-    }
-
-    if (pdo->type == TPS25751_SUPPLY_BATTERY) {
-        PowerManager_FormatVoltage(v_min, sizeof(v_min), pdo->min_mv);
-        PowerManager_FormatVoltage(v_max, sizeof(v_max), pdo->max_mv);
-        PowerManager_FormatPower(p, sizeof(p), pdo->power_mw);
-        (void)snprintf(buffer,
-                       buffer_len,
-                       "#%u BAT %s-%s %s",
-                       (unsigned int)index,
-                       v_min,
-                       v_max,
-                       p);
-        return;
-    }
-
-    if (pdo->type == TPS25751_SUPPLY_VARIABLE) {
-        PowerManager_FormatVoltage(v_min, sizeof(v_min), pdo->min_mv);
-        PowerManager_FormatVoltage(v_max, sizeof(v_max), pdo->max_mv);
-        PowerManager_FormatCurrent(i, sizeof(i), pdo->current_ma);
-        PowerManager_FormatPower(p, sizeof(p), pdo->power_mw);
-        (void)snprintf(buffer,
-                       buffer_len,
-                       "#%u VAR %s-%s %s %s",
-                       (unsigned int)index,
-                       v_min,
-                       v_max,
-                       i,
-                       p);
-        return;
-    }
-
-    if (pdo->type == TPS25751_SUPPLY_APDO_PPS) {
-        PowerManager_FormatVoltage(v_min, sizeof(v_min), pdo->min_mv);
-        PowerManager_FormatVoltage(v_max, sizeof(v_max), pdo->max_mv);
-        PowerManager_FormatCurrent(i, sizeof(i), pdo->current_ma);
-        PowerManager_FormatPower(p, sizeof(p), pdo->power_mw);
-        (void)snprintf(buffer,
-                       buffer_len,
-                       "#%u PPS %s-%s %s %s",
-                       (unsigned int)index,
-                       v_min,
-                       v_max,
-                       i,
-                       p);
-        return;
-    }
-
-    if (pdo->type == TPS25751_SUPPLY_APDO_OTHER) {
-#if (POWER_MANAGER_PD_RAW_DEBUG != 0U)
-        (void)snprintf(buffer,
-                       buffer_len,
-                       "#%u APDO? raw=0x%08lX",
-                       (unsigned int)index,
-                       (unsigned long)pdo->raw);
-#else
-        (void)snprintf(buffer, buffer_len, "#%u APDO?", (unsigned int)index);
-#endif
-        return;
-    }
-
-    (void)snprintf(buffer, buffer_len, "#%u empty", (unsigned int)index);
+    Debug_Printf("[PD] mode=%s plug=%u conn=%u role=%s desired=%s sink_seen=%u OTG_EN=%u VBUS=%lumV contract=%lumV/%lumA/%lumW PDO=0x%08lX RDO=0x%08lX STATUS=0x%02lX%08lX",
+                 PowerManager_UserModeToString(g_pm.status.requested_mode),
+                 g_pm.status.tps.attached ? 1U : 0U,
+                 g_pm.status.tps.connection_state,
+                 role,
+                 PowerManager_RoleToString(g_pm.policy_desired_role),
+                 g_pm.partner_sink_observed ? 1U : 0U,
+                 g_pm.status.otg_pin_high ? 1U : 0U,
+                 (unsigned long)g_pm.status.tps.vbus_mv,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_voltage_mv,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_current_ma,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_power_mw,
+                 (unsigned long)g_pm.status.tps.active_pdo_raw,
+                 (unsigned long)g_pm.status.tps.active_rdo_raw,
+                 (unsigned long)((g_pm.status.tps.status_raw >> 32) & 0xFFU),
+                 (unsigned long)g_pm.status.tps.status_raw);
 }
 
-static bool PowerManager_DebugPdoList(const char *description,
-                                      const TPS25751_PdoList_t *list)
+static void PowerManager_LogBq(void)
 {
-    char pdo_text[96];
+    const BQ25731_Telemetry_t *bq = &g_pm.status.bq;
+
+    Debug_Printf("[BQ] id=%02X/%02X Option0=0x%04X WDT=%s ADCOption=0x%04X VREG=%lumV ICHG_SET=%lumA IIN_HOST_READ=%lumA IIN_EFFECTIVE=%lumA",
+                 bq->manufacturer_id, bq->device_id, bq->charge_option0,
+                 ((bq->charge_option0 &
+                   BQ25731_CHARGE_OPTION0_WDT_MASK) == 0U) ? "OFF" : "ON",
+                 bq->adc_option,
+                 (unsigned long)bq->charge_voltage_mv,
+                 (unsigned long)bq->charge_current_ma,
+                 (unsigned long)bq->input_current_ma,
+                 (unsigned long)bq->iin_dpm_ma);
+}
+
+static void PowerManager_LogBqMonitor(void)
+{
+    const BQ25731_Telemetry_t *bq = &g_pm.status.bq;
+    uint8_t raw_vbat = (uint8_t)bq->adc_vsys_vbat;
+    const char *power_flow = "IDLE";
+    const char *eta_quality = "NO_FLOW";
+    uint32_t source_power_mw = 0U;
+    uint32_t load_power_mw = 0U;
+    uint32_t eta_tenths_percent = 0U;
+    bool eta_available = false;
+
+    if (bq->in_otg && (bq->battery_power_mw < 0)) {
+        power_flow = "BAT_TO_VBUS";
+        source_power_mw = (uint32_t)(-(int64_t)bq->battery_power_mw);
+        load_power_mw = bq->input_power_mw;
+        eta_available = (source_power_mw >= 1000U);
+    } else if ((!bq->in_otg) && (bq->battery_power_mw > 0)) {
+        power_flow = "VBUS_TO_BAT";
+        source_power_mw = bq->input_power_mw;
+        load_power_mw = (uint32_t)bq->battery_power_mw;
+        eta_available = (source_power_mw >= 1000U);
+    }
+
+    if (eta_available) {
+        eta_tenths_percent = (uint32_t)(
+            (((uint64_t)load_power_mw * 1000ULL) +
+             ((uint64_t)source_power_mw / 2ULL)) /
+            (uint64_t)source_power_mw);
+        eta_quality = (eta_tenths_percent <= 1000U) ? "OK" :
+                                                      "ADC_LIMITED";
+    }
+
+    /* Expose only the two rails relevant to power flow: the USB/adapter-side
+     * VBUS and the battery-side VBAT. VSYS is a separate BQ node, not VBUS. */
+    Debug_Printf("[BQ-ADC] rawVBAT=0x%02X VBUS=%lumV VBAT=%lumV IVBUS=%lumA IBAT=%ldmA PVBUS=%lumW Pbat=%ldmW",
+                 raw_vbat,
+                 (unsigned long)bq->adc_vbus_mv,
+                 (unsigned long)bq->adc_vbat_mv,
+                 (unsigned long)bq->adc_iin_ma,
+                 (long)bq->battery_current_ma,
+                 (unsigned long)bq->input_power_mw,
+                 (long)bq->battery_power_mw);
+    if (eta_available) {
+        Debug_Printf("[BQ-EFF] flow=%s Psrc=%lumW Pload=%lumW ETA_ADC=%lu.%lu%% quality=%s",
+                     power_flow,
+                     (unsigned long)source_power_mw,
+                     (unsigned long)load_power_mw,
+                     (unsigned long)(eta_tenths_percent / 10U),
+                     (unsigned long)(eta_tenths_percent % 10U),
+                     eta_quality);
+    } else {
+        Debug_Printf("[BQ-EFF] flow=%s ETA_ADC=-- quality=%s",
+                     power_flow,
+                     eta_quality);
+    }
+    Debug_Printf("[BQ-STAT] input=%s precharge=%u fast=%u iindpm=%u vindpm=%u otg=%u faults=0x%02X status=0x%04X IIN_DPM=%lumA",
+                 bq->input_present ? "YES" : "NO",
+                 bq->in_precharge ? 1U : 0U,
+                 bq->in_fast_charge ? 1U : 0U,
+                 bq->in_iin_dpm ? 1U : 0U,
+                 bq->in_vindpm ? 1U : 0U,
+                 bq->in_otg ? 1U : 0U,
+                 bq->fault_flags,
+                 bq->charger_status,
+                 (unsigned long)bq->iin_dpm_ma);
+    if (bq->in_precharge) {
+        Debug_Printf("[BQ-LIMIT] state=PRECHARGE hw_cells=5S VBAT=%lumV VSYS_MIN=15400mV ICHG_SET=%lumA actual_IBAT=%ldmA limiter=BQ_PROTECTION",
+                     (unsigned long)bq->adc_vbat_mv,
+                     (unsigned long)bq->charge_current_ma,
+                     (long)bq->battery_current_ma);
+    }
+}
+
+static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role)
+{
+    if (role == TPS25751_ROLE_SOURCE) {
+        return "SOURCE";
+    }
+    if (role == TPS25751_ROLE_SINK) {
+        return "SINK";
+    }
+    return "UNKNOWN";
+}
+
+static bool PowerManager_HasTypecPowerConnection(void)
+{
+    return g_pm.status.tps.attached &&
+           (g_pm.status.tps.connection_state >= 6U);
+}
+
+static void PowerManager_LogCapabilities(
+    const char *name,
+    const TPS25751_Capabilities_t *caps)
+{
     uint8_t i;
 
-    if ((description == NULL) || (list == NULL)) {
+    Debug_Printf("[PD-CAPS] %s count=%u max=%lumV drp=%u",
+                 name, caps->count,
+                 (unsigned long)caps->max_voltage_mv,
+                 caps->first_pdo_dual_role_power ? 1U : 0U);
+    for (i = 0U; i < caps->count; ++i) {
+        const TPS25751_Pdo_t *pdo = &caps->pdo[i];
+        Debug_Printf("[PD-CAPS] %s PDO%u=0x%08lX %lu-%lumV %lumA %lumW",
+                     name, (unsigned int)(i + 1U),
+                     (unsigned long)pdo->raw,
+                     (unsigned long)pdo->min_voltage_mv,
+                     (unsigned long)pdo->max_voltage_mv,
+                     (unsigned long)pdo->current_ma,
+                     (unsigned long)pdo->power_mw);
+    }
+}
+
+static void PowerManager_LogSinkNegotiationLimit(void)
+{
+    const TPS25751_Pdo_t *active_pdo = &g_pm.status.tps.active_pdo;
+    const TPS25751_Rdo_t *active_rdo = &g_pm.status.tps.active_rdo;
+    const TPS25751_AutoNegotiateSink_t *policy = &g_pm.auto_sink_policy;
+    uint32_t local_power_mw = 0U;
+    uint32_t requested_power_mw = 0U;
+    const char *limiter = "NONE";
+    uint8_t i;
+
+    Debug_Printf("[PD-AUTO] raw=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                 policy->raw[0], policy->raw[1], policy->raw[2],
+                 policy->raw[3], policy->raw[4], policy->raw[5],
+                 policy->raw[6], policy->raw[7], policy->raw[8],
+                 policy->raw[9], policy->raw[10], policy->raw[11],
+                 policy->raw[12], policy->raw[13], policy->raw[14],
+                 policy->raw[15], policy->raw[16], policy->raw[17],
+                 policy->raw[18], policy->raw[19], policy->raw[20],
+                 policy->raw[21], policy->raw[22], policy->raw[23]);
+    Debug_Printf("[PD-AUTO] min=%lumV max=%lumV min_power=%lumW mismatch=%lumW auto_min_v=%u auto_max_v=%u auto_min_power=%u no_mismatch=%u disable_on_mismatch=%u",
+                 (unsigned long)policy->min_voltage_mv,
+                 (unsigned long)policy->max_voltage_mv,
+                 (unsigned long)policy->sink_min_required_power_mw,
+                 (unsigned long)policy->capability_mismatch_power_mw,
+                 policy->auto_compute_min_voltage ? 1U : 0U,
+                 policy->auto_compute_max_voltage ? 1U : 0U,
+                 policy->auto_compute_min_power ? 1U : 0U,
+                 policy->no_capability_mismatch ? 1U : 0U,
+                 policy->auto_disable_sink_on_mismatch ? 1U : 0U);
+
+    if (!active_pdo->valid || !active_rdo->valid) {
+        return;
+    }
+    requested_power_mw = active_pdo->voltage_mv *
+                         active_rdo->operating_current_ma / 1000U;
+    for (i = 0U; i < g_pm.local_sink_caps.count; ++i) {
+        const TPS25751_Pdo_t *pdo = &g_pm.local_sink_caps.pdo[i];
+        if ((pdo->voltage_mv == active_pdo->voltage_mv) &&
+            (pdo->power_mw > local_power_mw)) {
+            local_power_mw = pdo->power_mw;
+        }
+    }
+
+    if (active_pdo->power_mw > requested_power_mw) {
+        if ((!policy->auto_compute_min_power) &&
+            (policy->sink_min_required_power_mw == requested_power_mw)) {
+            limiter = "AUTO_NEGOTIATE_SINK_EXPLICIT_MIN_POWER";
+        } else if (policy->auto_compute_min_power &&
+                   (local_power_mw == requested_power_mw)) {
+            limiter = "TX_SINK_CAPS_AUTO_COMPUTED_POWER";
+        } else if ((local_power_mw != 0U) &&
+                   (local_power_mw < active_pdo->power_mw)) {
+            limiter = "TX_SINK_CAPS";
+        } else {
+            limiter = "TPS_SINK_NEGOTIATION_POLICY";
+        }
+    }
+    Debug_Printf("[PD-LIMIT] source_offer=%lumW local_sink=%lumW requested=%lumW RDO=0x%08lX limiter=%s",
+                 (unsigned long)active_pdo->power_mw,
+                 (unsigned long)local_power_mw,
+                 (unsigned long)requested_power_mw,
+                 (unsigned long)active_rdo->raw,
+                 limiter);
+}
+
+static bool PowerManager_ShouldRequest100WSinkContract(void)
+{
+    const TPS25751_Pdo_t *active_pdo = &g_pm.status.tps.active_pdo;
+    const TPS25751_Rdo_t *active_rdo = &g_pm.status.tps.active_rdo;
+    uint8_t i;
+
+    if (g_pm.policy_100w_attempted ||
+        (g_pm.status.tps.role != TPS25751_ROLE_SINK) ||
+        !active_pdo->valid || !active_rdo->valid ||
+        (active_pdo->power_mw < PM_SINK_TARGET_POWER_MW) ||
+        (g_pm.auto_sink_policy.sink_min_required_power_mw >=
+         PM_SINK_TARGET_POWER_MW)) {
         return false;
     }
 
-    if (list->count == 0U) {
+    /* Do not ask TPS for more than the EEPROM capabilities permit.  The
+     * runtime policy is raised only when both the partner's selected Source
+     * PDO and our own TX Sink PDO support the complete 100 W contract. */
+    for (i = 0U; i < g_pm.local_sink_caps.count; ++i) {
+        const TPS25751_Pdo_t *local = &g_pm.local_sink_caps.pdo[i];
+
+        if ((local->voltage_mv == active_pdo->voltage_mv) &&
+            (local->power_mw >= PM_SINK_TARGET_POWER_MW)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool PowerManager_TrySchedule100WSinkContract(uint32_t now_ms)
+{
+    uint32_t previous_power_mw;
+
+    if (!PowerManager_ShouldRequest100WSinkContract()) {
         return false;
     }
 
-    for (i = 0U; i < list->count; ++i) {
-        PowerManager_FormatPdoShort(pdo_text,
-                                    sizeof(pdo_text),
-                                    (uint8_t)(i + 1U),
-                                    &list->pdo[i]);
-        /* One PDO per UART message prevents the debug line buffer from
-         * truncating long seven-PDO capability lists. */
-        Debug_Printf("[PDO] %s %s", description, pdo_text);
+    previous_power_mw = g_pm.auto_sink_policy.sink_min_required_power_mw;
+    if (!TPS25751_PatchAutoNegotiateSinkMinPower(
+            g_pm.auto_sink_policy.raw,
+            PM_SINK_TARGET_POWER_MW)) {
+        return false;
     }
+
+    g_pm.policy_100w_attempted = true;
+    g_pm.policy_phase = PM_POLICY_WRITE_AUTO_SINK_POLICY;
+    g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+    Debug_Printf("[PD-MAX] partner Source PDO and local Sink PDO support 100W; changing only AUTO_NEGOTIATE_SINK min_power %lu->100000mW",
+                 (unsigned long)previous_power_mw);
     return true;
 }
 
-static void PowerManager_FormatRdoFlags(char *buffer,
-                                        size_t buffer_len,
-                                        const TPS25751_RdoInfo_t *rdo)
+static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
-    bool any = false;
+    memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
+    memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
+    memset(&g_pm.local_sink_caps, 0, sizeof(g_pm.local_sink_caps));
+    memset(&g_pm.auto_sink_policy, 0, sizeof(g_pm.auto_sink_policy));
+    g_pm.policy_swap_attempted = false;
+    g_pm.policy_100w_attempted = false;
+    g_pm.partner_source_caps_current = false;
+    g_pm.partner_sink_observed = false;
+    g_pm.policy_cap_attempts = 0U;
+    g_pm.policy_role_mismatch_since_ms = 0U;
+    g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
 
-    if ((buffer == NULL) || (buffer_len == 0U)) {
-        return;
-    }
-
-    buffer[0] = '\0';
-
-    if (rdo == NULL) {
-        return;
-    }
-
-    if (rdo->capability_mismatch) {
-        PowerManager_Append(buffer, buffer_len, "mismatch");
-        any = true;
-    }
-    if (rdo->usb_comm_capable) {
-        PowerManager_Append(buffer, buffer_len, "%susb", any ? "," : "");
-        any = true;
-    }
-    if (rdo->no_usb_suspend) {
-        PowerManager_Append(buffer, buffer_len, "%sno_suspend", any ? "," : "");
-        any = true;
-    }
-    if (rdo->unchunked_supported) {
-        PowerManager_Append(buffer, buffer_len, "%sunchunked", any ? "," : "");
-        any = true;
-    }
-
-    if (!any) {
-        PowerManager_Append(buffer, buffer_len, "none");
+    if (attached &&
+        (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
+        g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
+        g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
+        Debug_Printf("[PD-POLICY] attach role=%s; probing partner Sink/Source PDOs",
+                     PowerManager_RoleToString(g_pm.status.tps.role));
+    } else {
+        g_pm.policy_phase = PM_POLICY_IDLE;
+        g_pm.policy_next_ms = 0U;
     }
 }
 
-static void PowerManager_DebugRdo(const TPS25751_Telemetry_t *tps)
+static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
 {
-    const TPS25751_RdoInfo_t *rdo;
-    const TPS25751_PdoInfo_t *pdo;
-    char flags[48];
-    char op[16];
-    char max[16];
-    char pps_v[16];
-    uint32_t operating_power_mw;
-    uint32_t max_power_mw;
-    uint32_t pps_voltage_mv;
-    uint32_t pps_current_ma;
-
-    if (tps == NULL) {
-        return;
+    if (g_pm.status.tps.attached != g_pm.previous_attached) {
+        g_pm.previous_attached = g_pm.status.tps.attached;
+        PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
+        if (!g_pm.status.tps.attached) {
+            Debug_Printf("[PD-POLICY] detach; decision state cleared");
+        }
     }
-
-    rdo = &tps->active_rdo;
-    pdo = &tps->active_pdo;
-
-    if (!rdo->valid) {
-        return;
-    }
-
-    PowerManager_FormatRdoFlags(flags, sizeof(flags), rdo);
-
-    if (pdo->type == TPS25751_SUPPLY_BATTERY) {
-        operating_power_mw = ((rdo->raw >> 10) & 0x3FFU) * 250U;
-        max_power_mw = (rdo->raw & 0x3FFU) * 250U;
-        PowerManager_FormatPower(op, sizeof(op), operating_power_mw);
-        PowerManager_FormatPower(max, sizeof(max), max_power_mw);
-
-        Debug_Printf("[RDO] %s: PDO#%u op=%s max=%s flags=%s",
-                     PowerManager_RdoDirectionText(tps),
-                     (unsigned int)rdo->object_position,
-                     op,
-                     max,
-                     flags);
-        return;
-    }
-
-    if (pdo->type == TPS25751_SUPPLY_APDO_PPS) {
-        pps_voltage_mv = ((rdo->raw >> 9) & 0x0FFFU) * 20U;
-        pps_current_ma = (rdo->raw & 0x7FU) * 50U;
-        PowerManager_FormatVoltage(pps_v, sizeof(pps_v), pps_voltage_mv);
-        PowerManager_FormatCurrent(op, sizeof(op), pps_current_ma);
-
-        Debug_Printf("[RDO] %s: PDO#%u PPS=%s op=%s flags=%s",
-                     PowerManager_RdoDirectionText(tps),
-                     (unsigned int)rdo->object_position,
-                     pps_v,
-                     op,
-                     flags);
-        return;
-    }
-
-    PowerManager_FormatCurrent(op, sizeof(op), rdo->operating_current_ma);
-    PowerManager_FormatCurrent(max, sizeof(max), rdo->max_current_ma);
-
-    Debug_Printf("[RDO] %s: PDO#%u op=%s max=%s flags=%s",
-                 PowerManager_RdoDirectionText(tps),
-                 (unsigned int)rdo->object_position,
-                 op,
-                 max,
-                 flags);
 }
 
-static uint32_t PowerManager_PdoListSignature(const TPS25751_PdoList_t *list)
+static void PowerManager_DecidePolicy(uint32_t now_ms)
 {
-    uint32_t sig = 2166136261UL;
-    uint8_t i;
+    TPS25751_PowerRole_t current = g_pm.status.tps.role;
+    TPS25751_PowerRole_t desired = current;
+    uint32_t source_max_mv = 0U;
+    bool current_sink_contract =
+        (current == TPS25751_ROLE_SINK) &&
+        g_pm.status.tps.active_pdo.valid &&
+        g_pm.status.tps.active_rdo.valid;
+    const char *action = "KEEP_CURRENT_ROLE";
+    const char *reason = "INSUFFICIENT_VALID_PARTNER_CAPS";
 
-    if (list == NULL) {
-        return 0U;
-    }
-
-    sig ^= list->count;
-    sig *= 16777619UL;
-
-    for (i = 0U; i < list->count; ++i) {
-        sig ^= list->pdo[i].raw;
-        sig *= 16777619UL;
-    }
-
-    return sig;
-}
-
-static uint32_t PowerManager_PdCapsSignature(const TPS25751_Telemetry_t *tps)
-{
-    uint32_t sig;
-
-    if (tps == NULL) {
-        return 0U;
-    }
-
-    sig = PowerManager_PdoListSignature(&tps->rx_source_caps);
-    sig ^= PowerManager_PdoListSignature(&tps->rx_sink_caps) * 3UL;
-    sig ^= PowerManager_PdoListSignature(&tps->tx_source_caps) * 5UL;
-    sig ^= PowerManager_PdoListSignature(&tps->tx_sink_caps) * 7UL;
-
-    return sig;
-}
-
-void PowerManager_LogPdSinkPolicy(void)
-{
-#if (POWER_MANAGER_PD_POLICY_DEBUG != 0U)
-    TPS25751_AutoNegotiateSink_t policy;
-    TPS25751_Status_t status;
-    TPS25751_Telemetry_t *tps = &g_pm.tps_telemetry;
-    const TPS25751_PdoInfo_t *active_pdo;
-    const TPS25751_RdoInfo_t *active_rdo;
-    char pdo_text[96];
-    char flags[48];
-    char raw_line[3U * TPS25751_AUTO_NEGOTIATE_SINK_LEN + 1U];
-    char offered_voltage[16];
-    char offered_current[16];
-    char offered_power[16];
-    char requested_current[16];
-    char requested_power[16];
-    char delta_power[16];
-    uint32_t requested_power_mw;
-    uint32_t offered_power_mw;
-    uint32_t local_matching_power_mw = 0U;
-    uint32_t local_matching_current_ma = 0U;
-    uint8_t i;
-
-    if ((!g_pm.initialized) ||
-        (g_pm.state != POWER_MANAGER_BQ_MONITOR) ||
-        (tps->mode != TPS25751_MODE_APP)) {
-        return;
-    }
-
-    status = TPS25751_ReadTelemetryBasic(&g_pm.tps, tps);
-    if (status != TPS25751_OK) {
-        Debug_Printf("[PD-POLICY] telemetry read failed: %s",
-                     TPS25751_StatusToString(status));
-        return;
-    }
-
-    status = TPS25751_ReadCapabilityLists(&g_pm.tps, tps);
-    if (status != TPS25751_OK) {
-        Debug_Printf("[PD-POLICY] capability read failed: %s",
-                     TPS25751_StatusToString(status));
-        return;
-    }
-
-    status = TPS25751_ReadAutoNegotiateSink(&g_pm.tps, &policy);
-    if (status != TPS25751_OK) {
-        Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK read failed: %s",
-                     TPS25751_StatusToString(status));
-        return;
-    }
-
-    PowerManager_UpdatePdSnapshot();
-    active_pdo = &tps->active_pdo;
-    active_rdo = &tps->active_rdo;
-    offered_power_mw = active_pdo->power_mw;
-    requested_power_mw = g_pm.pd_snapshot.contract_power_mw;
-
-    PowerManager_DebugSeparator("PD SINK POLICY");
-
-    for (i = 0U; i < tps->rx_source_caps.count; ++i) {
-        PowerManager_FormatPdoShort(pdo_text, sizeof(pdo_text),
-                                    (uint8_t)(i + 1U),
-                                    &tps->rx_source_caps.pdo[i]);
-        Debug_Printf("[PD-POLICY] source offers %s", pdo_text);
-    }
-
-    for (i = 0U; i < tps->tx_sink_caps.count; ++i) {
-        const TPS25751_PdoInfo_t *local_pdo = &tps->tx_sink_caps.pdo[i];
-        PowerManager_FormatPdoShort(pdo_text, sizeof(pdo_text),
-                                    (uint8_t)(i + 1U),
-                                    local_pdo);
-        Debug_Printf("[PD-POLICY] local sink %s", pdo_text);
-        if ((local_pdo->type == TPS25751_SUPPLY_FIXED) &&
-            (local_pdo->voltage_mv == active_pdo->voltage_mv) &&
-            (local_pdo->power_mw > local_matching_power_mw)) {
-            local_matching_power_mw = local_pdo->power_mw;
-            local_matching_current_ma = local_pdo->current_ma;
+    /* RX_SOURCE_CAPS is usable only when this physical attach produced it.
+     * Otherwise the TPS register may still describe a previous partner. */
+    if (g_pm.partner_source_caps_current || current_sink_contract) {
+        source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
+        if (current_sink_contract &&
+            (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
+            source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
         }
     }
 
-    PowerManager_FormatPdoShort(pdo_text, sizeof(pdo_text),
-                                active_rdo->object_position, active_pdo);
-    Debug_Printf("[PD-POLICY] active PDO %s raw=0x%08lX",
-                 pdo_text, (unsigned long)active_pdo->raw);
-
-    PowerManager_FormatRdoFlags(flags, sizeof(flags), active_rdo);
-    PowerManager_FormatCurrentExact(requested_current, sizeof(requested_current),
-                                    active_rdo->operating_current_ma);
-    PowerManager_FormatPower(requested_power, sizeof(requested_power),
-                             requested_power_mw);
-    Debug_Printf("[PD-POLICY] active RDO: PDO#%u raw=0x%08lX op=%s max=%lu.%03luA requested=%s flags=%s",
-                 (unsigned int)active_rdo->object_position,
-                 (unsigned long)active_rdo->raw,
-                 requested_current,
-                 (unsigned long)(active_rdo->max_current_ma / 1000U),
-                 (unsigned long)(active_rdo->max_current_ma % 1000U),
-                 requested_power,
-                 flags);
-    PowerManager_FormatVoltage(offered_voltage, sizeof(offered_voltage),
-                               active_pdo->voltage_mv);
-    PowerManager_FormatCurrentExact(offered_current, sizeof(offered_current),
-                                    active_pdo->current_ma);
-    PowerManager_FormatPower(offered_power, sizeof(offered_power), offered_power_mw);
-    Debug_Printf("[PD-POLICY] Source offers: %s %s %s",
-                 offered_voltage, offered_current, offered_power);
-    Debug_Printf("[PD-POLICY] Sink requested: %s %s %s",
-                 offered_voltage, requested_current, requested_power);
-
-    raw_line[0] = '\0';
-    for (i = 0U; i < TPS25751_AUTO_NEGOTIATE_SINK_LEN; ++i) {
-        PowerManager_Append(raw_line, sizeof(raw_line), "%02X%s",
-                            policy.raw[i],
-                            (i + 1U < TPS25751_AUTO_NEGOTIATE_SINK_LEN) ? " " : "");
+    if (source_max_mv > 5000U) {
+        desired = TPS25751_ROLE_SINK;
+        action = "DRAW_FROM_PARTNER";
+        reason = "PARTNER_SOURCE_ABOVE_5V";
+    } else if ((g_pm.partner_sink_caps.count > 0U) ||
+               g_pm.partner_sink_observed) {
+        desired = TPS25751_ROLE_SOURCE;
+        action = "CHARGE_PARTNER";
+        reason = g_pm.partner_sink_observed ?
+                 "PARTNER_SINK_CONFIRMED_IN_THIS_ATTACH" :
+                 "PARTNER_DRP_SINK_WITH_ONLY_5V_SOURCE";
+    } else if ((g_pm.partner_source_caps.count > 0U) ||
+               current_sink_contract) {
+        desired = TPS25751_ROLE_SINK;
+        action = "DRAW_FROM_PARTNER";
+        reason = "PARTNER_SOURCE_ONLY";
     }
-    Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK raw[24]=%s", raw_line);
-    Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK voltage fields: min=%lumV max=%lumV auto_min=%u auto_max=%u (field ignored when corresponding auto=1)",
-                 (unsigned long)policy.min_voltage_mv,
-                 (unsigned long)policy.max_voltage_mv,
-                 policy.auto_compute_min_voltage ? 1U : 0U,
-                 policy.auto_compute_max_voltage ? 1U : 0U);
-    Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK power: min_required=%lumW mismatch_threshold=%lumW auto_min_power=%u no_mismatch=%u disable_sink_on_mismatch=%u",
-                 (unsigned long)policy.sink_min_required_power_mw,
-                 (unsigned long)policy.capability_mismatch_power_mw,
-                 policy.auto_compute_min_power ? 1U : 0U,
-                 policy.no_capability_mismatch ? 1U : 0U,
-                 policy.auto_disable_sink_on_mismatch ? 1U : 0U);
-    if (policy.sink_min_required_power_mw == 65000U) {
-        Debug_Printf("[PD-POLICY] min_required=65000mW => TPS will request about 65W");
-        Debug_Printf("[PD-POLICY] To request 100W set AutoComputeSinkMinPower=1 or ANSinkMinRequiredPower=400 (0x190)");
-    }
-    Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK policy: tie_priority=%s no_usb_suspend=%u PPS=%s pps_voltage=%lumV pps_current=%lumA",
-                 policy.prefer_lower_voltage_on_tie ? "LOWER_VOLTAGE" : "HIGHER_VOLTAGE",
-                 policy.no_usb_suspend ? 1U : 0U,
-                 policy.pps_sink_enabled ? "ENABLED" : "DISABLED",
-                 (unsigned long)policy.pps_output_voltage_mv,
-                 (unsigned long)policy.pps_operating_current_ma);
 
-    if (offered_power_mw > requested_power_mw) {
-        PowerManager_FormatPower(delta_power, sizeof(delta_power),
-                                 offered_power_mw - requested_power_mw);
-        Debug_Printf("[PD-POLICY] WARNING: source offers %s but sink requested only %s (delta=%s)",
-                     offered_power, requested_power, delta_power);
-        if ((local_matching_current_ma != 0U) &&
-            (local_matching_current_ma < active_pdo->current_ma)) {
-            Debug_Printf("[PD-POLICY] likely limit source: TX_SINK_CAPS declares only %lumA/%lumW at active voltage",
-                         (unsigned long)local_matching_current_ma,
-                         (unsigned long)local_matching_power_mw);
-        } else if ((!policy.auto_compute_min_power) &&
-                   (policy.sink_min_required_power_mw == requested_power_mw)) {
-            Debug_Printf("[PD-POLICY] likely limit source: explicit AUTO_NEGOTIATE_SINK min-required-power matches requested power");
-        } else if (policy.auto_compute_min_power &&
-                   (local_matching_power_mw == requested_power_mw)) {
-            Debug_Printf("[PD-POLICY] likely limit source: AUTO_NEGOTIATE_SINK computes min power from TX_SINK_CAPS");
+    g_pm.policy_desired_role = desired;
+    Debug_Printf("[PD-POLICY] sink_pdos=%u sink_seen=%u source_pdos=%u rx_source_max=%lumV source_evidence_max=%lumV current=%s decision=%s reason=%s cap_try=%u/%u",
+                 g_pm.partner_sink_caps.count,
+                 g_pm.partner_sink_observed ? 1U : 0U,
+                 g_pm.partner_source_caps.count,
+                 (unsigned long)g_pm.partner_source_caps.max_voltage_mv,
+                 (unsigned long)source_max_mv,
+                 PowerManager_RoleToString(current), action, reason,
+                 g_pm.policy_cap_attempts,
+                 PM_POLICY_MAX_CAP_ATTEMPTS);
+
+    if (!g_pm.partner_sink_observed && current_sink_contract &&
+        (source_max_mv <= 5000U) &&
+        (g_pm.policy_cap_attempts < PM_POLICY_MAX_CAP_ATTEMPTS)) {
+        g_pm.policy_desired_role = desired;
+        g_pm.policy_swap_attempted = false;
+        g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
+        g_pm.policy_next_ms = now_ms + PM_POLICY_CAP_RETRY_MS;
+        Debug_Printf("[PD-POLICY] Sink capability not confirmed at 5V; retrying probe in %lums",
+                     (unsigned long)PM_POLICY_CAP_RETRY_MS);
+        return;
+    }
+
+    if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN) ||
+        g_pm.policy_swap_attempted) {
+        g_pm.policy_phase = PM_POLICY_DONE;
+    } else if (desired == TPS25751_ROLE_SOURCE) {
+        g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
+    } else {
+        g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
+    }
+}
+
+static void PowerManager_MaintainPolicy(uint32_t now_ms)
+{
+    TPS25751_PowerRole_t current;
+    bool contract_valid;
+    bool active_source_pdo_is_drp;
+
+    if ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
+        !g_pm.status.applied_mode_valid ||
+        (g_pm.status.applied_mode != POWER_MANAGER_USER_AUTO) ||
+        !PowerManager_HasTypecPowerConnection()) {
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
+
+    current = g_pm.status.tps.role;
+    contract_valid = g_pm.status.tps.active_pdo.valid &&
+                     g_pm.status.tps.active_rdo.valid;
+    active_source_pdo_is_drp = contract_valid &&
+        (current == TPS25751_ROLE_SINK) &&
+        (((g_pm.status.tps.active_pdo_raw >> 30) & 0x03U) == 0U) &&
+        ((g_pm.status.tps.active_pdo_raw & (1UL << 29)) != 0U);
+
+    if (active_source_pdo_is_drp && !g_pm.partner_sink_observed) {
+        g_pm.partner_sink_observed = true;
+        Debug_Printf("[PD-POLICY] partner Sink capability confirmed by DRP bit in active Source PDO=0x%08lX",
+                     (unsigned long)g_pm.status.tps.active_pdo_raw);
+    }
+
+    if (contract_valid && (current == TPS25751_ROLE_SOURCE)) {
+        if (!g_pm.partner_sink_observed) {
+            g_pm.partner_sink_observed = true;
+            Debug_Printf("[PD-POLICY] partner Sink confirmed by active Source contract PDO=0x%08lX RDO=0x%08lX",
+                         (unsigned long)g_pm.status.tps.active_pdo_raw,
+                         (unsigned long)g_pm.status.tps.active_rdo_raw);
+        }
+        if (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN) {
+            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+            Debug_Printf("[PD-POLICY] desired=SOURCE established from active partner Sink contract");
+        }
+    } else if (contract_valid && (current == TPS25751_ROLE_SINK)) {
+        uint32_t source_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
+
+        if (source_mv > 5000U) {
+            if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
+                Debug_Printf("[PD-POLICY] desired=SINK updated: partner contract is %lumV (>5V)",
+                             (unsigned long)source_mv);
+            }
+            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
+        } else if (g_pm.partner_sink_observed &&
+                   (g_pm.policy_desired_role != TPS25751_ROLE_SOURCE)) {
+            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+            Debug_Printf("[PD-POLICY] desired=SOURCE restored: partner Sink was confirmed and now offers only %lumV",
+                         (unsigned long)source_mv);
+        }
+    }
+
+    if (!contract_valid ||
+        (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN) ||
+        (current == g_pm.policy_desired_role)) {
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
+
+    if (g_pm.policy_role_mismatch_since_ms == 0U) {
+        g_pm.policy_role_mismatch_since_ms = now_ms;
+        Debug_Printf("[PD-POLICY] role drift current=%s desired=%s; waiting %lums for stable contract",
+                     PowerManager_RoleToString(current),
+                     PowerManager_RoleToString(g_pm.policy_desired_role),
+                     (unsigned long)PM_POLICY_ROLE_DRIFT_MS);
+        return;
+    }
+
+    if (((uint32_t)(now_ms - g_pm.policy_role_mismatch_since_ms) <
+         PM_POLICY_ROLE_DRIFT_MS) ||
+        !PowerManager_TickReached(now_ms, g_pm.policy_next_ms) ||
+        (g_pm.policy_phase != PM_POLICY_DONE)) {
+        return;
+    }
+
+    g_pm.policy_swap_attempted = false;
+    g_pm.policy_phase =
+        (g_pm.policy_desired_role == TPS25751_ROLE_SOURCE) ?
+        PM_POLICY_SWAP_TO_SOURCE : PM_POLICY_SWAP_TO_SINK;
+    g_pm.policy_next_ms = now_ms;
+    g_pm.policy_role_mismatch_since_ms = 0U;
+    Debug_Printf("[PD-POLICY] enforcing maintained role target=%s",
+                 PowerManager_RoleToString(g_pm.policy_desired_role));
+}
+
+static void PowerManager_HandleTpsError(TPS25751_Status_t status,
+                                        uint32_t now_ms)
+{
+    ++g_pm.tps_error_count;
+    g_pm.status.tps_status = status;
+    PowerManager_RecordError(POWER_MANAGER_ERROR_TPS,
+                             (uint32_t)status,
+                             g_pm.tps.register_address,
+                             now_ms);
+    PowerManager_LogError("TPS", status, g_pm.tps_error_count, now_ms);
+    g_pm.next_tps_step_ms = now_ms + PM_MODE_POLL_MS;
+    if (g_pm.status.tps.mode != TPS25751_MODE_APP) {
+        PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
+    }
+}
+
+static void PowerManager_HandleBqError(TPS25751_Status_t tps_status,
+                                       uint32_t now_ms)
+{
+    ++g_pm.bq_error_count;
+    g_pm.status.tps_status = tps_status;
+    g_pm.status.bq_status = BQ25731_MapTpsStatus(tps_status);
+    g_pm.status.bq.online = false;
+    PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,
+                             (uint32_t)tps_status,
+                             g_pm.tps.register_address,
+                             now_ms);
+    PowerManager_LogError("BQ", tps_status, g_pm.bq_error_count, now_ms);
+    g_pm.bq_init = PM_BQ_INIT_READ_OPTION0;
+    g_pm.next_bq_action_ms = now_ms + PM_BQ_RETRY_MS;
+    PowerManager_SetState(POWER_MANAGER_DEGRADED);
+}
+
+static void PowerManager_HandleBqTelemetryError(
+    TPS25751_Status_t tps_status,
+    uint32_t now_ms)
+{
+    ++g_pm.bq_error_count;
+    g_pm.status.tps_status = tps_status;
+    g_pm.status.bq_status = BQ25731_MapTpsStatus(tps_status);
+    g_pm.status.bq.online = false;
+    PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,
+                             (uint32_t)tps_status,
+                             g_pm.tps.register_address,
+                             now_ms);
+    PowerManager_LogError("BQ-TELEM", tps_status,
+                          g_pm.bq_error_count, now_ms);
+    g_pm.next_bq_telemetry_ms = now_ms + PM_BQ_RETRY_MS;
+    g_pm.next_bq_config_ms = now_ms + PM_BQ_RETRY_MS;
+    /* A telemetry read failure must not trigger repeated writes to BQ. */
+    PowerManager_SetState(POWER_MANAGER_DEGRADED);
+}
+
+static uint16_t PowerManager_ResultLe16(bool *valid)
+{
+    uint8_t length = 0U;
+    const uint8_t *data = TPS25751_GetResult(&g_pm.tps, &length);
+
+    *valid = (data != NULL) && (length >= 2U);
+    return *valid ? TPS25751_ReadLe16(data) : 0U;
+}
+
+static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
+{
+    TPS_IntEvent_t event;
+
+    TPS_IntEventDecode(&event, data);
+    if (!event.any) {
+        return;
+    }
+
+    memcpy(g_pm.event_to_clear, event.raw, sizeof(g_pm.event_to_clear));
+    g_pm.event_clear_pending = true;
+
+    if (event.hard_reset || event.plug_changed ||
+        event.power_swap_complete || event.new_contract_consumer ||
+        event.new_contract_provider || event.source_caps_received ||
+        event.power_swap_requested ||
+        event.unable_to_source || event.power_event_error) {
+        Debug_Printf("[PD-EVENT] hard_reset=%u plug_change=%u swap_request=%u swap_done=%u contract_consumer=%u contract_provider=%u source_caps=%u unable_source=%u power_error=%u raw0=0x%02X raw1=0x%02X raw2=0x%02X raw5=0x%02X",
+                     event.hard_reset ? 1U : 0U,
+                     event.plug_changed ? 1U : 0U,
+                     event.power_swap_requested ? 1U : 0U,
+                     event.power_swap_complete ? 1U : 0U,
+                     event.new_contract_consumer ? 1U : 0U,
+                     event.new_contract_provider ? 1U : 0U,
+                     event.source_caps_received ? 1U : 0U,
+                     event.unable_to_source ? 1U : 0U,
+                     event.power_event_error ? 1U : 0U,
+                     event.raw[0], event.raw[1], event.raw[2], event.raw[5]);
+    }
+
+    if (event.hard_reset) {
+        g_pm.hard_reset_holdoff_until_ms = now_ms +
+                                           PM_HARD_RESET_HOLDOFF_MS;
+        /* A pre-reset role sample is no longer proof that Source is safe. */
+        g_pm.status_updated_ms = 0U;
+        PowerManager_SetOtgPin(false);
+    }
+    if (event.overcurrent || event.power_event_error ||
+        event.unable_to_source) {
+        g_pm.status.source_fault_latched = true;
+        PowerManager_SetOtgPin(false);
+    }
+    if (event.ext_source_safe_state) {
+        g_pm.hard_reset_holdoff_until_ms = now_ms +
+                                           PM_HARD_RESET_HOLDOFF_MS;
+        g_pm.status_updated_ms = 0U;
+        PowerManager_SetOtgPin(false);
+    }
+    if (event.i2c_controller_nack) {
+        PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,
+                                 TPS25751_COMMAND_ERROR,
+                                 TPS25751_REG_INT_EVENT,
+                                 now_ms);
+    }
+    if (event.source_caps_received || event.new_contract_consumer) {
+        g_pm.partner_source_caps_current = true;
+    }
+}
+
+static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
+                                             uint32_t now_ms)
+{
+    PowerManager_Job_t completed_job = g_pm.job;
+    const uint8_t *data;
+    uint8_t length = 0U;
+    bool valid;
+    uint16_t raw16;
+
+    g_pm.job = PM_JOB_NONE;
+    g_pm.last_job = completed_job;
+    data = TPS25751_GetResult(&g_pm.tps, &length);
+
+    if (operation_status != TPS25751_OK) {
+        if (completed_job == PM_JOB_GET_SINK_CAPS) {
+            memset(&g_pm.partner_sink_caps, 0,
+                   sizeof(g_pm.partner_sink_caps));
+            g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-POLICY] partner did not provide Sink PDOs task=%u status=%s",
+                         g_pm.tps.task_return_code,
+                         TPS25751_StatusToString(operation_status));
+            if (operation_status != TPS25751_COMMAND_ERROR) {
+                PowerManager_HandleTpsError(operation_status, now_ms);
+            }
+        } else if (completed_job == PM_JOB_READ_SINK_CAPS) {
+            memset(&g_pm.partner_sink_caps, 0,
+                   sizeof(g_pm.partner_sink_caps));
+            g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            PowerManager_HandleTpsError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_READ_SOURCE_CAPS) {
+            memset(&g_pm.partner_source_caps, 0,
+                   sizeof(g_pm.partner_source_caps));
+            g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            PowerManager_HandleTpsError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_READ_LOCAL_SINK_CAPS) {
+            memset(&g_pm.local_sink_caps, 0,
+                   sizeof(g_pm.local_sink_caps));
+            g_pm.policy_phase = PM_POLICY_READ_AUTO_SINK_POLICY;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-POLICY] local TX_SINK_CAPS read failed: %s",
+                         TPS25751_StatusToString(operation_status));
+        } else if (completed_job == PM_JOB_READ_AUTO_SINK_POLICY) {
+            memset(&g_pm.auto_sink_policy, 0,
+                   sizeof(g_pm.auto_sink_policy));
+            g_pm.policy_phase = PM_POLICY_DECIDE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK read failed: %s",
+                         TPS25751_StatusToString(operation_status));
+        } else if ((completed_job == PM_JOB_WRITE_AUTO_SINK_POLICY) ||
+                   (completed_job == PM_JOB_RENEGOTIATE_SOURCE_CAPS)) {
+            g_pm.policy_phase = PM_POLICY_DECIDE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-MAX] 100W renegotiation failed step=%s task=%u status=%s; keeping existing valid contract",
+                         PowerManager_JobToString(completed_job),
+                         g_pm.tps.task_return_code,
+                         TPS25751_StatusToString(operation_status));
+            if (operation_status != TPS25751_COMMAND_ERROR) {
+                PowerManager_HandleTpsError(operation_status, now_ms);
+            }
+        } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
+                   (completed_job == PM_JOB_SWAP_TO_SINK)) {
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_SWAP_RETRY_MS;
+            Debug_Printf("[PD-POLICY] role swap rejected target=%s task=%u status=%s; maintained policy retries after %lums",
+                         PowerManager_RoleToString(g_pm.policy_desired_role),
+                         g_pm.tps.task_return_code,
+                         TPS25751_StatusToString(operation_status),
+                         (unsigned long)PM_POLICY_SWAP_RETRY_MS);
+            if (operation_status != TPS25751_COMMAND_ERROR) {
+                PowerManager_HandleTpsError(operation_status, now_ms);
+            }
+        } else if (completed_job == PM_JOB_BQ_WRITE_IIN) {
+            g_pm.bq_iin_write_pending = false;
+            g_pm.bq_iin_failed_rdo_raw =
+                g_pm.status.tps.active_rdo_raw;
+            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_BQ_APPLY_OPTION0) {
+            g_pm.bq_option0_write_pending = false;
+            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_BQ_APPLY_CURRENT) {
+            g_pm.bq_current_write_pending = false;
+            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
+        } else if ((completed_job == PM_JOB_BQ_READ_CONFIG_BLOCK) ||
+                   (completed_job == PM_JOB_BQ_READ_STATUS_BLOCK) ||
+                   (completed_job == PM_JOB_BQ_READ_ADC_BLOCK) ||
+                   (completed_job == PM_JOB_BQ_READ_CURRENT) ||
+                   (completed_job == PM_JOB_BQ_READ_VOLTAGE) ||
+                   (completed_job == PM_JOB_BQ_READ_IIN) ||
+                   (completed_job == PM_JOB_BQ_READ_ID) ||
+                   (completed_job == PM_JOB_BQ_READ_ADC)) {
+            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
+        } else if (completed_job >= PM_JOB_BQ_READ_OPTION0) {
+            PowerManager_HandleBqError(operation_status, now_ms);
         } else {
-            Debug_Printf("[PD-POLICY] likely limit source: AUTO_NEGOTIATE_SINK / TX_SINK_CAPS / EEPROM sink policy; inspect values above");
+            PowerManager_HandleTpsError(operation_status, now_ms);
         }
-    }
-#else
-    return;
-#endif
-}
-
-static void PowerManager_DebugPdConnectionEvent(uint32_t now_ms, bool pd_connected)
-{
-    (void)now_ms;
-
-    if (pd_connected && (!g_pm.pd_was_connected)) {
-        PowerManager_DebugSeparator("PD CONNECTED");
-        Debug_Printf("[PD-EVENT] ATTACH role=%s PDO=0x%08lX RDO=0x%08lX V=%lumV I=%lumA PP1=%s PP3=%s",
-                     g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE ? "SOURCE" : "SINK",
-                     (unsigned long)g_pm.pd_snapshot.active_pdo_raw,
-                     (unsigned long)g_pm.pd_snapshot.active_rdo_raw,
-                     (unsigned long)g_pm.pd_snapshot.contract_voltage_mv,
-                     (unsigned long)g_pm.pd_snapshot.contract_current_ma,
-                     TPS25751_PowerPathSwitchToString(g_pm.tps_telemetry.pp1_switch),
-                     TPS25751_PowerPathSwitchToString(g_pm.tps_telemetry.pp3_switch));
-        Debug_Printf("[PD-DECISION] waiting for partner PDOs/contract before selecting Sink or Source");
-        g_pm.last_pd_caps_debug_tick_ms = 0U;
-        PowerManager_ClearPdCaps();
-    } else if ((!pd_connected) && g_pm.pd_was_connected) {
-        PowerManager_DebugSeparator("PD DISCONNECTED");
-        Debug_Printf("[PD-EVENT] DETACH -> charge=OFF OTG=OFF PDO/RDO cleared");
-        PowerManager_ClearPdCaps();
-    }
-
-    g_pm.pd_was_connected = pd_connected;
-}
-
-static void PowerManager_DebugPdCaps(uint32_t now_ms, bool pd_connected)
-{
-    TPS25751_Telemetry_t *tps = &g_pm.tps_telemetry;
-    TPS25751_Status_t caps_status;
-    uint32_t signature;
-    bool interval_elapsed;
-    bool changed;
-    bool any_list = false;
-    uint32_t best_power_mw = 0U;
-    uint8_t best_index = 0U;
-    uint8_t i;
-
-    if (!pd_connected) {
         return;
     }
+    g_pm.status.tps_status = TPS25751_OK;
 
-    interval_elapsed = ((uint32_t)(now_ms - g_pm.last_pd_caps_debug_tick_ms) >=
-                        POWER_MANAGER_PD_CAPS_DEBUG_MS);
-    if (g_pm.pd_caps_valid && (!interval_elapsed)) {
-        return;
-    }
+    switch (completed_job) {
+        case PM_JOB_READ_MODE:
+            if ((data == NULL) || (length != TPS25751_MODE_LEN)) {
+                PowerManager_HandleTpsError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.tps.mode = TPS25751_DecodeMode(data);
+            memcpy(g_pm.status.tps.mode_ascii, data, TPS25751_MODE_LEN);
+            g_pm.status.tps.mode_ascii[TPS25751_MODE_LEN] = '\0';
+            g_pm.next_mode_ms = now_ms + PM_MODE_POLL_MS;
+            if (g_pm.status.tps.mode == TPS25751_MODE_APP) {
+                if (g_pm.app_seen_ms == 0U) {
+                    g_pm.app_seen_ms = now_ms;
+                    g_pm.next_bq_action_ms = now_ms + PM_BQ_START_DELAY_MS;
+                    g_pm.next_tps_step_ms = now_ms;
+                    g_pm.mode_update_pending = true;
+                    g_pm.bq_init = PM_BQ_INIT_WAIT;
+                }
+                PowerManager_SetState(POWER_MANAGER_TPS_READY);
+            } else {
+                g_pm.app_seen_ms = 0U;
+                g_pm.status.applied_mode_valid = false;
+                g_pm.mode_update_pending = true;
+                PowerManager_SetOtgPin(false);
+                PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
+            }
+            break;
 
-    caps_status = TPS25751_ReadCapabilityLists(&g_pm.tps, tps);
-    if (caps_status != TPS25751_OK) {
-        g_pm.last_pd_caps_debug_tick_ms = now_ms;
-        g_pm.pd_caps_valid = true;
-        PowerManager_DebugSeparator("PD CAPS");
-        Debug_Printf("[PD-CAPS] read failed: %s", TPS25751_StatusToString(caps_status));
-        return;
-    }
+        case PM_JOB_READ_PORT_CONFIG:
+            if ((data == NULL) || (length != TPS25751_PORT_CONFIG_LEN)) {
+                PowerManager_HandleTpsError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            memcpy(g_pm.port_config, data, sizeof(g_pm.port_config));
+            g_pm.port_write_pending = TPS25751_PatchPortMode(
+                g_pm.port_config,
+                PowerManager_MapPortMode(g_pm.status.requested_mode));
+            if (!g_pm.port_write_pending) {
+                g_pm.status.applied_mode = g_pm.status.requested_mode;
+                g_pm.status.applied_mode_valid = true;
+                g_pm.mode_update_pending = false;
+            }
+            break;
 
-    signature = PowerManager_PdCapsSignature(tps);
-    changed = (!g_pm.pd_caps_valid) || (signature != g_pm.last_pd_caps_signature);
+        case PM_JOB_WRITE_PORT_CONFIG:
+            g_pm.port_write_pending = false;
+            g_pm.mode_update_pending = false;
+            g_pm.status.applied_mode = g_pm.status.requested_mode;
+            g_pm.status.applied_mode_valid = true;
+            g_pm.status.source_fault_latched = false;
+            g_pm.status_updated_ms = 0U;
+            g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+            break;
 
-    if ((!changed) && (!interval_elapsed)) {
-        return;
-    }
+        case PM_JOB_READ_INT_MASK:
+            if ((data == NULL) || (length != TPS_INT_EVENT_BYTES)) {
+                PowerManager_HandleTpsError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            memcpy(g_pm.int_mask, data, sizeof(g_pm.int_mask));
+            TPS_IntEventEnableRequiredBits(g_pm.int_mask);
+            g_pm.event_mask_write_pending = true;
+            break;
 
-    g_pm.last_pd_caps_debug_tick_ms = now_ms;
-    g_pm.last_pd_caps_signature = signature;
-    g_pm.pd_caps_valid = true;
+        case PM_JOB_WRITE_INT_MASK:
+            g_pm.event_mask_write_pending = false;
+            g_pm.event_mask_ready = true;
+            break;
 
-    PowerManager_DebugSeparator("PD CAPS");
-    Debug_Printf("[PD-CAPS] %s", changed ? "updated" : "periodic");
-
-    any_list |= PowerManager_DebugPdoList("partner source", &tps->rx_source_caps);
-    any_list |= PowerManager_DebugPdoList("partner sink", &tps->rx_sink_caps);
-    any_list |= PowerManager_DebugPdoList("my source", &tps->tx_source_caps);
-    any_list |= PowerManager_DebugPdoList("my sink", &tps->tx_sink_caps);
-
-    for (i = 0U; i < tps->rx_source_caps.count; ++i) {
-        const TPS25751_PdoInfo_t *pdo = &tps->rx_source_caps.pdo[i];
-        uint32_t power_mw = pdo->power_mw;
-        if ((pdo->type == TPS25751_SUPPLY_FIXED) ||
-            (pdo->type == TPS25751_SUPPLY_VARIABLE))
-            power_mw = (pdo->voltage_mv != 0U ? pdo->voltage_mv : pdo->max_mv) *
-                       pdo->current_ma / 1000U;
-        if (power_mw > best_power_mw) {
-            best_power_mw = power_mw;
-            best_index = (uint8_t)(i + 1U);
-        }
-    }
-    if (best_index != 0U) {
-        const TPS25751_PdoInfo_t *best = &tps->rx_source_caps.pdo[best_index - 1U];
-        Debug_Printf("[PD-SELECT] best available PDO=#%u %lumV/%lumA %lumW; TPS requested via 100W sink policy",
-                     best_index,
-                     (unsigned long)(best->voltage_mv != 0U ? best->voltage_mv : best->max_mv),
-                     (unsigned long)best->current_ma,
-                     (unsigned long)best_power_mw);
-    }
-
-    if (!any_list) {
-        Debug_Printf("[PD-CAPS] no PDO received");
-    }
-
-#if (POWER_MANAGER_PD_POLICY_DEBUG != 0U)
-    PowerManager_LogPdSinkPolicy();
-#endif
-}
-
-static TPS25751_Status_t PowerManager_ProbeTpsAddress(uint8_t addr_7bit)
-{
-    uint8_t mode_ascii[4];
-    uint8_t payload_len = 0U;
-    TPS25751_Status_t status;
-
-    status = TPS25751_Init(&g_pm.tps, g_pm.hi2c, addr_7bit);
-    if (status != TPS25751_OK) {
-        return status;
-    }
-
-    status = TPS25751_ReadPayload(&g_pm.tps,
-                                  POWER_MANAGER_TPS_PROBE_REG_MODE,
-                                  mode_ascii,
-                                  sizeof(mode_ascii),
-                                  &payload_len);
-    if ((status == TPS25751_OK) && (payload_len == sizeof(mode_ascii))) {
-        return TPS25751_OK;
-    }
-
-    return (status == TPS25751_OK) ? TPS25751_BAD_LENGTH : status;
-}
-
-static void PowerManager_SetErrorFromTps(const TPS25751_Device_t *tps)
-{
-    if (tps == NULL) {
-        return;
-    }
-
-    g_pm.last_error_reg = tps->last_register;
-    g_pm.last_error_code = tps->last_error;
-}
-
-static void PowerManager_SetErrorFromBq(const BQ25731_Device_t *bq)
-{
-    if (bq == NULL) {
-        return;
-    }
-
-    g_pm.last_error_reg = bq->last_bq_register;
-    g_pm.last_error_code = bq->last_bq_error_code;
-}
-
-static const char *PowerManager_BqSafeErrorText(BQ25731_SafeError_t error)
-{
-    switch (error) {
-        case BQ_ERR_NONE: return "BQ_ERR_NONE";
-        case BQ_ERR_PROBE_FAILED: return "BQ_ERR_PROBE_FAILED";
-        case BQ_ERR_I2C_READ_FAILED: return "BQ_ERR_I2C_READ_FAILED";
-        case BQ_ERR_I2C_WRITE_FAILED: return "BQ_ERR_I2C_WRITE_FAILED";
-        case BQ_ERR_CHRG_INHIBIT_NOT_SET: return "BQ_ERR_CHRG_INHIBIT_NOT_SET";
-        case BQ_ERR_CHARGE_CURRENT_NOT_ZERO: return "BQ_ERR_CHARGE_CURRENT_NOT_ZERO";
-        case BQ_ERR_EN_OTG_STUCK_ON: return "BQ_ERR_EN_OTG_STUCK_ON";
-        case BQ_ERR_IN_OTG_ACTIVE: return "BQ_ERR_IN_OTG_ACTIVE";
-        case BQ_ERR_IN_FAST_CHARGE: return "BQ_ERR_IN_FAST_CHARGE";
-        case BQ_ERR_BRIDGE_WRITE_FAILED: return "BQ_ERR_BRIDGE_WRITE_FAILED";
-        default: return "BQ_ERR_UNKNOWN";
-    }
-}
-
-#if (POWER_MANAGER_PD_CYCLE_TEST != 0U)
-static void PowerManager_PdCycleTestTask(uint32_t now_ms)
-{
-    static const uint32_t requested_voltage_mv[] = {
-        20000U, 15000U, 9000U, 5000U
-    };
-    uint8_t attempts;
-
-    if ((int32_t)(now_ms - g_pm.pd_test_next_tick_ms) < 0) {
-        return;
-    }
-
-    if ((App_GetRequestedMode() != MODE_IDLE) ||
-        (!g_pm.bq_telemetry.charge_inhibited) ||
-        g_pm.bq_telemetry.otg_enabled ||
-        g_pm.bq_telemetry.in_otg ||
-        (!g_pm.pd_snapshot.attached) ||
-        (g_pm.pd_snapshot.power_role != POWER_MANAGER_PD_ROLE_SINK)) {
-        if ((uint32_t)(now_ms - g_pm.pd_test_last_blocked_log_ms) >= 1000U) {
-            Debug_Printf("[PD-TEST] blocked: PSU must be OFF, charging inhibited, OTG off and port in Sink role");
-            g_pm.pd_test_last_blocked_log_ms = now_ms;
-        }
-        g_pm.pd_test_next_tick_ms = now_ms + 1000U;
-        return;
-    }
-
-    for (attempts = 0U; attempts < 4U; ++attempts) {
-        uint32_t target_mv = requested_voltage_mv[g_pm.pd_test_step];
-        TPS25751_Status_t status;
-
-        g_pm.pd_test_step = (uint8_t)((g_pm.pd_test_step + 1U) % 4U);
-        Debug_Printf("[PD-TEST] request %lumV", (unsigned long)target_mv);
-
-        status = TPS25751_RequestSinkVoltageMv(&g_pm.tps,
-                                               target_mv,
-                                               POWER_MANAGER_PD_TEST_TIMEOUT_MS);
-        if (status == TPS25751_NOT_AVAILABLE) {
-            Debug_Printf("[PD-TEST] voltage not available, skipping %lumV",
-                         (unsigned long)target_mv);
-            continue;
+        case PM_JOB_READ_STATUS:
+        {
+            TPS25751_PowerRole_t old_role = g_pm.status.tps.role;
+            TPS25751_DecodeStatus(&g_pm.status.tps, data);
+            g_pm.status.tps.updated_ms = now_ms;
+            g_pm.status_updated_ms = now_ms;
+            if (g_pm.status.tps.attached &&
+                (g_pm.status.tps.role != old_role)) {
+                Debug_Printf("[PD-ROLE] %s -> %s conn=%u STATUS=0x%02lX%08lX",
+                             PowerManager_RoleToString(old_role),
+                             PowerManager_RoleToString(g_pm.status.tps.role),
+                             g_pm.status.tps.connection_state,
+                             (unsigned long)((g_pm.status.tps.status_raw >> 32) & 0xFFU),
+                             (unsigned long)g_pm.status.tps.status_raw);
+            }
+            PowerManager_UpdateAttachPolicy(now_ms);
+            PowerManager_UpdateBqChargePolicy();
+            g_pm.telemetry_phase = 1U;
+            break;
         }
 
-        if (status != TPS25751_OK) {
-            Debug_Printf("[PD-TEST] renegotiation failed/timeout: target=%lumV status=%s",
-                         (unsigned long)target_mv,
-                         TPS25751_StatusToString(status));
-            g_pm.pd_test_next_tick_ms = HAL_GetTick() + POWER_MANAGER_PD_TEST_STEP_MS;
-            return;
-        }
+        case PM_JOB_READ_POWER_PATH:
+            TPS25751_DecodePowerPath(&g_pm.status.tps, data);
+            if (g_pm.status.tps.pp5v_overcurrent ||
+                g_pm.status.tps.ppcable_overcurrent) {
+                g_pm.status.source_fault_latched = true;
+                PowerManager_SetOtgPin(false);
+            }
+            g_pm.telemetry_phase = 2U;
+            break;
 
-        g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps,
-                                                       &g_pm.tps_telemetry);
-        if (g_pm.tps_status == TPS25751_OK) {
+        case PM_JOB_READ_POWER_STATUS:
+            TPS25751_DecodePowerStatus(&g_pm.status.tps, data);
+            g_pm.telemetry_phase = 3U;
+            break;
+
+        case PM_JOB_READ_PD_STATUS:
+            TPS25751_DecodePdStatus(&g_pm.status.tps, data);
+            if ((g_pm.status.tps.hard_reset_reason != 0U) &&
+                (g_pm.status.tps.hard_reset_reason !=
+                 g_pm.previous_hard_reset_reason)) {
+                g_pm.hard_reset_holdoff_until_ms = now_ms +
+                                                   PM_HARD_RESET_HOLDOFF_MS;
+                g_pm.status_updated_ms = 0U;
+                PowerManager_SetOtgPin(false);
+            }
+            g_pm.previous_hard_reset_reason =
+                g_pm.status.tps.hard_reset_reason;
+            g_pm.telemetry_phase = 4U;
+            break;
+
+        case PM_JOB_READ_ADC:
+            TPS25751_DecodeAdcResults(&g_pm.status.tps, data);
+            g_pm.telemetry_phase = 5U;
+            break;
+
+        case PM_JOB_READ_ACTIVE_PDO:
+            g_pm.status.tps.active_pdo_raw = TPS25751_ReadLe32(data);
+            g_pm.status.tps.active_pdo = TPS25751_DecodePdo(
+                g_pm.status.tps.active_pdo_raw);
+            g_pm.telemetry_phase = 6U;
             PowerManager_UpdatePdSnapshot();
-            Debug_Printf("[PD-TEST] active contract %lumV %lumA %lumW",
-                         (unsigned long)g_pm.pd_snapshot.contract_voltage_mv,
-                         (unsigned long)g_pm.pd_snapshot.contract_current_ma,
-                         (unsigned long)g_pm.pd_snapshot.contract_power_mw);
-        }
+            break;
 
-        g_pm.pd_test_next_tick_ms = HAL_GetTick() + POWER_MANAGER_PD_TEST_STEP_MS;
-        return;
+        case PM_JOB_READ_ACTIVE_RDO:
+            g_pm.status.tps.active_rdo_raw = TPS25751_ReadLe32(data);
+            g_pm.status.tps.active_rdo = TPS25751_DecodeRdo(
+                g_pm.status.tps.active_rdo_raw);
+            g_pm.telemetry_phase = 7U;
+            PowerManager_UpdatePdSnapshot();
+            PowerManager_UpdateBqInputLimit();
+            PowerManager_UpdateBqChargePolicy();
+            /* The first AUTO_NEGOTIATE_SINK read can finish before ACTIVE_RDO
+             * becomes valid.  Re-evaluate here so a single early snapshot
+             * cannot permanently suppress the 100 W renegotiation. */
+            (void)PowerManager_TrySchedule100WSinkContract(now_ms);
+            break;
+
+        case PM_JOB_READ_EVENT:
+            PowerManager_HandleEvent(data, now_ms);
+            g_pm.telemetry_phase = 0U;
+            PowerManager_UpdatePdSnapshot();
+            PowerManager_LogPd(now_ms);
+            break;
+
+        case PM_JOB_CLEAR_EVENT:
+            g_pm.event_clear_pending = false;
+            memset(g_pm.event_to_clear, 0,
+                   sizeof(g_pm.event_to_clear));
+            break;
+
+        case PM_JOB_GET_SINK_CAPS:
+            g_pm.policy_phase = PM_POLICY_READ_SINK_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            break;
+
+        case PM_JOB_READ_SINK_CAPS:
+            if (!TPS25751_DecodeCapabilities(&g_pm.partner_sink_caps,
+                                             data, length)) {
+                memset(&g_pm.partner_sink_caps, 0,
+                       sizeof(g_pm.partner_sink_caps));
+                Debug_Printf("[PD-POLICY] invalid Sink PDO payload; ignoring it");
+                g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+                break;
+            }
+            if (g_pm.partner_sink_caps.count > 0U) {
+                g_pm.partner_sink_observed = true;
+            }
+            PowerManager_LogCapabilities("SINK", &g_pm.partner_sink_caps);
+            g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            break;
+
+        case PM_JOB_READ_SOURCE_CAPS:
+            if (!TPS25751_DecodeCapabilities(&g_pm.partner_source_caps,
+                                             data, length)) {
+                memset(&g_pm.partner_source_caps, 0,
+                       sizeof(g_pm.partner_source_caps));
+                Debug_Printf("[PD-POLICY] invalid Source PDO payload; ignoring it");
+                g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+                break;
+            }
+            if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+                g_pm.status.tps.active_pdo.valid) {
+                g_pm.partner_source_caps_current = true;
+            }
+            PowerManager_LogCapabilities("SOURCE",
+                                         &g_pm.partner_source_caps);
+            g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            break;
+
+        case PM_JOB_READ_LOCAL_SINK_CAPS:
+            if (!TPS25751_DecodeCapabilities(&g_pm.local_sink_caps,
+                                             data, length)) {
+                memset(&g_pm.local_sink_caps, 0,
+                       sizeof(g_pm.local_sink_caps));
+                Debug_Printf("[PD-POLICY] invalid local TX_SINK_CAPS payload");
+            } else {
+                PowerManager_LogCapabilities("LOCAL_SINK",
+                                             &g_pm.local_sink_caps);
+            }
+            g_pm.policy_phase = PM_POLICY_READ_AUTO_SINK_POLICY;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            break;
+
+        case PM_JOB_READ_AUTO_SINK_POLICY:
+            if (!TPS25751_DecodeAutoNegotiateSink(&g_pm.auto_sink_policy,
+                                                  data, length)) {
+                memset(&g_pm.auto_sink_policy, 0,
+                       sizeof(g_pm.auto_sink_policy));
+                Debug_Printf("[PD-POLICY] invalid AUTO_NEGOTIATE_SINK payload");
+            } else {
+                PowerManager_LogSinkNegotiationLimit();
+            }
+            if (!PowerManager_TrySchedule100WSinkContract(now_ms)) {
+                g_pm.policy_phase = PM_POLICY_DECIDE;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            }
+            break;
+
+        case PM_JOB_WRITE_AUTO_SINK_POLICY:
+            g_pm.policy_phase = PM_POLICY_RENEGOTIATE_SOURCE_CAPS;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-MAX] AUTO_NEGOTIATE_SINK updated in TPS RAM; requesting official GSrC renegotiation");
+            break;
+
+        case PM_JOB_RENEGOTIATE_SOURCE_CAPS:
+            (void)TPS25751_DecodeAutoNegotiateSink(
+                &g_pm.auto_sink_policy,
+                g_pm.auto_sink_policy.raw,
+                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
+            g_pm.policy_phase = PM_POLICY_DECIDE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            Debug_Printf("[PD-MAX] GSrC accepted; waiting for TPS-generated 100W RDO (PDO/RDO were not modified by firmware)");
+            break;
+
+        case PM_JOB_SWAP_TO_SOURCE:
+        case PM_JOB_SWAP_TO_SINK:
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_SWAP_RETRY_MS;
+            Debug_Printf("[PD-POLICY] role swap accepted target=%s; maintained policy verifies actual role in [PD]",
+                         PowerManager_RoleToString(g_pm.policy_desired_role));
+            break;
+
+        case PM_JOB_BQ_READ_OPTION0:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_option0 = raw16;
+            g_pm.status.bq.online = true;
+            g_pm.status.bq_status = BQ25731_OK;
+            if ((raw16 & (BQ25731_CHARGE_OPTION0_LWPWR |
+                          BQ25731_CHARGE_OPTION0_WDT_MASK)) != 0U) {
+                g_pm.bq_init = PM_BQ_INIT_WRITE_OPTION0;
+            } else {
+                g_pm.bq_init = PM_BQ_INIT_WRITE_CURRENT;
+            }
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            PowerManager_SetState(POWER_MANAGER_BQ_ADC_SETUP);
+            break;
+
+        case PM_JOB_BQ_WRITE_OPTION0:
+            g_pm.status.bq.charge_option0 &=
+                (uint16_t)~(BQ25731_CHARGE_OPTION0_LWPWR |
+                            BQ25731_CHARGE_OPTION0_WDT_MASK);
+            g_pm.bq_init = PM_BQ_INIT_WRITE_CURRENT;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_WRITE_CURRENT:
+            g_pm.status.bq.charge_current =
+                BQ25731_EncodeChargeCurrentMa(
+                    BQ25731_TARGET_CHARGE_CURRENT_MA);
+            g_pm.status.bq.charge_current_ma =
+                BQ25731_DecodeChargeCurrentMa(
+                    g_pm.status.bq.charge_current);
+            g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            Debug_Printf("[BQ] watchdog=OFF ICHG_SET=%lumA target=%lumA",
+                         (unsigned long)g_pm.status.bq.charge_current_ma,
+                         (unsigned long)BQ25731_TARGET_CHARGE_CURRENT_MA);
+            break;
+
+        case PM_JOB_BQ_WRITE_ADC:
+            g_pm.bq_init = PM_BQ_INIT_VERIFY_ADC;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_TELEMETRY_MS;
+            break;
+
+        case PM_JOB_BQ_VERIFY_ADC:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid ||
+                ((raw16 & BQ25731_ADC_OPTION_VERIFY_MASK) !=
+                 (BQ25731_ADC_OPTION_DEBUG &
+                  BQ25731_ADC_OPTION_VERIFY_MASK))) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.adc_option = raw16;
+            g_pm.status.bq.adc_configured = true;
+            g_pm.status.bq.online = true;
+            g_pm.status.bq_status = BQ25731_OK;
+            g_pm.bq_init = PM_BQ_INIT_DONE;
+            g_pm.next_bq_telemetry_ms = now_ms + PM_BQ_TELEMETRY_MS;
+            g_pm.next_bq_config_ms = now_ms + PM_BQ_CONFIG_MS;
+            PowerManager_SetState(POWER_MANAGER_RUN);
+            PowerManager_UpdateBqChargePolicy();
+            break;
+
+        case PM_JOB_BQ_READ_CURRENT:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_current = raw16;
+            g_pm.status.bq.charge_current_ma =
+                BQ25731_DecodeChargeCurrentMa(raw16);
+            g_pm.bq_phase = 1U;
+            break;
+
+        case PM_JOB_BQ_READ_VOLTAGE:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_voltage = raw16;
+            g_pm.status.bq.charge_voltage_mv =
+                BQ25731_DecodeChargeVoltageMv(raw16);
+            g_pm.bq_phase = 2U;
+            break;
+
+        case PM_JOB_BQ_READ_IIN:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.iin_host = raw16;
+            g_pm.status.bq.input_current_ma =
+                BQ25731_DecodeInputCurrentMa(raw16);
+            g_pm.bq_phase = 3U;
+            break;
+
+        case PM_JOB_BQ_READ_ID:
+            if ((data == NULL) || (length < 2U)) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.manufacturer_id = data[0];
+            g_pm.status.bq.device_id = data[1];
+            g_pm.status.bq.id_valid = (data[0] == 0x40U) &&
+                                      (data[1] == 0xD6U);
+            g_pm.status.bq_status = g_pm.status.bq.id_valid ?
+                BQ25731_OK : BQ25731_DEVICE_ID_MISMATCH;
+            if (g_pm.bq_init == PM_BQ_INIT_READ_ID) {
+                g_pm.bq_init = PM_BQ_INIT_READ_OPTION0;
+                g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            }
+            break;
+
+        case PM_JOB_BQ_READ_ADC:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.adc_option = raw16;
+            g_pm.status.bq.adc_configured =
+                ((raw16 & BQ25731_ADC_OPTION_VERIFY_MASK) ==
+                 (BQ25731_ADC_OPTION_DEBUG &
+                  BQ25731_ADC_OPTION_VERIFY_MASK));
+            g_pm.status.bq.online = true;
+            g_pm.status.bq.updated_ms = now_ms;
+            g_pm.bq_phase = 0U;
+            PowerManager_LogBq();
+            break;
+
+        case PM_JOB_BQ_READ_CONFIG_BLOCK:
+            if (!BQ25731_DecodeConfigBlock(&g_pm.status.bq,
+                                           data, length)) {
+                PowerManager_HandleBqTelemetryError(
+                    TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.online = true;
+            g_pm.status.bq_status = BQ25731_OK;
+            g_pm.next_bq_config_ms = now_ms + PM_BQ_CONFIG_MS;
+            PowerManager_UpdateBqChargePolicy();
+            PowerManager_LogBq();
+            break;
+
+        case PM_JOB_BQ_READ_STATUS_BLOCK:
+            if (!BQ25731_DecodeStatusBlock(&g_pm.status.bq,
+                                           data, length)) {
+                PowerManager_HandleBqTelemetryError(
+                    TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.bq_telemetry_phase = 1U;
+            g_pm.next_bq_telemetry_ms = now_ms;
+            break;
+
+        case PM_JOB_BQ_READ_ADC_BLOCK:
+            if (!BQ25731_DecodeAdcBlock(&g_pm.status.bq,
+                                        data, length)) {
+                PowerManager_HandleBqTelemetryError(
+                    TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq_status = g_pm.status.bq.id_valid ?
+                BQ25731_OK : BQ25731_DEVICE_ID_MISMATCH;
+            g_pm.status.bq.updated_ms = now_ms;
+            g_pm.bq_telemetry_phase = 0U;
+            g_pm.next_bq_telemetry_ms = now_ms + PM_BQ_TELEMETRY_MS;
+            if ((g_pm.status.state == POWER_MANAGER_DEGRADED) &&
+                g_pm.status.bq.id_valid) {
+                PowerManager_SetState(POWER_MANAGER_RUN);
+            }
+            PowerManager_LogBqMonitor();
+            break;
+
+        case PM_JOB_BQ_WRITE_IIN:
+            g_pm.bq_iin_write_pending = false;
+            g_pm.bq_iin_applied_ma = g_pm.bq_iin_target_ma;
+            g_pm.bq_iin_failed_rdo_raw = 0U;
+            g_pm.status.bq.iin_host =
+                BQ25731_EncodeInputCurrentMa(g_pm.bq_iin_target_ma);
+            g_pm.status.bq.input_current_ma =
+                BQ25731_DecodeInputCurrentMa(g_pm.status.bq.iin_host);
+            Debug_Printf("[PD-BQ] IIN_HOST applied=%lumA",
+                         (unsigned long)g_pm.status.bq.input_current_ma);
+            break;
+
+        case PM_JOB_BQ_APPLY_OPTION0:
+            g_pm.bq_option0_write_pending = false;
+            g_pm.status.bq.charge_option0 = g_pm.bq_option0_target;
+            Debug_Printf("[BQ-CHARGE] %s Option0=0x%04X CHRG_INHIBIT=%u WDT=OFF",
+                         PowerManager_HasSinkContract() ? "ENABLED" : "INHIBITED",
+                         g_pm.status.bq.charge_option0,
+                         (g_pm.status.bq.charge_option0 &
+                          BQ25731_CHARGE_OPTION0_INHIBIT) ? 1U : 0U);
+            break;
+
+        case PM_JOB_BQ_APPLY_CURRENT:
+            g_pm.bq_current_write_pending = false;
+            g_pm.status.bq.charge_current =
+                BQ25731_EncodeChargeCurrentMa(
+                    BQ25731_TARGET_CHARGE_CURRENT_MA);
+            g_pm.status.bq.charge_current_ma =
+                BQ25731_DecodeChargeCurrentMa(
+                    g_pm.status.bq.charge_current);
+            Debug_Printf("[BQ-CHARGE] ICHG_SET restored=%lumA",
+                         (unsigned long)g_pm.status.bq.charge_current_ma);
+            break;
+
+        default:
+            break;
     }
-
-    Debug_Printf("[PD-TEST] no supported fixed PDO in 20/15/9/5V test sequence");
-    g_pm.pd_test_next_tick_ms = now_ms + POWER_MANAGER_PD_TEST_STEP_MS;
 }
-#endif
 
-static void PowerManager_DebugLine(uint32_t now_ms)
+static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
 {
-    const TPS25751_Telemetry_t *tps = &g_pm.tps_telemetry;
-    const BQ25731_Telemetry_t *bq = &g_pm.bq_telemetry;
-    uint32_t pd_contract;
-    char active_pdo_text[96];
-    char vbus_text[16];
-    char ibus_text[16];
-    int32_t ibat_ma;
-    bool pd_connected;
+    TPS25751_Status_t status = TPS25751_INVALID_ARG;
+    BQ25731_Status_t bq_status;
 
-    if ((uint32_t)(now_ms - g_pm.last_debug_tick_ms) < POWER_MANAGER_DEBUG_PERIOD_MS) {
-        return;
+    switch (job) {
+        case PM_JOB_READ_MODE:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_MODE, TPS25751_MODE_LEN);
+            break;
+        case PM_JOB_READ_PORT_CONFIG:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_PORT_CONFIG, TPS25751_PORT_CONFIG_LEN);
+            break;
+        case PM_JOB_WRITE_PORT_CONFIG:
+            status = TPS25751_StartWriteRegister(&g_pm.tps,
+                TPS25751_REG_PORT_CONFIG, g_pm.port_config,
+                sizeof(g_pm.port_config));
+            break;
+        case PM_JOB_READ_INT_MASK:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_INT_MASK, TPS_INT_EVENT_BYTES);
+            break;
+        case PM_JOB_WRITE_INT_MASK:
+            status = TPS25751_StartWriteRegister(&g_pm.tps,
+                TPS25751_REG_INT_MASK, g_pm.int_mask,
+                sizeof(g_pm.int_mask));
+            break;
+        case PM_JOB_READ_STATUS:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_STATUS, TPS25751_STATUS_LEN);
+            break;
+        case PM_JOB_READ_POWER_PATH:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_POWER_PATH_STATUS, TPS25751_POWER_PATH_LEN);
+            break;
+        case PM_JOB_READ_POWER_STATUS:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_POWER_STATUS, TPS25751_POWER_STATUS_LEN);
+            break;
+        case PM_JOB_READ_PD_STATUS:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_PD_STATUS, TPS25751_PD_STATUS_LEN);
+            break;
+        case PM_JOB_READ_ADC:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_ADC_RESULTS, TPS25751_ADC_RESULTS_LEN);
+            break;
+        case PM_JOB_READ_ACTIVE_PDO:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_ACTIVE_PDO, TPS25751_ACTIVE_PDO_LEN);
+            break;
+        case PM_JOB_READ_ACTIVE_RDO:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_ACTIVE_RDO, TPS25751_ACTIVE_RDO_LEN);
+            break;
+        case PM_JOB_READ_EVENT:
+            status = TPS_IntEventStartRead(&g_pm.tps);
+            break;
+        case PM_JOB_CLEAR_EVENT:
+            status = TPS_IntEventStartClear(&g_pm.tps,
+                                            g_pm.event_to_clear);
+            break;
+        case PM_JOB_GET_SINK_CAPS:
+            status = TPS25751_StartCommand(&g_pm.tps, "GSkC",
+                                           NULL, 0U, 1U);
+            break;
+        case PM_JOB_READ_SINK_CAPS:
+            status = TPS25751_StartReadRegister(
+                &g_pm.tps, TPS25751_REG_RX_SINK_CAPS,
+                TPS25751_RX_CAPS_LEN);
+            break;
+        case PM_JOB_READ_SOURCE_CAPS:
+            status = TPS25751_StartReadRegister(
+                &g_pm.tps, TPS25751_REG_RX_SOURCE_CAPS,
+                TPS25751_RX_CAPS_LEN);
+            break;
+        case PM_JOB_READ_LOCAL_SINK_CAPS:
+            status = TPS25751_StartReadRegister(
+                &g_pm.tps, TPS25751_REG_TX_SINK_CAPS,
+                TPS25751_TX_SINK_CAPS_LEN);
+            break;
+        case PM_JOB_READ_AUTO_SINK_POLICY:
+            status = TPS25751_StartReadRegister(
+                &g_pm.tps, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
+            break;
+        case PM_JOB_WRITE_AUTO_SINK_POLICY:
+            status = TPS25751_StartWriteRegister(
+                &g_pm.tps, TPS25751_REG_AUTO_NEGOTIATE_SINK,
+                g_pm.auto_sink_policy.raw,
+                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
+            break;
+        case PM_JOB_RENEGOTIATE_SOURCE_CAPS:
+            status = TPS25751_StartCommand(&g_pm.tps, "GSrC",
+                                           NULL, 0U, 1U);
+            break;
+        case PM_JOB_SWAP_TO_SOURCE:
+            status = TPS25751_StartCommand(&g_pm.tps, "SWSr",
+                                           NULL, 0U, 1U);
+            break;
+        case PM_JOB_SWAP_TO_SINK:
+            status = TPS25751_StartCommand(&g_pm.tps, "SWSk",
+                                           NULL, 0U, 1U);
+            break;
+        case PM_JOB_BQ_READ_OPTION0:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGE_OPTION0);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_OPTION0:
+            bq_status = BQ25731_StartWrite16(
+                &g_pm.bq, BQ25731_REG_CHARGE_OPTION0,
+                (uint16_t)(g_pm.status.bq.charge_option0 &
+                           (uint16_t)~(
+                               BQ25731_CHARGE_OPTION0_LWPWR |
+                               BQ25731_CHARGE_OPTION0_WDT_MASK)));
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_CURRENT:
+            bq_status = BQ25731_StartWrite16(
+                &g_pm.bq, BQ25731_REG_CHARGE_CURRENT,
+                BQ25731_EncodeChargeCurrentMa(
+                    BQ25731_TARGET_CHARGE_CURRENT_MA));
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_ADC:
+            bq_status = BQ25731_StartWrite16(&g_pm.bq,
+                BQ25731_REG_ADC_OPTION, BQ25731_ADC_OPTION_DEBUG);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_VERIFY_ADC:
+        case PM_JOB_BQ_READ_ADC:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_ADC_OPTION);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_CURRENT:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGE_CURRENT);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_VOLTAGE:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGE_VOLTAGE);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_IIN:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_IIN_HOST);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_ID:
+            bq_status = BQ25731_StartReadId(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_CONFIG_BLOCK:
+            bq_status = BQ25731_StartReadConfigBlock(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_STATUS_BLOCK:
+            bq_status = BQ25731_StartReadStatusBlock(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_ADC_BLOCK:
+            bq_status = BQ25731_StartReadAdcBlock(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_IIN:
+            bq_status = BQ25731_StartWrite16(
+                &g_pm.bq, BQ25731_REG_IIN_HOST,
+                BQ25731_EncodeInputCurrentMa(
+                    g_pm.bq_iin_target_ma));
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_APPLY_OPTION0:
+            bq_status = BQ25731_StartWrite16(
+                &g_pm.bq, BQ25731_REG_CHARGE_OPTION0,
+                g_pm.bq_option0_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_APPLY_CURRENT:
+            bq_status = BQ25731_StartWrite16(
+                &g_pm.bq, BQ25731_REG_CHARGE_CURRENT,
+                BQ25731_EncodeChargeCurrentMa(
+                    BQ25731_TARGET_CHARGE_CURRENT_MA));
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        default:
+            break;
     }
 
-    g_pm.last_debug_tick_ms = now_ms;
-
-    PowerManager_UpdatePdSnapshot();
-    pd_contract = (tps->active_rdo.valid) ? 1U : 0U;
-    pd_connected = PowerManager_IsPdConnected(tps);
-    PowerManager_DebugPdConnectionEvent(now_ms, pd_connected);
-
-    if (bq->in_otg) {
-        ibat_ma = -(int32_t)bq->idchg_ma;
-    } else {
-        ibat_ma = (int32_t)bq->ichg_ma;
+    if (status == TPS25751_OK) {
+        g_pm.job = job;
+        if (job == PM_JOB_GET_SINK_CAPS) {
+            if (g_pm.policy_cap_attempts < 0xFFU) {
+                ++g_pm.policy_cap_attempts;
+            }
+            Debug_Printf("[PD-POLICY] requesting partner Sink PDOs attempt=%u/%u",
+                         g_pm.policy_cap_attempts,
+                         PM_POLICY_MAX_CAP_ATTEMPTS);
+        }
+        if ((job == PM_JOB_SWAP_TO_SOURCE) ||
+            (job == PM_JOB_SWAP_TO_SINK)) {
+            g_pm.policy_swap_attempted = true;
+        }
     }
-#if (BQ25731_CONTROL_OWNER_TPS_EEPROM != 0U)
-    (void)ibat_ma;
-#endif
+    return status;
+}
 
-    /* Log TPS resets if they occur during Source mode */
-    if ((PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) && 
-        (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE) &&
-        (tps->soft_reset_reason != 0U || tps->hard_reset_reason != 0U)) {
-        Debug_Printf("[SRC-FAULT] TPS reset detected: soft=0x%02X hard=0x%02X VBUS=%umV",
-                     tps->soft_reset_reason, tps->hard_reset_reason, tps->vbus_mv);
+static PowerManager_Job_t PowerManager_SelectTelemetryJob(void)
+{
+    switch (g_pm.telemetry_phase) {
+        case 0U: return PM_JOB_READ_STATUS;
+        case 1U: return PM_JOB_READ_POWER_PATH;
+        case 2U: return PM_JOB_READ_POWER_STATUS;
+        case 3U: return PM_JOB_READ_PD_STATUS;
+        case 4U: return PM_JOB_READ_ADC;
+        case 5U: return PM_JOB_READ_ACTIVE_PDO;
+        case 6U: return PM_JOB_READ_ACTIVE_RDO;
+        default: return PM_JOB_READ_EVENT;
+    }
+}
+
+static PowerManager_Job_t PowerManager_SelectBqTelemetryJob(void)
+{
+    return (g_pm.bq_telemetry_phase == 0U) ?
+           PM_JOB_BQ_READ_STATUS_BLOCK : PM_JOB_BQ_READ_ADC_BLOCK;
+}
+
+static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
+{
+    if ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
+        !g_pm.status.applied_mode_valid ||
+        (g_pm.status.applied_mode != POWER_MANAGER_USER_AUTO) ||
+        !PowerManager_HasTypecPowerConnection()) {
+        return PM_JOB_NONE;
     }
 
-#if (POWER_MANAGER_PD_RAW_DEBUG != 0U)
-    Debug_Printf("[PM] state=%s bus=%s tps_addr=0x%02lX tps=%s bq=%s err_reg=0x%02lX err=0x%08lX",
-                 PowerManager_StateText(g_pm.state),
-                 PowerManager_I2cText(g_pm.hi2c),
-                 (unsigned long)g_pm.tps_addr_selected,
-                 TPS25751_StatusToString(g_pm.tps_status),
-                 BQ25731_StatusToString(g_pm.bq_status),
-                 (unsigned long)g_pm.last_error_reg,
-                 (unsigned long)g_pm.last_error_code);
-#else
-    Debug_Printf("[PM] %s %s TPS=%s BQ=%s err=0x%08lX",
-                 PowerManager_StateText(g_pm.state),
-                 PowerManager_I2cText(g_pm.hi2c),
-                 TPS25751_StatusToString(g_pm.tps_status),
-                 BQ25731_StatusToString(g_pm.bq_status),
-                 (unsigned long)g_pm.last_error_code);
-#endif
-
-    if (pd_contract != 0U) {
-        PowerManager_FormatPdoShort(active_pdo_text,
-                                    sizeof(active_pdo_text),
-                                    tps->active_rdo.object_position,
-                                    &tps->active_pdo);
-    } else {
-        (void)snprintf(active_pdo_text, sizeof(active_pdo_text), "none");
+    if ((g_pm.policy_phase == PM_POLICY_WAIT_SETTLE) &&
+        PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
+        g_pm.policy_phase = PM_POLICY_GET_SINK_CAPS;
     }
-    PowerManager_FormatVoltage(vbus_text, sizeof(vbus_text), tps->vbus_mv);
-    PowerManager_FormatCurrent(ibus_text, sizeof(ibus_text), tps->ibus_ma);
-
-    Debug_Printf("[PD] cable=%s %s %s/%s contract=%s active=%s VBUS=%s IBUS=%s CC=%s/%s PP1=%s PP3=%s OCP1=%u",
-                 pd_connected ? "YES" : "NO",
-                 TPS25751_ModeToString(tps->mode),
-                 PowerManager_PortRoleText(tps),
-                 PowerManager_DataRoleText(tps),
-                 PowerManager_PdContractText(pd_contract),
-                 active_pdo_text,
-                 vbus_text,
-                 ibus_text,
-                 TPS25751_CcStateToString(tps->cc1_state),
-                 TPS25751_CcStateToString(tps->cc2_state),
-                 TPS25751_PowerPathSwitchToString(tps->pp1_switch),
-                 TPS25751_PowerPathSwitchToString(tps->pp3_switch),
-                 tps->pp1_overcurrent ? 1U : 0U);
-
-    Debug_Printf("[PD-SNAPSHOT] attached=%u PDO=0x%08lX RDO=0x%08lX contract=%lumV/%lumA/%lumW class=%s",
-                 g_pm.pd_snapshot.attached ? 1U : 0U,
-                 (unsigned long)(g_pm.pd_snapshot.active_pdo_raw & 0xFFFFFFFFULL),
-                 (unsigned long)g_pm.pd_snapshot.active_rdo_raw,
-                 (unsigned long)g_pm.pd_snapshot.contract_voltage_mv,
-                 (unsigned long)g_pm.pd_snapshot.contract_current_ma,
-                 (unsigned long)g_pm.pd_snapshot.contract_power_mw,
-                 PowerManager_PowerClassText(g_pm.pd_snapshot.power_class));
-
-    PowerManager_DebugRdo(tps);
-
-#if (BQ25731_CONTROL_OWNER_TPS_EEPROM != 0U)
-    if (g_pm.bq_status == BQ25731_OK) {
-        const BQ25731_MonitorSnapshot_t *m = &g_pm.bq_monitor;
-        Debug_Printf("[BQ] adc=%s cfg: VREG=%lumV ICHG_SET=%lumA IIN_HOST=%lumA",
-                     (m->adc_running && m->adc_required_channels_enabled) ?
-                     "available" : "partial/unavailable",
-                     (unsigned long)m->charge_voltage_setting_mv,
-                     (unsigned long)m->charge_current_setting_ma,
-                     (unsigned long)m->iin_host_ma);
+    if (!PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
+        return PM_JOB_NONE;
     }
-#else
-    if (g_pm.bq_status == BQ25731_OK) {
-        Debug_Printf("[BQ] adc=%u VBAT=%lu.%03luV VSYS=%lu.%03luV VBUS=%lu.%03luV IBAT=%ldmA IIN=%lumA CHG=%lumA/%lu.%03luV EN_OTG=%u IN_OTG=%u OPT3=0x%04X PIN=%u",
-                     (unsigned int)bq->adc_enabled,
-                     (unsigned long)PowerManager_IntPart(bq->vbat_mv, 1000U),
-                     (unsigned long)PowerManager_FracPart(bq->vbat_mv, 1000U),
-                     (unsigned long)PowerManager_IntPart(bq->vsys_mv, 1000U),
-                     (unsigned long)PowerManager_FracPart(bq->vsys_mv, 1000U),
-                     (unsigned long)PowerManager_IntPart(bq->vbus_mv, 1000U),
-                     (unsigned long)PowerManager_FracPart(bq->vbus_mv, 1000U),
-                     (long)ibat_ma,
-                     (unsigned long)bq->iin_ma,
-                     (unsigned long)bq->charge_current_ma,
-                     (unsigned long)PowerManager_IntPart(bq->charge_voltage_mv, 1000U),
-                     (unsigned long)PowerManager_FracPart(bq->charge_voltage_mv, 1000U),
-                     bq->otg_enabled ? 1U : 0U,
-                     bq->in_otg ? 1U : 0U,
-                     bq->charge_option3_raw,
-                     HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin) == GPIO_PIN_SET ? 1U : 0U);
+    if (g_pm.policy_phase == PM_POLICY_DECIDE) {
+        PowerManager_DecidePolicy(now_ms);
     }
-#endif
 
-    PowerManager_DebugPdCaps(now_ms, pd_connected);
-    Debug_BlankLine();
+    switch (g_pm.policy_phase) {
+        case PM_POLICY_GET_SINK_CAPS: return PM_JOB_GET_SINK_CAPS;
+        case PM_POLICY_READ_SINK_CAPS: return PM_JOB_READ_SINK_CAPS;
+        case PM_POLICY_READ_SOURCE_CAPS: return PM_JOB_READ_SOURCE_CAPS;
+        case PM_POLICY_READ_LOCAL_SINK_CAPS:
+            return PM_JOB_READ_LOCAL_SINK_CAPS;
+        case PM_POLICY_READ_AUTO_SINK_POLICY:
+            return PM_JOB_READ_AUTO_SINK_POLICY;
+        case PM_POLICY_WRITE_AUTO_SINK_POLICY:
+            return PM_JOB_WRITE_AUTO_SINK_POLICY;
+        case PM_POLICY_RENEGOTIATE_SOURCE_CAPS:
+            return PM_JOB_RENEGOTIATE_SOURCE_CAPS;
+        case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
+        case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
+        default: return PM_JOB_NONE;
+    }
+}
+
+static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
+{
+    PowerManager_Job_t policy_job;
+
+    if (g_pm.status.tps.mode != TPS25751_MODE_APP) {
+        return PowerManager_TickReached(now_ms, g_pm.next_mode_ms) ?
+               PM_JOB_READ_MODE : PM_JOB_NONE;
+    }
+
+    if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
+        return PM_JOB_READ_MODE;
+    }
+    if (g_pm.port_write_pending) {
+        return PM_JOB_WRITE_PORT_CONFIG;
+    }
+    if (g_pm.mode_update_pending) {
+        return PM_JOB_READ_PORT_CONFIG;
+    }
+    if (g_pm.event_mask_write_pending) {
+        return PM_JOB_WRITE_INT_MASK;
+    }
+    if (!g_pm.event_mask_ready) {
+        return PM_JOB_READ_INT_MASK;
+    }
+    if (g_pm.event_clear_pending) {
+        return PM_JOB_CLEAR_EVENT;
+    }
+
+    policy_job = PowerManager_SelectPolicyJob(now_ms);
+    if (policy_job != PM_JOB_NONE) {
+        return policy_job;
+    }
+
+    if (g_pm.bq_init == PM_BQ_INIT_WAIT &&
+        PowerManager_TickReached(now_ms, g_pm.next_bq_action_ms)) {
+        g_pm.bq_init = PM_BQ_INIT_READ_ID;
+        PowerManager_SetState(POWER_MANAGER_BQ_PROBE);
+    }
+    if (PowerManager_TickReached(now_ms, g_pm.next_bq_action_ms)) {
+        switch (g_pm.bq_init) {
+            case PM_BQ_INIT_READ_ID: return PM_JOB_BQ_READ_ID;
+            case PM_BQ_INIT_READ_OPTION0: return PM_JOB_BQ_READ_OPTION0;
+            case PM_BQ_INIT_WRITE_OPTION0: return PM_JOB_BQ_WRITE_OPTION0;
+            case PM_BQ_INIT_WRITE_CURRENT: return PM_JOB_BQ_WRITE_CURRENT;
+            case PM_BQ_INIT_WRITE_ADC: return PM_JOB_BQ_WRITE_ADC;
+            case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
+            default: break;
+        }
+    }
+
+    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        g_pm.bq_option0_write_pending) {
+        return PM_JOB_BQ_APPLY_OPTION0;
+    }
+    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        g_pm.bq_current_write_pending) {
+        return PM_JOB_BQ_APPLY_CURRENT;
+    }
+    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        g_pm.bq_iin_write_pending) {
+        return PM_JOB_BQ_WRITE_IIN;
+    }
+
+    if (PowerManager_TickReached(now_ms, g_pm.next_tps_step_ms)) {
+        g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+        return PowerManager_SelectTelemetryJob();
+    }
+
+    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        PowerManager_TickReached(now_ms, g_pm.next_bq_telemetry_ms)) {
+        return PowerManager_SelectBqTelemetryJob();
+    }
+    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        PowerManager_TickReached(now_ms, g_pm.next_bq_config_ms)) {
+        return PM_JOB_BQ_READ_CONFIG_BLOCK;
+    }
+    return PM_JOB_NONE;
 }
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c)
 {
-    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    uint32_t now_ms = HAL_GetTick();
+
     memset(&g_pm, 0, sizeof(g_pm));
-
     g_pm.hi2c = hi2c;
-    g_pm.state = POWER_MANAGER_INIT;
-    g_pm.tps_status = TPS25751_ERROR;
-    g_pm.bq_status = BQ25731_ERROR;
-    g_pm.next_task_tick_ms = HAL_GetTick();
-    g_pm.last_debug_tick_ms = HAL_GetTick();
-    g_pm.last_pd_caps_debug_tick_ms = HAL_GetTick();
-    g_pm.initialized = (hi2c != NULL);
+    g_pm.status.state = POWER_MANAGER_INIT;
+    g_pm.status.requested_mode = POWER_MANAGER_USER_AUTO;
+    g_pm.status.applied_mode = POWER_MANAGER_USER_OFF;
+    g_pm.status.tps_status = TPS25751_INVALID_ARG;
+    g_pm.status.bq_status = BQ25731_NOT_READY;
+    g_pm.mode_update_pending = true;
+    g_pm.next_mode_ms = now_ms;
+    g_pm.next_tps_step_ms = now_ms;
+    g_pm.next_bq_action_ms = now_ms + PM_BQ_START_DELAY_MS;
+    g_pm.hard_reset_holdoff_until_ms = now_ms;
 
-    Debug_Printf("[FW] PD_BQ_FIX_2026-07-12_02 sink=100W source=5V3A");
-    Debug_Printf("[PM] TPS25751 normal-operation I2Ct address: 0x%02X",
-                 TPS25751_I2C_ADDR_DEFAULT);
-    Debug_Printf("[BQ] BQ25731 OTG/VAP/FRS pin has 100k pulldown and is driven by PA4.");
-    Debug_Printf("[BQ-HW] BQ may be pre-configured by TPS/EEPROM");
-    Debug_Printf("[BQ-HW] OTG/VAP/FRS pin: pulldown 100k to GND");
-    Debug_Printf("[BQ-HW] OTG allowed: %s",
-                 (BQ25731_HW_OTG_ALLOWED != 0U) ? "YES" : "NO");
-    Debug_Printf("[BQ-HW] RAC=%umOhm RSR=%umOhm", BQ25731_RAC_MOHM, BQ25731_RSR_MOHM);
-    Debug_Printf("[BQ-HW] ILIM_HIZ/EN_EXTILIM not trusted during bring-up");
-    Debug_Printf("[BQ-HW] ChargeVoltage may be configured by TPS EEPROM, e.g. 16800mV");
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    g_pm.status.otg_pin_high = false;
 
-    if (!g_pm.initialized) {
-        g_pm.state = POWER_MANAGER_FAULT;
+    if ((TPS25751_Init(&g_pm.tps, hi2c,
+                       TPS25751_I2C_ADDR_DEFAULT) != TPS25751_OK) ||
+        (BQ25731_Init(&g_pm.bq, &g_pm.tps,
+                      BQ25731_I2C_ADDR_7BIT) != BQ25731_OK)) {
+        PowerManager_SetState(POWER_MANAGER_FAULT);
+        return;
     }
+    g_pm.initialized = true;
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u",
+                 TPS25751_I2C_ADDR_DEFAULT,
+                 BQ25731_I2C_ADDR_7BIT,
+                 TPS25751_PORT_CONFIG_LEN);
+    PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
 }
 
 void PowerManager_Task(void)
 {
     uint32_t now_ms;
+    TPS25751_Status_t operation_status;
+    PowerManager_Job_t next_job;
 
     if (!g_pm.initialized) {
         return;
     }
-
     now_ms = HAL_GetTick();
+    PowerManager_UpdateOtgGate(now_ms);
 
-    /* Direct TPS I2Ct polling only.  No BQ ADC/bridge transaction occurs in
-     * this fast path. */
-    PowerManager_PollTpsEvents(now_ms);
-
-    if (g_pm.bq_otg_disable_pending) {
-        g_pm.bq_otg_disable_pending = false;
-        (void)BQ25731_DisableOtg(&g_pm.bq);
-    }
-
-    if ((int32_t)(now_ms - g_pm.next_task_tick_ms) < 0) {
-#if (POWER_MANAGER_GENERAL_DEBUG != 0U)
-        PowerManager_DebugLine(now_ms);
-#endif
+    if (g_pm.job != PM_JOB_NONE) {
+        operation_status = TPS25751_Task(&g_pm.tps, now_ms);
+        if (operation_status != TPS25751_BUSY) {
+            PowerManager_ProcessCompletedJob(operation_status, now_ms);
+            PowerManager_UpdateOtgGate(now_ms);
+        }
         return;
     }
 
-    g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TASK_MIN_PERIOD_MS;
-
-    switch (g_pm.state) {
-        case POWER_MANAGER_INIT:
-        {
-            g_pm.tps_status = TPS25751_ERROR;
-            g_pm.tps_addr_selected = 0U;
-
-            g_pm.tps_status = PowerManager_ProbeTpsAddress(TPS25751_I2C_ADDR_DEFAULT);
-
-            if (g_pm.tps_status == TPS25751_OK) {
-                g_pm.tps_addr_selected = TPS25751_I2C_ADDR_DEFAULT;
-                g_pm.tps_wait_start_tick_ms = now_ms;
-                g_pm.last_tps_mode_log_tick_ms = 0U;
-                g_pm.last_logged_tps_mode = TPS25751_MODE_UNKNOWN;
-                Debug_Printf("[TPS] device detected at configured address 0x%02X",
-                             TPS25751_I2C_ADDR_DEFAULT);
-                g_pm.state = POWER_MANAGER_TPS_WAIT_APP;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TPS_POLL_MS;
-            } else {
-#if (POWER_MANAGER_DIAGNOSTIC_TPS_SCAN != 0U)
-                uint8_t addr;
-                for (addr = POWER_MANAGER_TPS_ADDR_MIN;
-                     addr <= POWER_MANAGER_TPS_ADDR_MAX;
-                     ++addr) {
-                    if (addr == TPS25751_I2C_ADDR_DEFAULT) {
-                        continue;
-                    }
-                    if (PowerManager_ProbeTpsAddress(addr) == TPS25751_OK) {
-                        Debug_Printf("[TPS] diagnostic only: device found at 0x%02X; normal operation rejected",
-                                     addr);
-                        break;
-                    }
-                }
-#endif
-                PowerManager_SetErrorFromTps(&g_pm.tps);
-                g_pm.last_error_code = POWER_MANAGER_FAULT_TPS_NOT_AT_CONFIGURED_ADDRESS;
-                Debug_Printf("[FAULT] TPS25751 does not respond at configured address 0x%02X",
-                             TPS25751_I2C_ADDR_DEFAULT);
-                g_pm.state = POWER_MANAGER_FAULT;
-            }
-            break;
-        }
-
-        case POWER_MANAGER_TPS_WAIT_APP:
-        {
-            uint32_t wait_ms = (uint32_t)(now_ms - g_pm.tps_wait_start_tick_ms);
-            TPS25751_Mode_t mode = TPS25751_MODE_UNKNOWN;
-            char mode_ascii[5] = "????";
-
-            g_pm.tps_status = TPS25751_ReadMode(&g_pm.tps, &mode, mode_ascii);
-            if (g_pm.tps_status != TPS25751_OK) {
-                PowerManager_SetErrorFromTps(&g_pm.tps);
-                mode = TPS25751_MODE_UNKNOWN;
-            }
-
-            g_pm.tps_telemetry.mode = mode;
-            memcpy(g_pm.tps_telemetry.mode_ascii, mode_ascii, sizeof(mode_ascii));
-            g_pm.tps_telemetry.app_ready = (mode == TPS25751_MODE_APP);
-
-            if ((mode != g_pm.last_logged_tps_mode) ||
-                ((uint32_t)(now_ms - g_pm.last_tps_mode_log_tick_ms) >= 1000U)) {
-                Debug_Printf("[TPS] MODE='%s' wait=%lums APP=%s",
-                             mode_ascii,
-                             (unsigned long)wait_ms,
-                             (mode == TPS25751_MODE_APP) ? "YES" : "NO");
-                g_pm.last_logged_tps_mode = mode;
-                g_pm.last_tps_mode_log_tick_ms = now_ms;
-            }
-
-            if (mode == TPS25751_MODE_APP) {
-#if (PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U)
-                g_pm.tps_status = TPS_LimitSourceCapsTo5V(&g_pm.tps);
-                if (g_pm.tps_status != TPS25751_OK) {
-                    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-                    g_pm.source_caps_safe = false;
-                    Debug_Printf("[SRC] state=DISABLED caps/path config failed; Sink remains available");
-                } else {
-                    if (!g_pm.source_caps_safe)
-                        Debug_Printf("[SRC] state=SAFE_5V PDO_COUNT=1 PATH=PP3");
-                    g_pm.source_caps_safe = true;
-                }
-#endif
-                g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps,
-                                                               &g_pm.tps_telemetry);
-                if (g_pm.tps_status != TPS25751_OK) {
-                    PowerManager_SetErrorFromTps(&g_pm.tps);
-                    g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TPS_POLL_MS;
-                    break;
-                }
-                Debug_Printf("[TPS] APP reached after %lums; I2Cc bridge access enabled",
-                             (unsigned long)wait_ms);
-                g_pm.state = POWER_MANAGER_TPS_READY;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TASK_MIN_PERIOD_MS;
-            } else if (wait_ms >= POWER_MANAGER_TPS_APP_TIMEOUT_MS) {
-                g_pm.last_error_reg = POWER_MANAGER_TPS_PROBE_REG_MODE;
-                g_pm.last_error_code = POWER_MANAGER_FAULT_TPS_APP_TIMEOUT;
-                Debug_Printf("[FAULT] TPS APP timeout after %lums; last MODE='%s' (%s)",
-                             (unsigned long)wait_ms,
-                             mode_ascii,
-                             TPS25751_ModeToString(mode));
-                g_pm.state = POWER_MANAGER_FAULT;
-            } else {
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TPS_POLL_MS;
-            }
-            break;
-        }
-
-        case POWER_MANAGER_TPS_READY:
-            g_pm.bq_status = BQ25731_Init(&g_pm.bq, &g_pm.tps, BQ25731_I2C_ADDR_7BIT);
-            if (g_pm.bq_status == BQ25731_OK) {
-                g_pm.state = POWER_MANAGER_BQ_PROBE;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TASK_MIN_PERIOD_MS;
-            } else {
-                PowerManager_SetErrorFromBq(&g_pm.bq);
-                g_pm.state = POWER_MANAGER_FAULT;
-            }
-            break;
-
-        case POWER_MANAGER_BQ_PROBE:
-            g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps, &g_pm.tps_telemetry);
-            if (g_pm.tps_status != TPS25751_OK) {
-                PowerManager_SetErrorFromTps(&g_pm.tps);
-                Debug_Printf("[FAULT] TPS telemetry failed before BQ probe");
-                g_pm.state = POWER_MANAGER_FAULT;
-                break;
-            }
-
-            if (g_pm.tps_telemetry.mode != TPS25751_MODE_APP) {
-                g_pm.last_error_reg = POWER_MANAGER_TPS_PROBE_REG_MODE;
-                g_pm.last_error_code = POWER_MANAGER_FAULT_TPS_LOST_APP;
-                Debug_Printf("[FAULT] TPS is not in APP; BQ bridge probe blocked");
-                g_pm.state = POWER_MANAGER_FAULT;
-                break;
-            }
-
-            g_pm.bq_status = BQ25731_CheckDevice(&g_pm.bq);
-            if (g_pm.bq_status != BQ25731_OK) {
-                PowerManager_SetErrorFromBq(&g_pm.bq);
-                memset(&g_pm.bq_safe_start, 0, sizeof(g_pm.bq_safe_start));
-                g_pm.bq_safe_start.fatal_error = true;
-                g_pm.bq_safe_start.error = BQ_ERR_PROBE_FAILED;
-                g_pm.last_error_code = BQ_ERR_PROBE_FAILED;
-                Debug_Printf("[PM-ERR] BQ fatal=1 err=BQ_ERR_PROBE_FAILED");
-                g_pm.state = POWER_MANAGER_DEGRADED_BQ;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_BQ_PROBE_RETRY_MS;
-                break;
-            }
-
-            Debug_Printf("[BQ] probe OK: manufacturer=0x40 device=BQ25730/BQ25731");
-#if (BQ25731_CONTROL_OWNER_TPS_EEPROM != 0U)
-            Debug_Printf("[BQ-MON] power-policy owner=TPS/EEPROM; STM32 may repair CHGOPT0 and enable monitoring ADC");
-#if (BQ25731_ALLOW_STM32_ADC_ENABLE != 0U)
-            g_pm.bq_adc_next_attempt_ms = now_ms + POWER_MANAGER_BQ_ADC_START_DELAY_MS;
-            Debug_Printf("[BQ-ADC-ENABLE] waiting %ums for TPS/EEPROM charger configuration to finish before ADC takeover",
-                         POWER_MANAGER_BQ_ADC_START_DELAY_MS);
-#endif
-            g_pm.bq_status = BQ25731_OK;
-            g_pm.state = POWER_MANAGER_SAFE_MONITORING;
-            g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TASK_MIN_PERIOD_MS;
-#else
-            g_pm.state = POWER_MANAGER_BQ_SAFE_START;
-            g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TASK_MIN_PERIOD_MS;
-#endif
-            break;
-
-        case POWER_MANAGER_BQ_SAFE_START:
-        {
-            uint32_t bq_init_start_ms = HAL_GetTick();
-#if (BQ25731_BRIDGE_WRITE_TEST != 0U)
-            uint16_t bridge_old = 0U;
-            uint16_t bridge_new = 0U;
-#endif
-            Debug_Printf("[BQ] charging inhibited during initialization");
-#if (BQ25731_BRIDGE_WRITE_TEST != 0U)
-            g_pm.bq_status = BQ25731_BridgeWriteSelfTest(&g_pm.bq,
-                                                          &bridge_old,
-                                                          &bridge_new);
-            if (g_pm.bq_status != BQ25731_OK) {
-                memset(&g_pm.bq_safe_start, 0, sizeof(g_pm.bq_safe_start));
-                g_pm.bq_safe_start.fatal_error = true;
-                g_pm.bq_safe_start.error = BQ_ERR_BRIDGE_WRITE_FAILED;
-                g_pm.bq_safe_start.charge_current_raw = bridge_new;
-                g_pm.bq_safe_start.charge_current_ma =
-                    BQ25731_DecodeChargeCurrent(bridge_new, BQ25731_RSR_MOHM == 5U);
-                g_pm.last_error_code = BQ_ERR_BRIDGE_WRITE_FAILED;
-                Debug_Printf("[PM-ERR] BQ fatal=1 err=BQ_ERR_BRIDGE_WRITE_FAILED detail=ChargeCurrent readback mismatch old=0x%04X new=0x%04X",
-                             bridge_old, bridge_new);
-                g_pm.state = POWER_MANAGER_DEGRADED_BQ;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-                break;
-            }
-#endif
-            g_pm.bq_status = BQ25731_TakeoverSafeState(&g_pm.bq, &g_pm.bq_safe_start);
-            if (g_pm.bq_safe_start.fatal_error) {
-                PowerManager_SetErrorFromBq(&g_pm.bq);
-                g_pm.last_error_code = (uint32_t)g_pm.bq_safe_start.error;
-                Debug_Printf("[PM-ERR] BQ fatal=1 err=%s raw=0x%04X decoded=%lumA",
-                             PowerManager_BqSafeErrorText(g_pm.bq_safe_start.error),
-                             g_pm.bq_safe_start.charge_current_raw,
-                             (unsigned long)g_pm.bq_safe_start.charge_current_ma);
-                g_pm.state = POWER_MANAGER_DEGRADED_BQ;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-                break;
-            }
-
-            Debug_Printf("[PM-ERR] BQ fatal=0 warnings=0x%08lX err=BQ_ERR_NONE",
-                         (unsigned long)g_pm.bq_safe_start.warnings);
-
-            Debug_Printf("[BQ] safe state applied: CHRG_INHIBIT=1 EN_OTG=0 IIN=%umA ICHG=0mA warnings=0x%08lX",
-                         BQ25731_SAFE_INPUT_CURRENT_MA,
-                         (unsigned long)g_pm.bq_safe_start.warnings);
-            Debug_Printf("[BQ] OTG control: %s",
-                         (BQ25731_HW_OTG_ALLOWED != 0U) ?
-                         "enabled (EN_OTG plus PA4 hardware gate)" :
-                         "blocked by firmware");
-
-            g_pm.bq_status = BQ25731_SetSenseResistors(&g_pm.bq,
-                                                        BQ25731_RAC_MOHM == 5U,
-                                                        BQ25731_RSR_MOHM == 5U);
-            /* Program the battery-safe CV target while charging is still
-             * inhibited and ICHG=0. This removes the 21 V 5S POR/EEPROM
-             * value even when USB-C is present before the battery. */
-            if (g_pm.bq_status == BQ25731_OK) {
-                g_pm.bq_status = BQ25731_SetChargeVoltage(
-                    &g_pm.bq, BQ_USER_CHARGE_VOLTAGE_MV, NULL, NULL);
-            }
-            if (g_pm.bq_status == BQ25731_OK) {
-                g_pm.bq_status = BQ25731_ConfigureForMonitoring(&g_pm.bq);
-            }
-            if (g_pm.bq_status == BQ25731_OK) {
-                g_pm.bq_status = BQ25731_ApplyUserOptions(&g_pm.bq);
-            }
-            if (g_pm.bq_status != BQ25731_OK) {
-                PowerManager_SetErrorFromBq(&g_pm.bq);
-                Debug_Printf("[BQ] monitoring configuration failed: %s",
-                             BQ25731_StatusToString(g_pm.bq_status));
-                g_pm.state = POWER_MANAGER_DEGRADED_BQ;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-                break;
-            }
-            Debug_Printf("[BQ] STM32 owns charger; safe idle VREG=%lumV ICHG=0mA inhibit=1 ADC=continuous",
-                         (unsigned long)BQ_USER_CHARGE_VOLTAGE_MV);
-            Debug_Printf("[BQ-INIT] completed in %lums",
-                         (unsigned long)(HAL_GetTick() - bq_init_start_ms));
-            g_pm.state = POWER_MANAGER_SAFE_MONITORING;
-            g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-            break;
-        }
-
-        case POWER_MANAGER_SAFE_MONITORING:
-        case POWER_MANAGER_DEGRADED_BQ:
-            g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps, &g_pm.tps_telemetry);
-            if (g_pm.tps_status != TPS25751_OK) {
-                PowerManager_SetErrorFromTps(&g_pm.tps);
-                g_pm.state = POWER_MANAGER_TPS_WAIT_APP;
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_TPS_POLL_MS;
-                break;
-            }
-
-            if (g_pm.tps_telemetry.mode != TPS25751_MODE_APP) {
-                g_pm.last_error_reg = POWER_MANAGER_TPS_PROBE_REG_MODE;
-                g_pm.last_error_code = POWER_MANAGER_FAULT_TPS_LOST_APP;
-                Debug_Printf("[FAULT] TPS left APP during BQ monitoring; bridge disabled");
-                g_pm.state = POWER_MANAGER_FAULT;
-                break;
-            }
-
-            PowerManager_UpdatePdSnapshot();
-            
-            /* Source diagnostics in bring-up */
-            if ((PD_SOURCE_HIGH_VOLTAGE_ENABLE == 0U) && 
-                (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SOURCE) &&
-                g_pm.bq_otg_enabled) {
-                /* Monitor OTG health: EN_OTG, IN_OTG confirmation, VBUS level */
-                Debug_Printf("[SRC-DIAG] EN_OTG=%u IN_OTG=%u PIN=%u VBUS=%umV contract=%umV",
-                             g_pm.bq_telemetry.otg_enabled ? 1 : 0,
-                             g_pm.bq_telemetry.in_otg ? 1 : 0,
-                             HAL_GPIO_ReadPin(OTG_EN_GPIO_Port, OTG_EN_Pin),
-                             g_pm.tps_telemetry.vbus_mv,
-                             g_pm.pd_snapshot.contract_voltage_mv);
-                
-                /* Safety watchdog: if OTG enabled but no VBUS, something failed */
-                if (g_pm.bq_telemetry.otg_enabled && (g_pm.tps_telemetry.vbus_mv < 1000U)) {
-                    Debug_Printf("[SRC-WARN] OTG enabled but VBUS too low (%umV) - possible fault",
-                                 g_pm.tps_telemetry.vbus_mv);
-                }
-            }
-            
-            PowerManager_AutoSourcePolicy();
-
-#if (POWER_MANAGER_PD_REQUEST_MAX_POWER != 0U)
-            if ((!g_pm.pd_snapshot.attached) ||
-                (g_pm.pd_snapshot.active_rdo_raw == 0U)) {
-                g_pm.pd_max_power_attempted = false;
-            } else if ((!g_pm.pd_max_power_attempted) &&
-                       (g_pm.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK) &&
-                       (g_pm.tps_telemetry.active_pdo.type == TPS25751_SUPPLY_FIXED) &&
-                       (g_pm.tps_telemetry.active_pdo.voltage_mv == 20000U) &&
-                       (g_pm.pd_snapshot.contract_power_mw < 90000U)) {
-                TPS25751_Status_t max_power_status;
-                g_pm.pd_max_power_attempted = true;
-                Debug_Printf("[PD-MAX] 20V Sink contract is below 90W; forcing one 100W request instead of current %lumW",
-                             (unsigned long)g_pm.pd_snapshot.contract_power_mw);
-                max_power_status = TPS25751_RequestMaxSinkPower(&g_pm.tps, 3000U);
-                Debug_Printf("[PD-MAX] renegotiation %s",
-                             TPS25751_StatusToString(max_power_status));
-                g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps,
-                                                               &g_pm.tps_telemetry);
-                if (g_pm.tps_status == TPS25751_OK)
-                    PowerManager_UpdatePdSnapshot();
-            }
-#endif
-
-            if (g_pm.state == POWER_MANAGER_SAFE_MONITORING) {
-                PowerManager_UpdateBqChargingPolicy();
-            }
-
-            if (g_pm.state == POWER_MANAGER_DEGRADED_BQ) {
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-                break;
-            }
-
-#if ((BQ25731_CONTROL_OWNER_TPS_EEPROM != 0U) && \
-     (BQ25731_ALLOW_STM32_ADC_ENABLE != 0U))
-            if ((!g_pm.bq_adc_running_confirmed) &&
-                (g_pm.bq_adc_attempts < POWER_MANAGER_BQ_ADC_MAX_ATTEMPTS) &&
-                ((int32_t)(now_ms - g_pm.bq_adc_next_attempt_ms) >= 0)) {
-                ++g_pm.bq_adc_attempts;
-                Debug_Printf("[BQ-ADC-ENABLE] delayed attempt %u/%u",
-                             g_pm.bq_adc_attempts,
-                             POWER_MANAGER_BQ_ADC_MAX_ATTEMPTS);
-                g_pm.bq_status = BQ25731_EnableMonitoringAdcOnly(&g_pm.bq);
-                if (g_pm.bq_status == BQ25731_OK) {
-                    g_pm.bq_adc_running_confirmed = true;
-                    Debug_Printf("[BQ-ADC-ENABLE] continuous ADC confirmed by readback");
-                } else {
-                    g_pm.bq_adc_next_attempt_ms = HAL_GetTick() +
-                                                  POWER_MANAGER_BQ_ADC_RETRY_MS;
-                    Debug_Printf("[BQ-ADC-ENABLE] attempt failed: %s; retry in %ums",
-                                 BQ25731_StatusToString(g_pm.bq_status),
-                                 POWER_MANAGER_BQ_ADC_RETRY_MS);
-                }
-            }
-#endif
-
-            if ((uint32_t)(now_ms - g_pm.last_bq_monitor_tick_ms) < 1000U) {
-                g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-                break;
-            }
-            g_pm.last_bq_monitor_tick_ms = now_ms;
-
-#if (BQ25731_CONTROL_OWNER_TPS_EEPROM != 0U)
-            g_pm.bq_status = BQ25731_ReadMonitorSnapshot(&g_pm.bq, &g_pm.bq_monitor);
-            if (g_pm.bq_status == BQ25731_OK) {
-                const BQ25731_MonitorSnapshot_t *m = &g_pm.bq_monitor;
-#if (BQ25731_ALLOW_STM32_ADC_ENABLE != 0U)
-                if (!m->adc_running || !m->adc_required_channels_enabled) {
-                    if (g_pm.bq_adc_running_confirmed) {
-                        Debug_Printf("[BQ-ADC-ENABLE] TPS changed ADCOption after confirmation; scheduling re-apply");
-                        g_pm.bq_adc_running_confirmed = false;
-                        g_pm.bq_adc_attempts = 0U;
-                        g_pm.bq_adc_next_attempt_ms = now_ms +
-                                                     POWER_MANAGER_BQ_ADC_RETRY_MS;
-                    }
-                }
-#endif
-                Debug_Printf("[BQ-MON] cfg: VREG=%lumV ICHG_SET=%lumA IIN_HOST=%lumA CHGOPT0=0x%04X CHGOPT3=0x%04X",
-                             (unsigned long)m->charge_voltage_setting_mv,
-                             (unsigned long)m->charge_current_setting_ma,
-                             (unsigned long)m->iin_host_ma,
-                             m->charge_option0_raw, m->charge_option3_raw);
-                Debug_Printf("[BQ-ADC-OPT] raw=0x%04X low=0x%02X high=0x%02X VBAT=%u VSYS=%u ICHG=%u IDCHG=%u IIN=%u PSYS=%u VBUS=%u CMPIN=%u CONV=%u START=%u FULLSCALE=%u",
-                             m->adc_option_raw, m->adc_option_raw & 0xFFU,
-                             m->adc_option_raw >> 8, m->en_adc_vbat,
-                             m->en_adc_vsys, m->en_adc_ichg, m->en_adc_idchg,
-                             m->en_adc_iin, m->en_adc_psys, m->en_adc_vbus,
-                             m->en_adc_cmpin, m->adc_continuous, m->adc_start,
-                             m->adc_fullscale);
-                Debug_Printf("[BQ-ADC] raw: VBUS/PSYS=0x%04X IBAT=0x%04X IIN/CMPIN=0x%04X VSYS/VBAT=0x%04X",
-                             m->adc_vbus_psys_raw, m->adc_ibat_raw,
-                             m->adc_iin_cmpin_raw, m->adc_vsys_vbat_raw);
-                if (m->low_power_mode != 0U) {
-                    Debug_Printf("[BQ-ADC] BQ is in low-power mode; ADC disabled according to datasheet; live telemetry unavailable unless TPS/EEPROM enables performance/ADC");
-                } else if (m->adc_any_channel_enabled == 0U) {
-                    Debug_Printf("[BQ-ADC] ADC channels are disabled by TPS/EEPROM; live telemetry unavailable in read-only owner mode");
-                } else if (!m->adc_running) {
-                    if (m->adc_option_raw == 0x2001U)
-                        Debug_Printf("[BQ-ADC] live telemetry unavailable because TPS/EEPROM enabled only VBAT and conversion is not running");
-                    else
-                        Debug_Printf("[BQ-ADC] live telemetry unavailable because TPS/EEPROM enabled only selected channels and conversion is not running");
-                } else if (m->adc_required_channels_enabled) {
-                    Debug_Printf("[BQ-ADC] live: VBUS=%lumV VSYS=%lumV VBAT=%lumV ICHG=%lumA IDCHG=%lumA IIN=%lumA",
-                                 (unsigned long)m->adc_vbus_mv,
-                                 (unsigned long)m->adc_vsys_mv,
-                                 (unsigned long)m->adc_vbat_mv,
-                                 (unsigned long)m->adc_ichg_ma,
-                                 (unsigned long)m->adc_idchg_ma,
-                                 (unsigned long)m->adc_iin_ma);
-                } else {
-                    Debug_Printf("[BQ-ADC] live telemetry partial; TPS/EEPROM did not enable all monitoring channels");
-                }
-                if (!m->vbat_valid) Debug_Printf("[BQ-ADC] VBAT unavailable");
-                if (!m->vsys_valid) Debug_Printf("[BQ-ADC] VSYS unavailable");
-            }
-#else
-            g_pm.bq_status = BQ25731_ReadAdcFast(&g_pm.bq, &g_pm.bq_telemetry);
-#endif
-            if (g_pm.bq_status != BQ25731_OK) {
-                PowerManager_SetErrorFromBq(&g_pm.bq);
-                Debug_Printf("[BQ] WARNING telemetry failed in SAFE_MONITORING: %s",
-                             BQ25731_StatusToString(g_pm.bq_status));
-            }
-#if (BQ25731_CONTROL_OWNER_TPS_EEPROM == 0U)
-            else if ((g_pm.bq_telemetry.in_otg && !g_pm.bq_otg_enabled) ||
-                       ((!g_pm.bq_charging_enabled) && !g_pm.bq_otg_enabled &&
-                        (g_pm.bq_telemetry.in_fast_charge ||
-                         !g_pm.bq_telemetry.charge_inhibited))) {
-                Debug_Printf("[FAULT] unsafe BQ state in monitoring: OTG=%u FCHRG=%u inhibit=%u",
-                             g_pm.bq_telemetry.in_otg,
-                             g_pm.bq_telemetry.in_fast_charge,
-                             g_pm.bq_telemetry.charge_inhibited);
-                g_pm.state = POWER_MANAGER_FAULT;
-            }
-#endif
-
-#if (POWER_MANAGER_PD_CYCLE_TEST != 0U)
-            PowerManager_PdCycleTestTask(now_ms);
-#endif
-
-            g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-            break;
-
-        case POWER_MANAGER_FAULT:
-            PowerManager_DisableBqOtg();
-            /* A BQ fault must not freeze USB-C PD observability.  Continue
-             * read-only TPS monitoring so hot-plug and detach reach the GUI. */
-            if ((g_pm.tps_addr_selected == TPS25751_I2C_ADDR_DEFAULT) &&
-                (g_pm.tps_telemetry.mode == TPS25751_MODE_APP)) {
-                g_pm.tps_status = TPS25751_ReadTelemetryBasic(&g_pm.tps,
-                                                               &g_pm.tps_telemetry);
-                if ((g_pm.tps_status == TPS25751_OK) &&
-                    (g_pm.tps_telemetry.mode == TPS25751_MODE_APP)) {
-                    PowerManager_UpdatePdSnapshot();
-                } else {
-                    memset(&g_pm.pd_snapshot, 0, sizeof(g_pm.pd_snapshot));
-                }
-            } else {
-                memset(&g_pm.pd_snapshot, 0, sizeof(g_pm.pd_snapshot));
-            }
-            g_pm.next_task_tick_ms = now_ms + POWER_MANAGER_MONITOR_PERIOD_MS;
-            break;
-
-        default:
-            /* Latched safe fault: no BQ commands and no automatic retry. */
-            break;
+    PowerManager_MaintainPolicy(now_ms);
+    next_job = PowerManager_SelectJob(now_ms);
+    if (next_job == PM_JOB_NONE) {
+        return;
+    }
+    if (PowerManager_StartJob(next_job) != TPS25751_OK) {
+        return;
     }
 
-#if (POWER_MANAGER_GENERAL_DEBUG != 0U)
-    PowerManager_DebugLine(now_ms);
-#endif
+    /* Starting an operation only prepares it. This call starts exactly one
+     * short interrupt-driven physical I2C transfer and returns immediately. */
+    operation_status = TPS25751_Task(&g_pm.tps, now_ms);
+    if (operation_status != TPS25751_BUSY) {
+        PowerManager_ProcessCompletedJob(operation_status, now_ms);
+    }
+}
+
+void PowerManager_GetStatus(PowerManager_Status_t *out)
+{
+    if (out != NULL) {
+        *out = g_pm.status;
+    }
+}
+
+bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
+{
+    if (mode > POWER_MANAGER_USER_OFF) {
+        return false;
+    }
+    if (g_pm.status.requested_mode != mode) {
+        g_pm.status.requested_mode = mode;
+        g_pm.mode_update_pending = true;
+        g_pm.port_write_pending = false;
+        g_pm.status.applied_mode_valid = false;
+        g_pm.status.source_fault_latched = false;
+        PowerManager_SetOtgPin(false);
+        PowerManager_ResetPolicy(HAL_GetTick(),
+                                 g_pm.status.tps.attached);
+    }
+    return true;
 }
 
 PowerManager_State_t PowerManager_GetState(void)
 {
-    return g_pm.state;
+    return g_pm.status.state;
 }
 
 BQ25731_Status_t PowerManager_GetBqStatus(void)
 {
-    return g_pm.bq_status;
-}
-
-void PowerManager_GetStatus(PowerManager_Status_t *status)
-{
-    if (status == NULL) {
-        return;
-    }
-
-    status->state = g_pm.state;
-    status->tps_status = g_pm.tps_status;
-    status->bq_status = g_pm.bq_status;
-    status->tps_telemetry = g_pm.tps_telemetry;
-    status->bq_telemetry = g_pm.bq_telemetry;
-    status->bq_monitor = g_pm.bq_monitor;
-    status->bq_safe_start = g_pm.bq_safe_start;
-    status->pd_snapshot = g_pm.pd_snapshot;
-    status->last_error_reg = g_pm.last_error_reg;
-    status->last_error_code = g_pm.last_error_code;
+    return g_pm.status.bq_status;
 }
 
 bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out)
 {
-    uint32_t primask;
-
-    if (out == NULL) {
-        return false;
+    if (out != NULL) {
+        *out = g_pm.status.pd_snapshot;
     }
-
-    primask = __get_PRIMASK();
-    __disable_irq();
-    *out = g_pm.pd_snapshot;
-    if (primask == 0U) {
-        __enable_irq();
-    }
-
-    return out->attached &&
-           (out->active_rdo_raw != 0U) &&
-           (out->contract_voltage_mv != 0U) &&
-           (out->contract_power_mw != 0U);
+    return g_pm.status.pd_snapshot.attached &&
+           (g_pm.status.pd_snapshot.active_rdo_raw != 0U) &&
+           (g_pm.status.pd_snapshot.contract_voltage_mv != 0U) &&
+           (g_pm.status.pd_snapshot.contract_power_mw != 0U);
 }
 
 bool PowerManager_IsPdCycleTestEnabled(void)
 {
-    return (POWER_MANAGER_PD_CYCLE_TEST != 0U);
+    return false;
 }

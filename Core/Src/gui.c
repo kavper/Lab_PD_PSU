@@ -553,6 +553,24 @@ static void GUI_DrawMain(void) {
   }
   ssd1306_WriteString(buf, Font_6x8, White);
 
+  ssd1306_SetCursor(72, 13);
+  {
+    float battery_power_w = 0.0f;
+
+    if (PSU_GuiGetBatteryPower(&battery_power_w) != 0U) {
+      int battery_power_rounded_w = (int)lroundf(battery_power_w);
+
+      if (battery_power_rounded_w >= 0) {
+        snprintf(buf, sizeof(buf), "BAT:+%dW", battery_power_rounded_w);
+      } else {
+        snprintf(buf, sizeof(buf), "BAT:%dW", battery_power_rounded_w);
+      }
+    } else {
+      snprintf(buf, sizeof(buf), "BAT:--");
+    }
+  }
+  ssd1306_WriteString(buf, Font_6x8, White);
+
   ssd1306_SetCursor(70, 3);
   ssd1306_WriteString("PWM", Font_6x8, White);
   GUI_DrawProgressBar(90, 3, 36, 6, pwm_percent);

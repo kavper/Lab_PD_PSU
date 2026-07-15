@@ -233,8 +233,10 @@ void Debug_Printf(const char *fmt, ...)
     if ((strncmp(fmt, "[BQ", 3U) != 0) &&
         (strncmp(fmt, "[TPS", 4U) != 0) &&
         (strncmp(fmt, "[PD", 3U) != 0) &&
-        (strncmp(fmt, "[FAULT", 6U) != 0) &&
-        (strncmp(fmt, "[PM-ERR", 7U) != 0)) {
+        (strncmp(fmt, "[PM", 3U) != 0) &&
+        (strncmp(fmt, "[APP", 4U) != 0) &&
+        (strncmp(fmt, "[UART", 5U) != 0) &&
+        (strncmp(fmt, "[FAULT", 6U) != 0)) {
         return;
     }
 #endif

@@ -62,6 +62,7 @@ extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 extern DMA_HandleTypeDef hdma_i2c3_tx;
 extern I2C_HandleTypeDef hi2c3;
+extern I2C_HandleTypeDef hi2c4;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -317,6 +318,22 @@ void I2C3_ER_IRQHandler(void)
   /* USER CODE BEGIN I2C3_ER_IRQn 1 */
 
   /* USER CODE END I2C3_ER_IRQn 1 */
+}
+
+/**
+  * @brief This function handles I2C4 event interrupt.
+  */
+void I2C4_EV_IRQHandler(void)
+{
+  HAL_I2C_EV_IRQHandler(&hi2c4);
+}
+
+/**
+  * @brief This function handles I2C4 error interrupt.
+  */
+void I2C4_ER_IRQHandler(void)
+{
+  HAL_I2C_ER_IRQHandler(&hi2c4);
 }
 
 /* USER CODE BEGIN 1 */

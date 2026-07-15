@@ -81,9 +81,14 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 # Build-and-flash target for VS Code / STM32Cube extension without starting a debug session.
-set(STM32_PROGRAMMER_CLI
-    "/Users/kacpergawel/Library/Application Support/stm32cube/bundles/programmer/2.21.0/bin/STM32_Programmer_CLI"
+set(STM32_PROGRAMMER_CLI_DEFAULT
+    "/Users/kacpergawel/Library/Application Support/stm32cube/bundles/programmer/2.21.0/bin/STM32_Programmer_CLI")
+set(STM32_PROGRAMMER_CLI "${STM32_PROGRAMMER_CLI_DEFAULT}"
     CACHE FILEPATH "Path to STM32_Programmer_CLI")
+if(NOT STM32_PROGRAMMER_CLI)
+    set(STM32_PROGRAMMER_CLI "${STM32_PROGRAMMER_CLI_DEFAULT}"
+        CACHE FILEPATH "Path to STM32_Programmer_CLI" FORCE)
+endif()
 
 add_custom_target(flash
     COMMAND "${STM32_PROGRAMMER_CLI}"

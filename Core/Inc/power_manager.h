@@ -4,40 +4,32 @@
 #include "bq25731.h"
 #include "main.h"
 #include "tps25751.h"
-#include "tps_int_event.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
-/* Safe bring-up: Source operates only at 5V, no 9/15/20V PDO negotiation */
-#ifndef PD_SOURCE_HIGH_VOLTAGE_ENABLE
-#define PD_SOURCE_HIGH_VOLTAGE_ENABLE 0U
-#endif
-
-/* Safe Source initialization: 5V and limited current */
-#define PD_SOURCE_SAFE_VOLTAGE_MV   5000U
-#define PD_SOURCE_SAFE_CURRENT_MA    500U
-
-#ifndef POWER_MANAGER_PD_CYCLE_TEST
-#define POWER_MANAGER_PD_CYCLE_TEST 0U
-#endif
-
-#ifndef POWER_MANAGER_PD_POLICY_DEBUG
-#define POWER_MANAGER_PD_POLICY_DEBUG 0U
-#endif
-#ifndef POWER_MANAGER_PD_REQUEST_MAX_POWER
-#define POWER_MANAGER_PD_REQUEST_MAX_POWER 1U
-#endif
+typedef enum {
+    POWER_MANAGER_USER_AUTO = 0,
+    POWER_MANAGER_USER_SINK_ONLY,
+    POWER_MANAGER_USER_SOURCE_ONLY,
+    POWER_MANAGER_USER_OFF
+} PowerManager_UserMode_t;
 
 typedef enum {
     POWER_MANAGER_INIT = 0,
     POWER_MANAGER_TPS_WAIT_APP,
     POWER_MANAGER_TPS_READY,
     POWER_MANAGER_BQ_PROBE,
-    POWER_MANAGER_BQ_SAFE_START,
-    POWER_MANAGER_SAFE_MONITORING,
-    POWER_MANAGER_BQ_MONITOR = POWER_MANAGER_SAFE_MONITORING,
-    POWER_MANAGER_DEGRADED_BQ,
-    POWER_MANAGER_FAULT
+    POWER_MANAGER_BQ_ADC_SETUP,
+    POWER_MANAGER_RUN,
+    POWER_MANAGER_DEGRADED,
+    POWER_MANAGER_FAULT,
+
+    /* Read-only compatibility names used by psu_gui_api.c. */
+    POWER_MANAGER_BQ_MONITOR = POWER_MANAGER_RUN,
+    POWER_MANAGER_SAFE_MONITORING = POWER_MANAGER_RUN,
+    POWER_MANAGER_DEGRADED_BQ = POWER_MANAGER_DEGRADED,
+    POWER_MANAGER_BQ_SAFE_START = POWER_MANAGER_BQ_ADC_SETUP
 } PowerManager_State_t;
 
 typedef enum {
@@ -66,26 +58,44 @@ typedef struct {
     PowerManager_PowerClass_t power_class;
 } PowerManager_PdSnapshot_t;
 
+typedef enum {
+    POWER_MANAGER_ERROR_NONE = 0,
+    POWER_MANAGER_ERROR_TPS,
+    POWER_MANAGER_ERROR_BQ,
+    POWER_MANAGER_ERROR_PROTOCOL
+} PowerManager_ErrorSource_t;
+
+typedef struct {
+    PowerManager_ErrorSource_t source;
+    uint32_t code;
+    uint8_t reg;
+    uint32_t tick_ms;
+} PowerManager_Error_t;
+
 typedef struct {
     PowerManager_State_t state;
+    PowerManager_UserMode_t requested_mode;
+    PowerManager_UserMode_t applied_mode;
+    bool applied_mode_valid;
+    bool otg_pin_high;
+    bool source_fault_latched;
     TPS25751_Status_t tps_status;
     BQ25731_Status_t bq_status;
-    TPS25751_Telemetry_t tps_telemetry;
-    BQ25731_Telemetry_t bq_telemetry;
-    BQ25731_MonitorSnapshot_t bq_monitor;
-    BQ25731_SafeStartupResult_t bq_safe_start;
+    TPS25751_Telemetry_t tps;
+    BQ25731_Telemetry_t bq;
     PowerManager_PdSnapshot_t pd_snapshot;
-    uint32_t last_error_reg;
-    uint32_t last_error_code;
+    PowerManager_Error_t last_error;
 } PowerManager_Status_t;
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c);
 void PowerManager_Task(void);
+void PowerManager_GetStatus(PowerManager_Status_t *out);
+bool PowerManager_SetUserMode(PowerManager_UserMode_t mode);
+
+/* Compatibility wrappers required by the unchanged GUI adapter. */
 PowerManager_State_t PowerManager_GetState(void);
 BQ25731_Status_t PowerManager_GetBqStatus(void);
-void PowerManager_GetStatus(PowerManager_Status_t *status);
 bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out);
 bool PowerManager_IsPdCycleTestEnabled(void);
-void PowerManager_LogPdSinkPolicy(void);
 
 #endif
