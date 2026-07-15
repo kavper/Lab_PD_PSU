@@ -36,7 +36,7 @@ uint8_t PSU_GuiGetPdContract(float *voltage_v,
                              float *current_a,
                              float *power_w,
                              uint32_t *active_rdo_raw);
-uint8_t PSU_GuiGetBatteryPower(float *power_w);
+uint8_t PSU_GuiGetTransferPower(float *power_w);
 PSU_GuiControlMode_t PSU_GuiGetControlMode(void);
 
 void PSU_Start(void);

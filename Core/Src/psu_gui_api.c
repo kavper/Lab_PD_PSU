@@ -192,16 +192,35 @@ uint8_t PSU_GuiIsPdContractValid(void)
     return PSU_GuiGetPdContract(NULL, NULL, NULL, NULL);
 }
 
-uint8_t PSU_GuiGetBatteryPower(float *power_w)
+uint8_t PSU_GuiGetTransferPower(float *power_w)
 {
     PowerManager_Status_t status;
-    bool valid;
+    int32_t selected_power_mw = 0;
+    bool valid = false;
 
     PowerManager_GetStatus(&status);
-    valid = status.bq.online && status.bq.adc_sample_valid;
+    if (status.bq.online && status.bq.adc_sample_valid &&
+        status.tps.attached &&
+        (status.tps.connection_state >= 6U) &&
+        status.tps.active_pdo.valid &&
+        status.tps.active_rdo.valid) {
+        if ((status.tps.role == TPS25751_ROLE_SINK) &&
+            (!status.bq.in_otg) &&
+            (status.bq.battery_current_ma > 0)) {
+            /* Charging: use the battery-side ADC result. */
+            selected_power_mw = status.bq.battery_power_mw;
+            valid = true;
+        } else if ((status.tps.role == TPS25751_ROLE_SOURCE) &&
+                   status.bq.in_otg &&
+                   (status.bq.battery_current_ma < 0)) {
+            /* OTG: RAC/ADCIIN is 100 mA/LSB versus IDCHG at 512 mA/LSB. */
+            selected_power_mw = -(int32_t)status.bq.input_power_mw;
+            valid = true;
+        }
+    }
 
     if (power_w != NULL) {
-        *power_w = valid ? ((float)status.bq.battery_power_mw / 1000.0f) : 0.0f;
+        *power_w = valid ? ((float)selected_power_mw / 1000.0f) : 0.0f;
     }
 
     return valid ? 1U : 0U;

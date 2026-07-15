@@ -526,11 +526,11 @@ static void PowerManager_LogBqMonitor(void)
     const BQ25731_Telemetry_t *bq = &g_pm.status.bq;
     uint8_t raw_vbat = (uint8_t)bq->adc_vsys_vbat;
     const char *power_flow = "IDLE";
-    const char *eta_quality = "NO_FLOW";
-    uint32_t source_power_mw = 0U;
-    uint32_t load_power_mw = 0U;
-    uint32_t eta_tenths_percent = 0U;
-    bool eta_available = false;
+    const char *power_meter = "NONE";
+    uint32_t selected_voltage_mv = 0U;
+    int32_t selected_current_ma = 0;
+    int32_t selected_power_mw = 0;
+    bool power_available = false;
     bool sink_contract = PowerManager_HasSinkContract();
     bool source_contract = g_pm.status.tps.attached &&
         (g_pm.status.tps.connection_state >= 6U) &&
@@ -542,57 +542,41 @@ static void PowerManager_LogBqMonitor(void)
     if (source_contract && bq->in_otg &&
         (bq->battery_power_mw < 0)) {
         power_flow = "BAT_TO_VBUS";
-        source_power_mw = (uint32_t)(-(int64_t)bq->battery_power_mw);
-        load_power_mw = bq->input_power_mw;
-        eta_available = (source_power_mw >= 1000U);
+        power_meter = "VBUS_ADC";
+        selected_voltage_mv = bq->adc_vbus_mv;
+        selected_current_ma = -(int32_t)bq->adc_iin_ma;
+        selected_power_mw = -(int32_t)bq->input_power_mw;
+        power_available = true;
     } else if (sink_contract && (!bq->in_otg) &&
                (bq->battery_power_mw > 0)) {
         power_flow = "VBUS_TO_BAT";
-        source_power_mw = bq->input_power_mw;
-        load_power_mw = (uint32_t)bq->battery_power_mw;
-        eta_available = (source_power_mw >= 1000U);
+        power_meter = "BAT_ADC";
+        selected_voltage_mv = bq->adc_vbat_mv;
+        selected_current_ma = bq->battery_current_ma;
+        selected_power_mw = bq->battery_power_mw;
+        power_available = true;
     } else if (g_pm.status.tps.attached) {
         power_flow = "TRANSITION";
-        eta_quality = "ROLE_MISMATCH";
-    }
-
-    if (eta_available) {
-        eta_tenths_percent = (uint32_t)(
-            (((uint64_t)load_power_mw * 1000ULL) +
-             ((uint64_t)source_power_mw / 2ULL)) /
-            (uint64_t)source_power_mw);
-        eta_quality = (eta_tenths_percent <= 1000U) ? "OK" :
-                                                      "ADC_LIMITED";
     }
 
     /* Expose only the two rails relevant to power flow: the USB/adapter-side
      * VBUS and the battery-side VBAT. VSYS is a separate BQ node, not VBUS. */
-    Debug_Printf("[BQ-ADC] rawVBAT=0x%02X VBUS=%lumV VBAT=%lumV IVBUS=%lumA IBAT=%ldmA PVBUS=%lumW Pbat=%ldmW",
+    Debug_Printf("[BQ-ADC] rawVBAT=0x%02X VBUS=%lumV VBAT=%lumV IVBUS=%lumA IBAT=%ldmA",
                  raw_vbat,
                  (unsigned long)bq->adc_vbus_mv,
                  (unsigned long)bq->adc_vbat_mv,
                  (unsigned long)bq->adc_iin_ma,
-                 (long)bq->battery_current_ma,
-                 (unsigned long)bq->input_power_mw,
-                 (long)bq->battery_power_mw);
-    if (eta_available && (eta_tenths_percent <= 1000U)) {
-        Debug_Printf("[BQ-EFF] flow=%s Psrc=%lumW Pload=%lumW ETA_ADC=%lu.%lu%% quality=%s",
+                 (long)bq->battery_current_ma);
+    if (power_available) {
+        Debug_Printf("[BQ-PWR] flow=%s meter=%s V=%lumV I=%ldmA P=%ldmW",
                      power_flow,
-                     (unsigned long)source_power_mw,
-                     (unsigned long)load_power_mw,
-                     (unsigned long)(eta_tenths_percent / 10U),
-                     (unsigned long)(eta_tenths_percent % 10U),
-                     eta_quality);
-    } else if (eta_available) {
-        Debug_Printf("[BQ-EFF] flow=%s Psrc=%lumW Pload=%lumW ETA_ADC=-- quality=%s",
-                     power_flow,
-                     (unsigned long)source_power_mw,
-                     (unsigned long)load_power_mw,
-                     eta_quality);
+                     power_meter,
+                     (unsigned long)selected_voltage_mv,
+                     (long)selected_current_ma,
+                     (long)selected_power_mw);
     } else {
-        Debug_Printf("[BQ-EFF] flow=%s ETA_ADC=-- quality=%s",
-                     power_flow,
-                     eta_quality);
+        Debug_Printf("[BQ-PWR] flow=%s meter=%s P=--",
+                     power_flow, power_meter);
     }
     Debug_Printf("[BQ-STAT] input=%s precharge=%u fast=%u iindpm=%u vindpm=%u otg=%u faults=0x%02X status=0x%04X IIN_DPM=%lumA",
                  bq->input_present ? "YES" : "NO",
