@@ -531,17 +531,29 @@ static void PowerManager_LogBqMonitor(void)
     uint32_t load_power_mw = 0U;
     uint32_t eta_tenths_percent = 0U;
     bool eta_available = false;
+    bool sink_contract = PowerManager_HasSinkContract();
+    bool source_contract = g_pm.status.tps.attached &&
+        (g_pm.status.tps.connection_state >= 6U) &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+        g_pm.status.tps.active_pdo.valid &&
+        g_pm.status.tps.active_rdo.valid &&
+        g_pm.status.otg_pin_high;
 
-    if (bq->in_otg && (bq->battery_power_mw < 0)) {
+    if (source_contract && bq->in_otg &&
+        (bq->battery_power_mw < 0)) {
         power_flow = "BAT_TO_VBUS";
         source_power_mw = (uint32_t)(-(int64_t)bq->battery_power_mw);
         load_power_mw = bq->input_power_mw;
         eta_available = (source_power_mw >= 1000U);
-    } else if ((!bq->in_otg) && (bq->battery_power_mw > 0)) {
+    } else if (sink_contract && (!bq->in_otg) &&
+               (bq->battery_power_mw > 0)) {
         power_flow = "VBUS_TO_BAT";
         source_power_mw = bq->input_power_mw;
         load_power_mw = (uint32_t)bq->battery_power_mw;
         eta_available = (source_power_mw >= 1000U);
+    } else if (g_pm.status.tps.attached) {
+        power_flow = "TRANSITION";
+        eta_quality = "ROLE_MISMATCH";
     }
 
     if (eta_available) {
@@ -563,13 +575,19 @@ static void PowerManager_LogBqMonitor(void)
                  (long)bq->battery_current_ma,
                  (unsigned long)bq->input_power_mw,
                  (long)bq->battery_power_mw);
-    if (eta_available) {
+    if (eta_available && (eta_tenths_percent <= 1000U)) {
         Debug_Printf("[BQ-EFF] flow=%s Psrc=%lumW Pload=%lumW ETA_ADC=%lu.%lu%% quality=%s",
                      power_flow,
                      (unsigned long)source_power_mw,
                      (unsigned long)load_power_mw,
                      (unsigned long)(eta_tenths_percent / 10U),
                      (unsigned long)(eta_tenths_percent % 10U),
+                     eta_quality);
+    } else if (eta_available) {
+        Debug_Printf("[BQ-EFF] flow=%s Psrc=%lumW Pload=%lumW ETA_ADC=-- quality=%s",
+                     power_flow,
+                     (unsigned long)source_power_mw,
+                     (unsigned long)load_power_mw,
                      eta_quality);
     } else {
         Debug_Printf("[BQ-EFF] flow=%s ETA_ADC=-- quality=%s",
