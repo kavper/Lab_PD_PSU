@@ -201,18 +201,17 @@ uint8_t PSU_GuiGetTransferPower(float *power_w)
     PowerManager_GetStatus(&status);
     if (status.bq.online && status.bq.adc_sample_valid &&
         status.tps.attached &&
-        (status.tps.connection_state >= 6U) &&
-        status.tps.active_pdo.valid &&
-        status.tps.active_rdo.valid) {
+        (status.tps.connection_state >= 6U)) {
         if ((status.tps.role == TPS25751_ROLE_SINK) &&
+            status.tps.active_pdo.valid &&
+            status.tps.active_rdo.valid &&
             (!status.bq.in_otg) &&
             (status.bq.battery_current_ma > 0)) {
             /* Charging: use the battery-side ADC result. */
             selected_power_mw = status.bq.battery_power_mw;
             valid = true;
         } else if ((status.tps.role == TPS25751_ROLE_SOURCE) &&
-                   status.bq.in_otg &&
-                   (status.bq.battery_current_ma < 0)) {
+                   status.otg_pin_high && status.bq.in_otg) {
             /* OTG: RAC/ADCIIN is 100 mA/LSB versus IDCHG at 512 mA/LSB. */
             selected_power_mw = -(int32_t)status.bq.input_power_mw;
             valid = true;

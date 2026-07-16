@@ -7,7 +7,7 @@
 
 #define PM_MODE_POLL_MS              100U
 #define PM_TPS_STEP_MS                20U
-#define PM_TPS_STATUS_STALE_MS       500U
+#define PM_TPS_STATUS_STALE_MS      1500U
 #define PM_PD_LOG_MS                1000U
 #define PM_BQ_START_DELAY_MS        1000U
 #define PM_BQ_INIT_STEP_MS           200U
@@ -22,6 +22,11 @@
 #define PM_POLICY_ROLE_DRIFT_MS       750U
 #define PM_POLICY_SWAP_RETRY_MS      3000U
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
+#define PM_SOURCE_READY_RETRY_MS       100U
+#define PM_SOURCE_CAP_RETRY_MS        1000U
+#define PM_SOURCE_CAP_MAX_ATTEMPTS       3U
+#define PM_SOURCE_RECOVERY_MAX_ATTEMPTS  2U
+#define PM_SOURCE_VBUS_READY_MV        4750U
 #define PM_SINK_TARGET_POWER_MW    100000U
 
 typedef enum {
@@ -47,6 +52,8 @@ typedef enum {
     PM_JOB_READ_AUTO_SINK_POLICY,
     PM_JOB_WRITE_AUTO_SINK_POLICY,
     PM_JOB_RENEGOTIATE_SOURCE_CAPS,
+    PM_JOB_SEND_SOURCE_CAPS,
+    PM_JOB_RECOVER_SOURCE_PORT,
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_READ_OPTION0,
@@ -88,6 +95,9 @@ typedef enum {
     PM_POLICY_READ_AUTO_SINK_POLICY,
     PM_POLICY_WRITE_AUTO_SINK_POLICY,
     PM_POLICY_RENEGOTIATE_SOURCE_CAPS,
+    PM_POLICY_WAIT_SOURCE_READY,
+    PM_POLICY_SEND_SOURCE_CAPS,
+    PM_POLICY_RECOVER_SOURCE_PORT,
     PM_POLICY_DECIDE,
     PM_POLICY_SWAP_TO_SOURCE,
     PM_POLICY_SWAP_TO_SINK,
@@ -141,9 +151,12 @@ typedef struct {
     uint16_t bq_option0_target;
     uint8_t previous_hard_reset_reason;
     uint8_t policy_cap_attempts;
+    uint8_t policy_source_caps_attempts;
+    uint8_t policy_source_recovery_attempts;
     bool previous_attached;
     bool policy_swap_attempted;
     bool policy_100w_attempted;
+    bool policy_source_recovery_in_progress;
     bool partner_source_caps_current;
     bool partner_sink_observed;
     TPS25751_PowerRole_t policy_desired_role;
@@ -210,6 +223,8 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_READ_AUTO_SINK_POLICY: return "READ_AUTO_SINK_POLICY";
         case PM_JOB_WRITE_AUTO_SINK_POLICY: return "WRITE_AUTO_SINK_POLICY";
         case PM_JOB_RENEGOTIATE_SOURCE_CAPS: return "RENEGOTIATE_SOURCE_CAPS";
+        case PM_JOB_SEND_SOURCE_CAPS: return "SEND_SOURCE_CAPS";
+        case PM_JOB_RECOVER_SOURCE_PORT: return "RECOVER_SOURCE_PORT";
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
@@ -488,13 +503,16 @@ static void PowerManager_LogPd(uint32_t now_ms)
                (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         role = "SINK";
     }
-    Debug_Printf("[PD] mode=%s plug=%u conn=%u role=%s desired=%s sink_seen=%u OTG_EN=%u VBUS=%lumV contract=%lumV/%lumA/%lumW PDO=0x%08lX RDO=0x%08lX STATUS=0x%02lX%08lX",
+    Debug_Printf("[PD] mode=%s plug=%u conn=%u role=%s desired=%s sink_seen=%u src_adv=%u/%u legacy=%lu OTG_EN=%u VBUS=%lumV contract=%lumV/%lumA/%lumW PDO=0x%08lX RDO=0x%08lX PP5V=%u PPHV=%u HR=%u STATUS=0x%02lX%08lX",
                  PowerManager_UserModeToString(g_pm.status.requested_mode),
                  g_pm.status.tps.attached ? 1U : 0U,
                  g_pm.status.tps.connection_state,
                  role,
                  PowerManager_RoleToString(g_pm.policy_desired_role),
                  g_pm.partner_sink_observed ? 1U : 0U,
+                 g_pm.policy_source_caps_attempts,
+                 PM_SOURCE_CAP_MAX_ATTEMPTS,
+                 (unsigned long)((g_pm.status.tps.status_raw >> 24) & 0x03U),
                  g_pm.status.otg_pin_high ? 1U : 0U,
                  (unsigned long)g_pm.status.tps.vbus_mv,
                  (unsigned long)g_pm.status.pd_snapshot.contract_voltage_mv,
@@ -502,6 +520,9 @@ static void PowerManager_LogPd(uint32_t now_ms)
                  (unsigned long)g_pm.status.pd_snapshot.contract_power_mw,
                  (unsigned long)g_pm.status.tps.active_pdo_raw,
                  (unsigned long)g_pm.status.tps.active_rdo_raw,
+                 g_pm.status.tps.pp5v_state,
+                 g_pm.status.tps.pphv_state,
+                 g_pm.status.tps.hard_reset_reason,
                  (unsigned long)((g_pm.status.tps.status_raw >> 32) & 0xFFU),
                  (unsigned long)g_pm.status.tps.status_raw);
 }
@@ -532,15 +553,12 @@ static void PowerManager_LogBqMonitor(void)
     int32_t selected_power_mw = 0;
     bool power_available = false;
     bool sink_contract = PowerManager_HasSinkContract();
-    bool source_contract = g_pm.status.tps.attached &&
+    bool source_path = g_pm.status.tps.attached &&
         (g_pm.status.tps.connection_state >= 6U) &&
         (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
-        g_pm.status.tps.active_pdo.valid &&
-        g_pm.status.tps.active_rdo.valid &&
         g_pm.status.otg_pin_high;
 
-    if (source_contract && bq->in_otg &&
-        (bq->battery_power_mw < 0)) {
+    if (source_path && bq->in_otg) {
         power_flow = "BAT_TO_VBUS";
         power_meter = "VBUS_ADC";
         selected_voltage_mv = bq->adc_vbus_mv;
@@ -754,6 +772,10 @@ static bool PowerManager_TrySchedule100WSinkContract(uint32_t now_ms)
 
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
+    if (!attached && !g_pm.policy_source_recovery_in_progress) {
+        g_pm.policy_source_recovery_attempts = 0U;
+    }
+
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
     memset(&g_pm.local_sink_caps, 0, sizeof(g_pm.local_sink_caps));
@@ -763,15 +785,28 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.partner_source_caps_current = false;
     g_pm.partner_sink_observed = false;
     g_pm.policy_cap_attempts = 0U;
+    g_pm.policy_source_caps_attempts = 0U;
     g_pm.policy_role_mismatch_since_ms = 0U;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
 
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
-        g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
-        g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
-        Debug_Printf("[PD-POLICY] attach role=%s; probing partner Sink/Source PDOs",
-                     PowerManager_RoleToString(g_pm.status.tps.role));
+        if ((g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+            (g_pm.status.tps.connection_state >= 6U)) {
+            /* Attached.SRC means that TPS detected Rd on CC.  That is direct
+             * Type-C evidence that the partner is a power sink; a PD
+             * Get_Sink_Cap response is optional and must never gate VBUS. */
+            g_pm.partner_sink_observed = true;
+            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+            g_pm.policy_phase = PM_POLICY_WAIT_SOURCE_READY;
+            g_pm.policy_next_ms = now_ms + PM_SOURCE_READY_RETRY_MS;
+            Debug_Printf("[PD-POLICY] attach role=SOURCE partner=Sink(Rd); VBUS enabled immediately, waiting for stable 5V before Source PDO advertisement");
+        } else {
+            g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
+            Debug_Printf("[PD-POLICY] attach role=%s; probing partner Sink/Source PDOs",
+                         PowerManager_RoleToString(g_pm.status.tps.role));
+        }
     } else {
         g_pm.policy_phase = PM_POLICY_IDLE;
         g_pm.policy_next_ms = 0U;
@@ -884,6 +919,63 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         (((g_pm.status.tps.active_pdo_raw >> 30) & 0x03U) == 0U) &&
         ((g_pm.status.tps.active_pdo_raw & (1UL << 29)) != 0U);
 
+    if ((current == TPS25751_ROLE_SOURCE) && !contract_valid &&
+        (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN)) {
+        g_pm.partner_sink_observed = true;
+        g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+        Debug_Printf("[PD-POLICY] desired=SOURCE established from Type-C Rd attach");
+    }
+
+    /* A sink can miss the first Source_Capabilities while its own supply is
+     * still coming up. Re-advertise only after VBUS is valid. Type-C-only
+     * sinks ignore the attempts and remain powered at 5 V. */
+    if ((current == TPS25751_ROLE_SOURCE) && !contract_valid &&
+        (g_pm.policy_phase == PM_POLICY_DONE) &&
+        (g_pm.policy_source_caps_attempts <
+         PM_SOURCE_CAP_MAX_ATTEMPTS) &&
+        g_pm.status.otg_pin_high &&
+        (g_pm.status.tps.vbus_mv >= PM_SOURCE_VBUS_READY_MV) &&
+        PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
+        g_pm.policy_phase = PM_POLICY_SEND_SOURCE_CAPS;
+        g_pm.policy_next_ms = now_ms;
+    }
+
+    /* If TPS has conclusively classified the partner as a legacy sink, all
+     * Source PDO advertisements failed, and the output still draws no
+     * measurable current, the receiver likely missed the initial VBUS/CC
+     * sequence. Perform at most two real Type-C Error Recovery attaches via
+     * Gaid. Never loop and never disturb a device that is drawing power. */
+    if ((current == TPS25751_ROLE_SOURCE) && !contract_valid &&
+        (g_pm.policy_phase == PM_POLICY_DONE) &&
+        (g_pm.policy_source_caps_attempts >=
+         PM_SOURCE_CAP_MAX_ATTEMPTS) &&
+        (g_pm.policy_source_recovery_attempts <
+         PM_SOURCE_RECOVERY_MAX_ATTEMPTS) &&
+        !g_pm.policy_source_recovery_in_progress &&
+        (((g_pm.status.tps.status_raw >> 24) & 0x03U) == 2U) &&
+        g_pm.status.otg_pin_high && g_pm.status.bq.online &&
+        g_pm.status.bq.adc_sample_valid &&
+        (g_pm.status.bq.adc_iin_ma == 0U)) {
+        g_pm.policy_phase = PM_POLICY_RECOVER_SOURCE_PORT;
+        g_pm.policy_next_ms = now_ms;
+        Debug_Printf("[PD-RECOVERY] legacy Source has 0mA after %u PDO advertisements; scheduling Type-C reattach %u/%u",
+                     PM_SOURCE_CAP_MAX_ATTEMPTS,
+                     (unsigned int)(g_pm.policy_source_recovery_attempts + 1U),
+                     PM_SOURCE_RECOVERY_MAX_ATTEMPTS);
+    }
+
+    if (g_pm.policy_source_recovery_in_progress &&
+        (current == TPS25751_ROLE_SOURCE) && !contract_valid &&
+        (g_pm.policy_source_caps_attempts >=
+         PM_SOURCE_CAP_MAX_ATTEMPTS) &&
+        g_pm.status.otg_pin_high &&
+        (g_pm.status.tps.vbus_mv >= PM_SOURCE_VBUS_READY_MV)) {
+        g_pm.policy_source_recovery_in_progress = false;
+        Debug_Printf("[PD-RECOVERY] reattach %u/%u reached stable 5V; monitoring result",
+                     g_pm.policy_source_recovery_attempts,
+                     PM_SOURCE_RECOVERY_MAX_ATTEMPTS);
+    }
+
     if (active_source_pdo_is_drp && !g_pm.partner_sink_observed) {
         g_pm.partner_sink_observed = true;
         Debug_Printf("[PD-POLICY] partner Sink capability confirmed by DRP bit in active Source PDO=0x%08lX",
@@ -891,6 +983,8 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     }
 
     if (contract_valid && (current == TPS25751_ROLE_SOURCE)) {
+        g_pm.policy_source_recovery_attempts = 0U;
+        g_pm.policy_source_recovery_in_progress = false;
         if (!g_pm.partner_sink_observed) {
             g_pm.partner_sink_observed = true;
             Debug_Printf("[PD-POLICY] partner Sink confirmed by active Source contract PDO=0x%08lX RDO=0x%08lX",
@@ -1072,6 +1166,33 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     }
 }
 
+static void PowerManager_WaitForTpsWarmRestart(uint32_t now_ms)
+{
+    g_pm.status.tps.mode = TPS25751_MODE_UNKNOWN;
+    g_pm.status.tps.attached = false;
+    g_pm.status.tps.role = TPS25751_ROLE_UNKNOWN;
+    g_pm.status.tps.connection_state = 0U;
+    g_pm.status.tps.vbus_mv = 0U;
+    g_pm.status.tps.active_pdo_raw = 0U;
+    g_pm.status.tps.active_rdo_raw = 0U;
+    memset(&g_pm.status.tps.active_pdo, 0,
+           sizeof(g_pm.status.tps.active_pdo));
+    memset(&g_pm.status.tps.active_rdo, 0,
+           sizeof(g_pm.status.tps.active_rdo));
+    PowerManager_UpdatePdSnapshot();
+    g_pm.previous_attached = false;
+    g_pm.status_updated_ms = 0U;
+    g_pm.status.applied_mode_valid = false;
+    g_pm.mode_update_pending = true;
+    g_pm.event_mask_ready = false;
+    g_pm.event_mask_write_pending = false;
+    g_pm.event_clear_pending = false;
+    g_pm.app_seen_ms = 0U;
+    g_pm.next_mode_ms = now_ms + PM_MODE_POLL_MS;
+    PowerManager_SetOtgPin(false);
+    PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
+}
+
 static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                                              uint32_t now_ms)
 {
@@ -1086,7 +1207,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
     data = TPS25751_GetResult(&g_pm.tps, &length);
 
     if (operation_status != TPS25751_OK) {
-        if (completed_job == PM_JOB_GET_SINK_CAPS) {
+        if (completed_job == PM_JOB_RECOVER_SOURCE_PORT) {
+            Debug_Printf("[PD-RECOVERY] Gaid restart transition status=%s; waiting for TPS APP",
+                         TPS25751_StatusToString(operation_status));
+            PowerManager_WaitForTpsWarmRestart(now_ms);
+        } else if (completed_job == PM_JOB_GET_SINK_CAPS) {
             memset(&g_pm.partner_sink_caps, 0,
                    sizeof(g_pm.partner_sink_caps));
             g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
@@ -1129,6 +1254,15 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             Debug_Printf("[PD-MAX] 100W renegotiation failed step=%s task=%u status=%s; keeping existing valid contract",
                          PowerManager_JobToString(completed_job),
+                         g_pm.tps.task_return_code,
+                         TPS25751_StatusToString(operation_status));
+            if (operation_status != TPS25751_COMMAND_ERROR) {
+                PowerManager_HandleTpsError(operation_status, now_ms);
+            }
+        } else if (completed_job == PM_JOB_SEND_SOURCE_CAPS) {
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_next_ms = now_ms + PM_SOURCE_CAP_RETRY_MS;
+            Debug_Printf("[PD-SOURCE] Source PDO advertisement not acknowledged task=%u status=%s; Type-C 5V remains enabled",
                          g_pm.tps.task_return_code,
                          TPS25751_StatusToString(operation_status));
             if (operation_status != TPS25751_COMMAND_ERROR) {
@@ -1421,6 +1555,17 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             Debug_Printf("[PD-MAX] GSrC accepted; waiting for TPS-generated 100W RDO (PDO/RDO were not modified by firmware)");
+            break;
+
+        case PM_JOB_SEND_SOURCE_CAPS:
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_next_ms = now_ms + PM_SOURCE_CAP_RETRY_MS;
+            Debug_Printf("[PD-SOURCE] Source PDO advertisement acknowledged; waiting for partner Request");
+            break;
+
+        case PM_JOB_RECOVER_SOURCE_PORT:
+            Debug_Printf("[PD-RECOVERY] TPS entered warm restart; waiting for fresh Type-C attach");
+            PowerManager_WaitForTpsWarmRestart(now_ms);
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
@@ -1747,6 +1892,14 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = TPS25751_StartCommand(&g_pm.tps, "GSrC",
                                            NULL, 0U, 1U);
             break;
+        case PM_JOB_SEND_SOURCE_CAPS:
+            status = TPS25751_StartCommand(&g_pm.tps, "SSrC",
+                                           NULL, 0U, 1U);
+            break;
+        case PM_JOB_RECOVER_SOURCE_PORT:
+            status = TPS25751_StartCommand(&g_pm.tps, "Gaid",
+                                           NULL, 0U, 0U);
+            break;
         case PM_JOB_SWAP_TO_SOURCE:
             status = TPS25751_StartCommand(&g_pm.tps, "SWSr",
                                            NULL, 0U, 1U);
@@ -1867,6 +2020,29 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                          g_pm.policy_cap_attempts,
                          PM_POLICY_MAX_CAP_ATTEMPTS);
         }
+        if (job == PM_JOB_SEND_SOURCE_CAPS) {
+            if (g_pm.policy_source_caps_attempts < 0xFFU) {
+                ++g_pm.policy_source_caps_attempts;
+            }
+            Debug_Printf("[PD-SOURCE] advertising Source PDOs attempt=%u/%u VBUS=%lumV",
+                         g_pm.policy_source_caps_attempts,
+                         PM_SOURCE_CAP_MAX_ATTEMPTS,
+                         (unsigned long)g_pm.status.tps.vbus_mv);
+        }
+        if (job == PM_JOB_RECOVER_SOURCE_PORT) {
+            uint32_t now_ms = HAL_GetTick();
+
+            if (g_pm.policy_source_recovery_attempts < 0xFFU) {
+                ++g_pm.policy_source_recovery_attempts;
+            }
+            g_pm.policy_source_recovery_in_progress = true;
+            g_pm.hard_reset_holdoff_until_ms = now_ms + 2500U;
+            g_pm.status_updated_ms = 0U;
+            PowerManager_SetOtgPin(false);
+            Debug_Printf("[PD-RECOVERY] Gaid warm restart %u/%u started; OTG disabled during Type-C Error Recovery",
+                         g_pm.policy_source_recovery_attempts,
+                         PM_SOURCE_RECOVERY_MAX_ATTEMPTS);
+        }
         if ((job == PM_JOB_SWAP_TO_SOURCE) ||
             (job == PM_JOB_SWAP_TO_SINK)) {
             g_pm.policy_swap_attempted = true;
@@ -1908,6 +2084,20 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
         g_pm.policy_phase = PM_POLICY_GET_SINK_CAPS;
     }
+    if ((g_pm.policy_phase == PM_POLICY_WAIT_SOURCE_READY) &&
+        PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
+        if ((g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
+            !PowerManager_HasTypecPowerConnection()) {
+            g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
+        } else if (g_pm.status.otg_pin_high &&
+                   (g_pm.status.tps.vbus_mv >=
+                    PM_SOURCE_VBUS_READY_MV)) {
+            g_pm.policy_phase = PM_POLICY_SEND_SOURCE_CAPS;
+        } else {
+            g_pm.policy_next_ms = now_ms + PM_SOURCE_READY_RETRY_MS;
+        }
+    }
     if (!PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
         return PM_JOB_NONE;
     }
@@ -1927,6 +2117,9 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
             return PM_JOB_WRITE_AUTO_SINK_POLICY;
         case PM_POLICY_RENEGOTIATE_SOURCE_CAPS:
             return PM_JOB_RENEGOTIATE_SOURCE_CAPS;
+        case PM_POLICY_SEND_SOURCE_CAPS: return PM_JOB_SEND_SOURCE_CAPS;
+        case PM_POLICY_RECOVER_SOURCE_PORT:
+            return PM_JOB_RECOVER_SOURCE_PORT;
         case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
         case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
