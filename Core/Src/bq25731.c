@@ -93,10 +93,10 @@ BQ25731_Status_t BQ25731_StartReadAdcBlock(BQ25731_Device_t *dev)
         BQ25731_ADC_BLOCK_LEN));
 }
 
-BQ25731_Status_t BQ25731_StartWrite16(BQ25731_Device_t *dev,
-                                      uint8_t reg,
-                                      uint16_t value)
+BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
+    BQ25731_Device_t *dev)
 {
+    const uint16_t value = BQ25731_ADC_OPTION_MONITORING;
     uint8_t data[2];
 
     if ((dev == NULL) || (dev->tps == NULL)) {
@@ -105,7 +105,8 @@ BQ25731_Status_t BQ25731_StartWrite16(BQ25731_Device_t *dev,
     data[0] = (uint8_t)value;
     data[1] = (uint8_t)(value >> 8);
     return BQ25731_MapTpsStatus(TPS25751_StartI2cControllerWrite(
-        dev->tps, dev->address_7bit, reg, data, sizeof(data)));
+        dev->tps, dev->address_7bit, BQ25731_REG_ADC_OPTION,
+        data, sizeof(data)));
 }
 
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw)
@@ -129,26 +130,6 @@ uint32_t BQ25731_DecodeInputCurrentMa(uint16_t raw)
 {
     /* Debug value for the board's configured 5 mOhm RAC. */
     return (uint32_t)((raw >> 8) & 0x7FU) * 100U;
-}
-
-uint16_t BQ25731_EncodeChargeCurrentMa(uint32_t current_ma)
-{
-    uint32_t code = current_ma / BQ25731_ADC_ICHG_MA_PER_LSB;
-
-    if (code > 0x7FU) {
-        code = 0x7FU;
-    }
-    return (uint16_t)(code << 6);
-}
-
-uint16_t BQ25731_EncodeInputCurrentMa(uint32_t current_ma)
-{
-    uint32_t code = current_ma / BQ25731_ADC_IIN_MA_PER_LSB;
-
-    if (code > 0x7FU) {
-        code = 0x7FU;
-    }
-    return (uint16_t)(code << 8);
 }
 
 bool BQ25731_DecodeConfigBlock(BQ25731_Telemetry_t *telemetry,

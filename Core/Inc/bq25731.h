@@ -29,9 +29,7 @@
 #define BQ25731_CHARGE_OPTION0_LWPWR    0x8000U
 #define BQ25731_CHARGE_OPTION0_WDT_MASK 0x6000U
 #define BQ25731_CHARGE_OPTION0_INHIBIT  0x0001U
-#define BQ25731_MAX_INPUT_CURRENT_MA    5000U
-#define BQ25731_TARGET_CHARGE_CURRENT_MA 8000U
-#define BQ25731_ADC_OPTION_DEBUG        0xE05FU
+#define BQ25731_ADC_OPTION_MONITORING   0xE05FU
 /* ADC_START (bit 14) is a trigger and may read back as zero. Verify the
  * persistent continuous-conversion, full-scale and channel-enable fields. */
 #define BQ25731_ADC_OPTION_VERIFY_MASK  0xA05FU
@@ -103,17 +101,14 @@ BQ25731_Status_t BQ25731_StartReadId(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartReadConfigBlock(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartReadStatusBlock(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartReadAdcBlock(BQ25731_Device_t *dev);
-BQ25731_Status_t BQ25731_StartWrite16(BQ25731_Device_t *dev,
-                                      uint8_t reg,
-                                      uint16_t value);
+BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
+    BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
 
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw);
 uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw);
 uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw);
 uint32_t BQ25731_DecodeInputCurrentMa(uint16_t raw);
-uint16_t BQ25731_EncodeChargeCurrentMa(uint32_t current_ma);
-uint16_t BQ25731_EncodeInputCurrentMa(uint32_t current_ma);
 bool BQ25731_DecodeConfigBlock(BQ25731_Telemetry_t *telemetry,
                                const uint8_t *data,
                                uint8_t length);

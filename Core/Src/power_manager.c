@@ -59,8 +59,6 @@ typedef enum {
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_READ_OPTION0,
-    PM_JOB_BQ_WRITE_OPTION0,
-    PM_JOB_BQ_WRITE_CURRENT,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
     PM_JOB_BQ_READ_CURRENT,
@@ -70,18 +68,13 @@ typedef enum {
     PM_JOB_BQ_READ_ADC,
     PM_JOB_BQ_READ_CONFIG_BLOCK,
     PM_JOB_BQ_READ_STATUS_BLOCK,
-    PM_JOB_BQ_READ_ADC_BLOCK,
-    PM_JOB_BQ_WRITE_IIN,
-    PM_JOB_BQ_APPLY_OPTION0,
-    PM_JOB_BQ_APPLY_CURRENT
+    PM_JOB_BQ_READ_ADC_BLOCK
 } PowerManager_Job_t;
 
 typedef enum {
     PM_BQ_INIT_WAIT = 0,
     PM_BQ_INIT_READ_ID,
     PM_BQ_INIT_READ_OPTION0,
-    PM_BQ_INIT_WRITE_OPTION0,
-    PM_BQ_INIT_WRITE_CURRENT,
     PM_BQ_INIT_WRITE_ADC,
     PM_BQ_INIT_VERIFY_ADC,
     PM_BQ_INIT_DONE
@@ -129,9 +122,6 @@ typedef struct {
     bool event_mask_ready;
     bool event_mask_write_pending;
     bool event_clear_pending;
-    bool bq_iin_write_pending;
-    bool bq_option0_write_pending;
-    bool bq_current_write_pending;
 
     uint32_t next_mode_ms;
     uint32_t next_boot_flags_ms;
@@ -147,11 +137,7 @@ typedef struct {
     uint32_t last_error_log_ms;
     uint32_t tps_error_count;
     uint32_t bq_error_count;
-    uint32_t bq_iin_target_ma;
-    uint32_t bq_iin_applied_ma;
-    uint32_t bq_iin_failed_rdo_raw;
     uint32_t policy_role_mismatch_since_ms;
-    uint16_t bq_option0_target;
     uint8_t previous_hard_reset_reason;
     uint8_t policy_cap_attempts;
     uint8_t policy_source_caps_attempts;
@@ -232,9 +218,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
-        case PM_JOB_BQ_WRITE_OPTION0: return "BQ_WRITE_OPTION0";
-        case PM_JOB_BQ_WRITE_CURRENT: return "BQ_WRITE_CURRENT";
-        case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC";
+        case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
         case PM_JOB_BQ_READ_CURRENT: return "BQ_READ_CURRENT";
         case PM_JOB_BQ_READ_VOLTAGE: return "BQ_READ_VOLTAGE";
@@ -244,9 +228,6 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_BQ_READ_CONFIG_BLOCK: return "BQ_READ_CONFIG";
         case PM_JOB_BQ_READ_STATUS_BLOCK: return "BQ_READ_STATUS";
         case PM_JOB_BQ_READ_ADC_BLOCK: return "BQ_READ_ADC_BLOCK";
-        case PM_JOB_BQ_WRITE_IIN: return "BQ_WRITE_IIN";
-        case PM_JOB_BQ_APPLY_OPTION0: return "BQ_APPLY_OPTION0";
-        case PM_JOB_BQ_APPLY_CURRENT: return "BQ_APPLY_CURRENT";
         default: return "NONE";
     }
 }
@@ -402,54 +383,6 @@ static void PowerManager_UpdatePdSnapshot(void)
     }
 }
 
-static void PowerManager_UpdateBqInputLimit(void)
-{
-    uint32_t target_ma;
-    uint32_t supply_type;
-    uint16_t raw;
-
-    if (!g_pm.status.tps.attached ||
-        (g_pm.status.tps.connection_state < 6U) ||
-        (g_pm.status.tps.role != TPS25751_ROLE_SINK) ||
-        !g_pm.status.tps.active_rdo.valid) {
-        g_pm.bq_iin_applied_ma = 0U;
-        g_pm.bq_iin_failed_rdo_raw = 0U;
-        return;
-    }
-
-    supply_type = (g_pm.status.tps.active_pdo_raw >> 30) & 0x03U;
-    if (supply_type == 3U) {
-        target_ma = (g_pm.status.tps.active_rdo_raw & 0x7FU) * 50U;
-    } else if ((supply_type == 0U) || (supply_type == 2U)) {
-        target_ma = g_pm.status.tps.active_rdo.operating_current_ma;
-    } else {
-        return;
-    }
-    if (target_ma == 0U) {
-        target_ma = g_pm.status.tps.active_pdo.current_ma;
-    }
-    if (target_ma > BQ25731_MAX_INPUT_CURRENT_MA) {
-        target_ma = BQ25731_MAX_INPUT_CURRENT_MA;
-    }
-    raw = BQ25731_EncodeInputCurrentMa(target_ma);
-    target_ma = BQ25731_DecodeInputCurrentMa(raw);
-    if ((target_ma == 0U) ||
-        ((target_ma == g_pm.bq_iin_applied_ma) &&
-         ((target_ma == g_pm.status.bq.input_current_ma) ||
-          (target_ma == g_pm.status.bq.iin_dpm_ma))) ||
-        (g_pm.status.tps.active_rdo_raw ==
-         g_pm.bq_iin_failed_rdo_raw)) {
-        return;
-    }
-
-    g_pm.bq_iin_target_ma = target_ma;
-    g_pm.bq_iin_write_pending = true;
-    Debug_Printf("[PD-BQ] contract=%lumV/%lumA; scheduling IIN_HOST=%lumA",
-                 (unsigned long)g_pm.status.tps.active_pdo.voltage_mv,
-                 (unsigned long)g_pm.status.tps.active_rdo.operating_current_ma,
-                 (unsigned long)target_ma);
-}
-
 static bool PowerManager_HasSinkContract(void)
 {
     return g_pm.status.tps.attached &&
@@ -457,37 +390,6 @@ static bool PowerManager_HasSinkContract(void)
            (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
            g_pm.status.tps.active_pdo.valid &&
            g_pm.status.tps.active_rdo.valid;
-}
-
-static void PowerManager_UpdateBqChargePolicy(void)
-{
-    uint16_t option0;
-    uint16_t charge_current;
-    bool charge = PowerManager_HasSinkContract();
-
-    if (g_pm.bq_init != PM_BQ_INIT_DONE) {
-        return;
-    }
-
-    option0 = g_pm.status.bq.charge_option0;
-    option0 &= (uint16_t)~(BQ25731_CHARGE_OPTION0_LWPWR |
-                           BQ25731_CHARGE_OPTION0_WDT_MASK);
-    if (charge) {
-        option0 &= (uint16_t)~BQ25731_CHARGE_OPTION0_INHIBIT;
-    } else {
-        option0 |= BQ25731_CHARGE_OPTION0_INHIBIT;
-    }
-    if (option0 != g_pm.status.bq.charge_option0) {
-        g_pm.bq_option0_target = option0;
-        g_pm.bq_option0_write_pending = true;
-    }
-
-    charge_current = BQ25731_EncodeChargeCurrentMa(
-        BQ25731_TARGET_CHARGE_CURRENT_MA);
-    if (charge &&
-        (g_pm.status.bq.charge_current != charge_current)) {
-        g_pm.bq_current_write_pending = true;
-    }
 }
 
 static void PowerManager_LogPd(uint32_t now_ms)
@@ -1288,17 +1190,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             if (operation_status != TPS25751_COMMAND_ERROR) {
                 PowerManager_HandleTpsError(operation_status, now_ms);
             }
-        } else if (completed_job == PM_JOB_BQ_WRITE_IIN) {
-            g_pm.bq_iin_write_pending = false;
-            g_pm.bq_iin_failed_rdo_raw =
-                g_pm.status.tps.active_rdo_raw;
-            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
-        } else if (completed_job == PM_JOB_BQ_APPLY_OPTION0) {
-            g_pm.bq_option0_write_pending = false;
-            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
-        } else if (completed_job == PM_JOB_BQ_APPLY_CURRENT) {
-            g_pm.bq_current_write_pending = false;
-            PowerManager_HandleBqTelemetryError(operation_status, now_ms);
         } else if ((completed_job == PM_JOB_BQ_READ_CONFIG_BLOCK) ||
                    (completed_job == PM_JOB_BQ_READ_STATUS_BLOCK) ||
                    (completed_job == PM_JOB_BQ_READ_ADC_BLOCK) ||
@@ -1428,7 +1319,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                              (unsigned long)g_pm.status.tps.status_raw);
             }
             PowerManager_UpdateAttachPolicy(now_ms);
-            PowerManager_UpdateBqChargePolicy();
             g_pm.telemetry_phase = 1U;
             break;
         }
@@ -1482,8 +1372,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.status.tps.active_rdo_raw);
             g_pm.telemetry_phase = 7U;
             PowerManager_UpdatePdSnapshot();
-            PowerManager_UpdateBqInputLimit();
-            PowerManager_UpdateBqChargePolicy();
             /* The first AUTO_NEGOTIATE_SINK read can finish before ACTIVE_RDO
              * becomes valid.  Re-evaluate here so a single early snapshot
              * cannot permanently suppress the 100 W renegotiation. */
@@ -1619,36 +1507,9 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.charge_option0 = raw16;
             g_pm.status.bq.online = true;
             g_pm.status.bq_status = BQ25731_OK;
-            if ((raw16 & (BQ25731_CHARGE_OPTION0_LWPWR |
-                          BQ25731_CHARGE_OPTION0_WDT_MASK)) != 0U) {
-                g_pm.bq_init = PM_BQ_INIT_WRITE_OPTION0;
-            } else {
-                g_pm.bq_init = PM_BQ_INIT_WRITE_CURRENT;
-            }
-            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
-            PowerManager_SetState(POWER_MANAGER_BQ_ADC_SETUP);
-            break;
-
-        case PM_JOB_BQ_WRITE_OPTION0:
-            g_pm.status.bq.charge_option0 &=
-                (uint16_t)~(BQ25731_CHARGE_OPTION0_LWPWR |
-                            BQ25731_CHARGE_OPTION0_WDT_MASK);
-            g_pm.bq_init = PM_BQ_INIT_WRITE_CURRENT;
-            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
-            break;
-
-        case PM_JOB_BQ_WRITE_CURRENT:
-            g_pm.status.bq.charge_current =
-                BQ25731_EncodeChargeCurrentMa(
-                    BQ25731_TARGET_CHARGE_CURRENT_MA);
-            g_pm.status.bq.charge_current_ma =
-                BQ25731_DecodeChargeCurrentMa(
-                    g_pm.status.bq.charge_current);
             g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
             g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
-            Debug_Printf("[BQ] watchdog=OFF ICHG_SET=%lumA target=%lumA",
-                         (unsigned long)g_pm.status.bq.charge_current_ma,
-                         (unsigned long)BQ25731_TARGET_CHARGE_CURRENT_MA);
+            PowerManager_SetState(POWER_MANAGER_BQ_ADC_SETUP);
             break;
 
         case PM_JOB_BQ_WRITE_ADC:
@@ -1660,7 +1521,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             raw16 = PowerManager_ResultLe16(&valid);
             if (!valid ||
                 ((raw16 & BQ25731_ADC_OPTION_VERIFY_MASK) !=
-                 (BQ25731_ADC_OPTION_DEBUG &
+                 (BQ25731_ADC_OPTION_MONITORING &
                   BQ25731_ADC_OPTION_VERIFY_MASK))) {
                 PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
                 break;
@@ -1670,10 +1531,10 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.online = true;
             g_pm.status.bq_status = BQ25731_OK;
             g_pm.bq_init = PM_BQ_INIT_DONE;
-            g_pm.next_bq_telemetry_ms = now_ms + PM_BQ_TELEMETRY_MS;
-            g_pm.next_bq_config_ms = now_ms + PM_BQ_CONFIG_MS;
+            g_pm.next_bq_telemetry_ms = now_ms;
+            g_pm.next_bq_config_ms = now_ms;
             PowerManager_SetState(POWER_MANAGER_RUN);
-            PowerManager_UpdateBqChargePolicy();
+            Debug_Printf("[BQ] TPS EEPROM owns power configuration; STM writes ADC_OPTION only for telemetry");
             break;
 
         case PM_JOB_BQ_READ_CURRENT:
@@ -1738,8 +1599,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.adc_option = raw16;
             g_pm.status.bq.adc_configured =
                 ((raw16 & BQ25731_ADC_OPTION_VERIFY_MASK) ==
-                 (BQ25731_ADC_OPTION_DEBUG &
-                  BQ25731_ADC_OPTION_VERIFY_MASK));
+                (BQ25731_ADC_OPTION_MONITORING &
+                 BQ25731_ADC_OPTION_VERIFY_MASK));
             g_pm.status.bq.online = true;
             g_pm.status.bq.updated_ms = now_ms;
             g_pm.bq_phase = 0U;
@@ -1756,7 +1617,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.online = true;
             g_pm.status.bq_status = BQ25731_OK;
             g_pm.next_bq_config_ms = now_ms + PM_BQ_CONFIG_MS;
-            PowerManager_UpdateBqChargePolicy();
             PowerManager_LogBq();
             break;
 
@@ -1788,40 +1648,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 PowerManager_SetState(POWER_MANAGER_RUN);
             }
             PowerManager_LogBqMonitor();
-            break;
-
-        case PM_JOB_BQ_WRITE_IIN:
-            g_pm.bq_iin_write_pending = false;
-            g_pm.bq_iin_applied_ma = g_pm.bq_iin_target_ma;
-            g_pm.bq_iin_failed_rdo_raw = 0U;
-            g_pm.status.bq.iin_host =
-                BQ25731_EncodeInputCurrentMa(g_pm.bq_iin_target_ma);
-            g_pm.status.bq.input_current_ma =
-                BQ25731_DecodeInputCurrentMa(g_pm.status.bq.iin_host);
-            Debug_Printf("[PD-BQ] IIN_HOST applied=%lumA",
-                         (unsigned long)g_pm.status.bq.input_current_ma);
-            break;
-
-        case PM_JOB_BQ_APPLY_OPTION0:
-            g_pm.bq_option0_write_pending = false;
-            g_pm.status.bq.charge_option0 = g_pm.bq_option0_target;
-            Debug_Printf("[BQ-CHARGE] %s Option0=0x%04X CHRG_INHIBIT=%u WDT=OFF",
-                         PowerManager_HasSinkContract() ? "ENABLED" : "INHIBITED",
-                         g_pm.status.bq.charge_option0,
-                         (g_pm.status.bq.charge_option0 &
-                          BQ25731_CHARGE_OPTION0_INHIBIT) ? 1U : 0U);
-            break;
-
-        case PM_JOB_BQ_APPLY_CURRENT:
-            g_pm.bq_current_write_pending = false;
-            g_pm.status.bq.charge_current =
-                BQ25731_EncodeChargeCurrentMa(
-                    BQ25731_TARGET_CHARGE_CURRENT_MA);
-            g_pm.status.bq.charge_current_ma =
-                BQ25731_DecodeChargeCurrentMa(
-                    g_pm.status.bq.charge_current);
-            Debug_Printf("[BQ-CHARGE] ICHG_SET restored=%lumA",
-                         (unsigned long)g_pm.status.bq.charge_current_ma);
             break;
 
         default:
@@ -1952,27 +1778,8 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
-        case PM_JOB_BQ_WRITE_OPTION0:
-            bq_status = BQ25731_StartWrite16(
-                &g_pm.bq, BQ25731_REG_CHARGE_OPTION0,
-                (uint16_t)(g_pm.status.bq.charge_option0 &
-                           (uint16_t)~(
-                               BQ25731_CHARGE_OPTION0_LWPWR |
-                               BQ25731_CHARGE_OPTION0_WDT_MASK)));
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_WRITE_CURRENT:
-            bq_status = BQ25731_StartWrite16(
-                &g_pm.bq, BQ25731_REG_CHARGE_CURRENT,
-                BQ25731_EncodeChargeCurrentMa(
-                    BQ25731_TARGET_CHARGE_CURRENT_MA));
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
         case PM_JOB_BQ_WRITE_ADC:
-            bq_status = BQ25731_StartWrite16(&g_pm.bq,
-                BQ25731_REG_ADC_OPTION, BQ25731_ADC_OPTION_DEBUG);
+            bq_status = BQ25731_StartConfigureMonitoringAdc(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
@@ -2018,29 +1825,6 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             break;
         case PM_JOB_BQ_READ_ADC_BLOCK:
             bq_status = BQ25731_StartReadAdcBlock(&g_pm.bq);
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_WRITE_IIN:
-            bq_status = BQ25731_StartWrite16(
-                &g_pm.bq, BQ25731_REG_IIN_HOST,
-                BQ25731_EncodeInputCurrentMa(
-                    g_pm.bq_iin_target_ma));
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_APPLY_OPTION0:
-            bq_status = BQ25731_StartWrite16(
-                &g_pm.bq, BQ25731_REG_CHARGE_OPTION0,
-                g_pm.bq_option0_target);
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_APPLY_CURRENT:
-            bq_status = BQ25731_StartWrite16(
-                &g_pm.bq, BQ25731_REG_CHARGE_CURRENT,
-                BQ25731_EncodeChargeCurrentMa(
-                    BQ25731_TARGET_CHARGE_CURRENT_MA));
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
@@ -2210,25 +1994,10 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         switch (g_pm.bq_init) {
             case PM_BQ_INIT_READ_ID: return PM_JOB_BQ_READ_ID;
             case PM_BQ_INIT_READ_OPTION0: return PM_JOB_BQ_READ_OPTION0;
-            case PM_BQ_INIT_WRITE_OPTION0: return PM_JOB_BQ_WRITE_OPTION0;
-            case PM_BQ_INIT_WRITE_CURRENT: return PM_JOB_BQ_WRITE_CURRENT;
             case PM_BQ_INIT_WRITE_ADC: return PM_JOB_BQ_WRITE_ADC;
             case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
             default: break;
         }
-    }
-
-    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
-        g_pm.bq_option0_write_pending) {
-        return PM_JOB_BQ_APPLY_OPTION0;
-    }
-    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
-        g_pm.bq_current_write_pending) {
-        return PM_JOB_BQ_APPLY_CURRENT;
-    }
-    if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
-        g_pm.bq_iin_write_pending) {
-        return PM_JOB_BQ_WRITE_IIN;
     }
     if (PowerManager_TickReached(now_ms, g_pm.next_tps_step_ms)) {
         g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
