@@ -6,6 +6,7 @@
 #include <string.h>
 
 #define PM_MODE_POLL_MS              100U
+#define PM_BOOT_FLAGS_POLL_MS       1000U
 #define PM_TPS_STEP_MS                20U
 #define PM_TPS_STATUS_STALE_MS      1500U
 #define PM_PD_LOG_MS                1000U
@@ -32,6 +33,7 @@
 typedef enum {
     PM_JOB_NONE = 0,
     PM_JOB_READ_MODE,
+    PM_JOB_READ_BOOT_FLAGS,
     PM_JOB_READ_PORT_CONFIG,
     PM_JOB_WRITE_PORT_CONFIG,
     PM_JOB_READ_INT_MASK,
@@ -132,6 +134,7 @@ typedef struct {
     bool bq_current_write_pending;
 
     uint32_t next_mode_ms;
+    uint32_t next_boot_flags_ms;
     uint32_t next_tps_step_ms;
     uint32_t next_bq_action_ms;
     uint32_t next_bq_telemetry_ms;
@@ -203,6 +206,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
 {
     switch (job) {
         case PM_JOB_READ_MODE: return "READ_MODE";
+        case PM_JOB_READ_BOOT_FLAGS: return "READ_BOOT_FLAGS";
         case PM_JOB_READ_PORT_CONFIG: return "READ_PORT_CONFIG";
         case PM_JOB_WRITE_PORT_CONFIG: return "WRITE_PORT_CONFIG";
         case PM_JOB_READ_INT_MASK: return "READ_INT_MASK";
@@ -531,12 +535,13 @@ static void PowerManager_LogBq(void)
 {
     const BQ25731_Telemetry_t *bq = &g_pm.status.bq;
 
-    Debug_Printf("[BQ] id=%02X/%02X Option0=0x%04X WDT=%s ADCOption=0x%04X VREG=%lumV ICHG_SET=%lumA IIN_HOST_READ=%lumA IIN_EFFECTIVE=%lumA",
+    Debug_Printf("[BQ] id=%02X/%02X Option0=0x%04X WDT=%s ADCOption=0x%04X VREG=%lumV OTG_SET=%lumV ICHG_SET=%lumA IIN_HOST_READ=%lumA IIN_EFFECTIVE=%lumA",
                  bq->manufacturer_id, bq->device_id, bq->charge_option0,
                  ((bq->charge_option0 &
                    BQ25731_CHARGE_OPTION0_WDT_MASK) == 0U) ? "OFF" : "ON",
                  bq->adc_option,
                  (unsigned long)bq->charge_voltage_mv,
+                 (unsigned long)bq->otg_voltage_mv,
                  (unsigned long)bq->charge_current_ma,
                  (unsigned long)bq->input_current_ma,
                  (unsigned long)bq->iin_dpm_ma);
@@ -1211,6 +1216,9 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             Debug_Printf("[PD-RECOVERY] Gaid restart transition status=%s; waiting for TPS APP",
                          TPS25751_StatusToString(operation_status));
             PowerManager_WaitForTpsWarmRestart(now_ms);
+        } else if (completed_job == PM_JOB_READ_BOOT_FLAGS) {
+            g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
+            PowerManager_HandleTpsError(operation_status, now_ms);
         } else if (completed_job == PM_JOB_GET_SINK_CAPS) {
             memset(&g_pm.partner_sink_caps, 0,
                    sizeof(g_pm.partner_sink_caps));
@@ -1335,6 +1343,32 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 PowerManager_SetOtgPin(false);
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
             }
+            break;
+
+        case PM_JOB_READ_BOOT_FLAGS:
+            if ((data == NULL) || (length != TPS25751_BOOT_FLAGS_LEN)) {
+                PowerManager_HandleTpsError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.tps.boot_flags_raw =
+                (uint64_t)TPS25751_ReadLe32(data) |
+                ((uint64_t)data[4] << 32);
+            g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
+            Debug_Printf("[TPS-BOOT] MODE=PTCH flags=0x%02lX%08lX cfg_src=%lu eeprom_present=%lu r0_try=%lu r1_try=%lu r0_invalid=%lu r1_invalid=%lu r0_ioerr=%lu r1_ioerr=%lu r0_crc=%lu r1_crc=%lu patch_err=%lu header_err=%lu",
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 32) & 0xFFU),
+                         (unsigned long)g_pm.status.tps.boot_flags_raw,
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 29) & 0x07U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 3) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 4) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 5) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 6) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 7) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 8) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 9) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 12) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 13) & 0x01U),
+                         (unsigned long)((g_pm.status.tps.boot_flags_raw >> 10) & 0x01U),
+                         (unsigned long)(g_pm.status.tps.boot_flags_raw & 0x01U));
             break;
 
         case PM_JOB_READ_PORT_CONFIG:
@@ -1805,6 +1839,10 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = TPS25751_StartReadRegister(&g_pm.tps,
                 TPS25751_REG_MODE, TPS25751_MODE_LEN);
             break;
+        case PM_JOB_READ_BOOT_FLAGS:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_BOOT_FLAGS, TPS25751_BOOT_FLAGS_LEN);
+            break;
         case PM_JOB_READ_PORT_CONFIG:
             status = TPS25751_StartReadRegister(&g_pm.tps,
                 TPS25751_REG_PORT_CONFIG, TPS25751_PORT_CONFIG_LEN);
@@ -2131,6 +2169,10 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     PowerManager_Job_t policy_job;
 
     if (g_pm.status.tps.mode != TPS25751_MODE_APP) {
+        if ((g_pm.status.tps.mode == TPS25751_MODE_PTCH) &&
+            PowerManager_TickReached(now_ms, g_pm.next_boot_flags_ms)) {
+            return PM_JOB_READ_BOOT_FLAGS;
+        }
         return PowerManager_TickReached(now_ms, g_pm.next_mode_ms) ?
                PM_JOB_READ_MODE : PM_JOB_NONE;
     }
@@ -2188,7 +2230,6 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         g_pm.bq_iin_write_pending) {
         return PM_JOB_BQ_WRITE_IIN;
     }
-
     if (PowerManager_TickReached(now_ms, g_pm.next_tps_step_ms)) {
         g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
         return PowerManager_SelectTelemetryJob();
@@ -2218,6 +2259,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     g_pm.status.bq_status = BQ25731_NOT_READY;
     g_pm.mode_update_pending = true;
     g_pm.next_mode_ms = now_ms;
+    g_pm.next_boot_flags_ms = now_ms;
     g_pm.next_tps_step_ms = now_ms;
     g_pm.next_bq_action_ms = now_ms + PM_BQ_START_DELAY_MS;
     g_pm.hard_reset_holdoff_until_ms = now_ms;

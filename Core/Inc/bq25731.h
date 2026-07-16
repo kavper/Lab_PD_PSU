@@ -11,6 +11,7 @@
 #define BQ25731_REG_CHARGE_OPTION0      0x00U
 #define BQ25731_REG_CHARGE_CURRENT      0x02U
 #define BQ25731_REG_CHARGE_VOLTAGE      0x04U
+#define BQ25731_REG_OTG_VOLTAGE         0x06U
 #define BQ25731_REG_IIN_HOST            0x0EU
 #define BQ25731_REG_CHARGER_STATUS      0x20U
 #define BQ25731_REG_IIN_DPM             0x24U
@@ -60,6 +61,7 @@ typedef struct {
     uint16_t charge_option0;
     uint16_t adc_option;
     uint16_t charge_voltage;
+    uint16_t otg_voltage;
     uint16_t charge_current;
     uint16_t iin_host;
     uint16_t charger_status;
@@ -69,6 +71,7 @@ typedef struct {
     uint16_t adc_iin_cmpin;
     uint16_t adc_vsys_vbat;
     uint32_t charge_voltage_mv;
+    uint32_t otg_voltage_mv;
     uint32_t charge_current_ma;
     uint32_t input_current_ma;
     uint32_t iin_dpm_ma;
@@ -106,6 +109,7 @@ BQ25731_Status_t BQ25731_StartWrite16(BQ25731_Device_t *dev,
 BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
 
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw);
+uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw);
 uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw);
 uint32_t BQ25731_DecodeInputCurrentMa(uint16_t raw);
 uint16_t BQ25731_EncodeChargeCurrentMa(uint32_t current_ma);

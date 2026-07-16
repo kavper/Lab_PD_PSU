@@ -18,6 +18,7 @@
  * this profile (the former 8.16 V offset was only valid for 5 cells). */
 #define BQ25731_ADC_VBAT_VSYS_BASE_MV     2880U
 #define BQ25731_ADC_VBAT_VSYS_MV_PER_LSB  64U
+#define BQ25731_OTG_VOLTAGE_MV_PER_LSB        8U
 
 BQ25731_Status_t BQ25731_Init(BQ25731_Device_t *dev,
                               TPS25751_Device_t *tps,
@@ -112,6 +113,12 @@ uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw)
     return (uint32_t)((raw >> 3) & 0x1FFFU) * 8U;
 }
 
+uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw)
+{
+    return (uint32_t)((raw >> 2) & 0x0FFFU) *
+           BQ25731_OTG_VOLTAGE_MV_PER_LSB;
+}
+
 uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw)
 {
     /* Debug value for the board's configured 5 mOhm RSR. */
@@ -156,11 +163,14 @@ bool BQ25731_DecodeConfigBlock(BQ25731_Telemetry_t *telemetry,
     telemetry->charge_option0 = TPS25751_ReadLe16(&data[0x00U]);
     telemetry->charge_current = TPS25751_ReadLe16(&data[0x02U]);
     telemetry->charge_voltage = TPS25751_ReadLe16(&data[0x04U]);
+    telemetry->otg_voltage = TPS25751_ReadLe16(&data[0x06U]);
     telemetry->iin_host = TPS25751_ReadLe16(&data[0x0EU]);
     telemetry->charge_current_ma =
         BQ25731_DecodeChargeCurrentMa(telemetry->charge_current);
     telemetry->charge_voltage_mv =
         BQ25731_DecodeChargeVoltageMv(telemetry->charge_voltage);
+    telemetry->otg_voltage_mv =
+        BQ25731_DecodeOtgVoltageMv(telemetry->otg_voltage);
     telemetry->input_current_ma =
         BQ25731_DecodeInputCurrentMa(telemetry->iin_host);
     return true;

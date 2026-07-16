@@ -18,6 +18,7 @@
 #define TPS25751_REG_STATUS             0x1AU
 #define TPS25751_REG_POWER_PATH_STATUS  0x26U
 #define TPS25751_REG_PORT_CONFIG        0x28U
+#define TPS25751_REG_BOOT_FLAGS         0x2DU
 #define TPS25751_REG_RX_SOURCE_CAPS     0x30U
 #define TPS25751_REG_RX_SINK_CAPS       0x31U
 #define TPS25751_REG_TX_SINK_CAPS       0x33U
@@ -35,6 +36,7 @@
  * implementation byte omitted from TRM table 3-14; preserve it during the
  * read-modify-write used to change TypeCStateMachine. */
 #define TPS25751_PORT_CONFIG_LEN        17U
+#define TPS25751_BOOT_FLAGS_LEN          5U
 #define TPS25751_RX_CAPS_LEN            53U
 #define TPS25751_TX_SINK_CAPS_LEN       53U
 #define TPS25751_AUTO_NEGOTIATE_SINK_LEN 24U
@@ -127,6 +129,7 @@ typedef struct {
     uint8_t vbus_state;
 
     uint64_t status_raw;
+    uint64_t boot_flags_raw;
     uint64_t power_path_raw;
     uint32_t power_status_raw;
     uint32_t pd_status_raw;
