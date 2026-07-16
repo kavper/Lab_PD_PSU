@@ -93,6 +93,34 @@ BQ25731_Status_t BQ25731_StartReadAdcBlock(BQ25731_Device_t *dev)
         BQ25731_ADC_BLOCK_LEN));
 }
 
+static BQ25731_Status_t BQ25731_StartWriteFixed16(
+    BQ25731_Device_t *dev, uint8_t reg, uint16_t value)
+{
+    uint8_t data[2];
+
+    if ((dev == NULL) || (dev->tps == NULL)) {
+        return BQ25731_INVALID_ARG;
+    }
+    data[0] = (uint8_t)value;
+    data[1] = (uint8_t)(value >> 8);
+    return BQ25731_MapTpsStatus(TPS25751_StartI2cControllerWrite(
+        dev->tps, dev->address_7bit, reg, data, sizeof(data)));
+}
+
+BQ25731_Status_t BQ25731_StartWriteStartupOption0(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION0, value);
+}
+
+BQ25731_Status_t BQ25731_StartWriteStartupOption4(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION4, value);
+}
+
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev)
 {
@@ -107,6 +135,41 @@ BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     return BQ25731_MapTpsStatus(TPS25751_StartI2cControllerWrite(
         dev->tps, dev->address_7bit, BQ25731_REG_ADC_OPTION,
         data, sizeof(data)));
+}
+
+uint16_t BQ25731_BuildStartupOption0(uint16_t current)
+{
+    current &= (uint16_t)~(BQ25731_CHARGE_OPTION0_EN_OOA |
+                           BQ25731_CHARGE_OPTION0_PWM_FREQ);
+#if (BQ25731_INIT_OUT_OF_AUDIO_ENABLE != 0U)
+    current |= BQ25731_CHARGE_OPTION0_EN_OOA;
+#endif
+#if (BQ25731_INIT_PWM_FREQUENCY_KHZ == 400U)
+    current |= BQ25731_CHARGE_OPTION0_PWM_FREQ;
+#endif
+    return current;
+}
+
+uint16_t BQ25731_BuildStartupOption4(uint16_t current)
+{
+    const uint16_t dither_code =
+        (uint16_t)(BQ25731_INIT_DITHER_PERCENT / 2U);
+
+    current &= (uint16_t)~BQ25731_CHARGE_OPTION4_DITHER_MASK;
+    current |= (uint16_t)(dither_code << 11);
+    return current;
+}
+
+uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0)
+{
+    return (option0 & BQ25731_CHARGE_OPTION0_PWM_FREQ) != 0U ?
+           400U : 800U;
+}
+
+uint32_t BQ25731_DecodeDitherPercent(uint16_t option4)
+{
+    return (uint32_t)((option4 &
+                       BQ25731_CHARGE_OPTION4_DITHER_MASK) >> 11) * 2U;
 }
 
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw)

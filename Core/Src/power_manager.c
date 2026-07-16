@@ -59,6 +59,9 @@ typedef enum {
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_READ_OPTION0,
+    PM_JOB_BQ_WRITE_STARTUP_OPTION0,
+    PM_JOB_BQ_READ_OPTION4,
+    PM_JOB_BQ_WRITE_STARTUP_OPTION4,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
     PM_JOB_BQ_READ_CURRENT,
@@ -75,6 +78,11 @@ typedef enum {
     PM_BQ_INIT_WAIT = 0,
     PM_BQ_INIT_READ_ID,
     PM_BQ_INIT_READ_OPTION0,
+    PM_BQ_INIT_WRITE_OPTION0,
+    PM_BQ_INIT_VERIFY_OPTION0,
+    PM_BQ_INIT_READ_OPTION4,
+    PM_BQ_INIT_WRITE_OPTION4,
+    PM_BQ_INIT_VERIFY_OPTION4,
     PM_BQ_INIT_WRITE_ADC,
     PM_BQ_INIT_VERIFY_ADC,
     PM_BQ_INIT_DONE
@@ -138,6 +146,8 @@ typedef struct {
     uint32_t tps_error_count;
     uint32_t bq_error_count;
     uint32_t policy_role_mismatch_since_ms;
+    uint16_t bq_startup_option0_target;
+    uint16_t bq_startup_option4_target;
     uint8_t previous_hard_reset_reason;
     uint8_t policy_cap_attempts;
     uint8_t policy_source_caps_attempts;
@@ -218,6 +228,9 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION0: return "BQ_WRITE_QUIET_OPTION0";
+        case PM_JOB_BQ_READ_OPTION4: return "BQ_READ_OPTION4";
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION4: return "BQ_WRITE_DITHER_OPTION4";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
         case PM_JOB_BQ_READ_CURRENT: return "BQ_READ_CURRENT";
@@ -437,10 +450,17 @@ static void PowerManager_LogBq(void)
 {
     const BQ25731_Telemetry_t *bq = &g_pm.status.bq;
 
-    Debug_Printf("[BQ] id=%02X/%02X Option0=0x%04X WDT=%s ADCOption=0x%04X VREG=%lumV OTG_SET=%lumV ICHG_SET=%lumA IIN_HOST_READ=%lumA IIN_EFFECTIVE=%lumA",
+    Debug_Printf("[BQ] id=%02X/%02X Option0=0x%04X Option4=0x%04X WDT=%s OOA=%u FSW=%lukHz DITHER=+/-%lu%% ADCOption=0x%04X VREG=%lumV OTG_SET=%lumV ICHG_SET=%lumA IIN_HOST_READ=%lumA IIN_EFFECTIVE=%lumA",
                  bq->manufacturer_id, bq->device_id, bq->charge_option0,
+                 bq->charge_option4,
                  ((bq->charge_option0 &
                    BQ25731_CHARGE_OPTION0_WDT_MASK) == 0U) ? "OFF" : "ON",
+                 (bq->charge_option0 &
+                  BQ25731_CHARGE_OPTION0_EN_OOA) != 0U ? 1U : 0U,
+                 (unsigned long)BQ25731_DecodePwmFrequencyKhz(
+                     bq->charge_option0),
+                 (unsigned long)BQ25731_DecodeDitherPercent(
+                     bq->charge_option4),
                  bq->adc_option,
                  (unsigned long)bq->charge_voltage_mv,
                  (unsigned long)bq->otg_voltage_mv,
@@ -1507,9 +1527,73 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.charge_option0 = raw16;
             g_pm.status.bq.online = true;
             g_pm.status.bq_status = BQ25731_OK;
-            g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+            if (g_pm.bq_init == PM_BQ_INIT_VERIFY_OPTION0) {
+                if ((raw16 & (BQ25731_CHARGE_OPTION0_EN_OOA |
+                              BQ25731_CHARGE_OPTION0_PWM_FREQ)) !=
+                    (g_pm.bq_startup_option0_target &
+                     (BQ25731_CHARGE_OPTION0_EN_OOA |
+                      BQ25731_CHARGE_OPTION0_PWM_FREQ))) {
+                    PowerManager_HandleBqError(
+                        TPS25751_COMMAND_ERROR, now_ms);
+                    break;
+                }
+                g_pm.bq_init = PM_BQ_INIT_READ_OPTION4;
+            } else {
+                g_pm.bq_startup_option0_target =
+                    BQ25731_BuildStartupOption0(raw16);
+                g_pm.bq_init =
+                    (g_pm.bq_startup_option0_target == raw16) ?
+                    PM_BQ_INIT_READ_OPTION4 :
+                    PM_BQ_INIT_WRITE_OPTION0;
+            }
             g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             PowerManager_SetState(POWER_MANAGER_BQ_ADC_SETUP);
+            break;
+
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION0:
+            g_pm.bq_init = PM_BQ_INIT_VERIFY_OPTION0;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_READ_OPTION4:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_option4 = raw16;
+            if (g_pm.bq_init == PM_BQ_INIT_VERIFY_OPTION4) {
+                if ((raw16 & BQ25731_CHARGE_OPTION4_DITHER_MASK) !=
+                    (g_pm.bq_startup_option4_target &
+                     BQ25731_CHARGE_OPTION4_DITHER_MASK)) {
+                    PowerManager_HandleBqError(
+                        TPS25751_COMMAND_ERROR, now_ms);
+                    break;
+                }
+                g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+                Debug_Printf("[BQ-INIT] OOA=%u FSW=%lukHz DITHER=+/-%lu%% Option0=0x%04X Option4=0x%04X verified",
+                             (g_pm.status.bq.charge_option0 &
+                              BQ25731_CHARGE_OPTION0_EN_OOA) != 0U ? 1U : 0U,
+                             (unsigned long)BQ25731_DecodePwmFrequencyKhz(
+                                 g_pm.status.bq.charge_option0),
+                             (unsigned long)BQ25731_DecodeDitherPercent(
+                                 g_pm.status.bq.charge_option4),
+                             g_pm.status.bq.charge_option0,
+                             g_pm.status.bq.charge_option4);
+            } else {
+                g_pm.bq_startup_option4_target =
+                    BQ25731_BuildStartupOption4(raw16);
+                g_pm.bq_init =
+                    (g_pm.bq_startup_option4_target == raw16) ?
+                    PM_BQ_INIT_WRITE_ADC :
+                    PM_BQ_INIT_WRITE_OPTION4;
+            }
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION4:
+            g_pm.bq_init = PM_BQ_INIT_VERIFY_OPTION4;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             break;
 
         case PM_JOB_BQ_WRITE_ADC:
@@ -1534,7 +1618,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.next_bq_telemetry_ms = now_ms;
             g_pm.next_bq_config_ms = now_ms;
             PowerManager_SetState(POWER_MANAGER_RUN);
-            Debug_Printf("[BQ] TPS EEPROM owns power configuration; STM writes ADC_OPTION only for telemetry");
+            Debug_Printf("[BQ] TPS EEPROM owns power limits; STM startup writes only OOA/PWM_FREQ/DITHER and ADC_OPTION");
             break;
 
         case PM_JOB_BQ_READ_CURRENT:
@@ -1778,6 +1862,24 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION0:
+            bq_status = BQ25731_StartWriteStartupOption0(
+                &g_pm.bq, g_pm.bq_startup_option0_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_READ_OPTION4:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGE_OPTION4);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION4:
+            bq_status = BQ25731_StartWriteStartupOption4(
+                &g_pm.bq, g_pm.bq_startup_option4_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
         case PM_JOB_BQ_WRITE_ADC:
             bq_status = BQ25731_StartConfigureMonitoringAdc(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
@@ -1994,6 +2096,16 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         switch (g_pm.bq_init) {
             case PM_BQ_INIT_READ_ID: return PM_JOB_BQ_READ_ID;
             case PM_BQ_INIT_READ_OPTION0: return PM_JOB_BQ_READ_OPTION0;
+            case PM_BQ_INIT_WRITE_OPTION0:
+                return PM_JOB_BQ_WRITE_STARTUP_OPTION0;
+            case PM_BQ_INIT_VERIFY_OPTION0:
+                return PM_JOB_BQ_READ_OPTION0;
+            case PM_BQ_INIT_READ_OPTION4:
+                return PM_JOB_BQ_READ_OPTION4;
+            case PM_BQ_INIT_WRITE_OPTION4:
+                return PM_JOB_BQ_WRITE_STARTUP_OPTION4;
+            case PM_BQ_INIT_VERIFY_OPTION4:
+                return PM_JOB_BQ_READ_OPTION4;
             case PM_BQ_INIT_WRITE_ADC: return PM_JOB_BQ_WRITE_ADC;
             case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
             default: break;
