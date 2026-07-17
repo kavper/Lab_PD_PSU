@@ -3,6 +3,7 @@
 #include "debug_uart.h"
 #include "tps_int_event.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define PM_MODE_POLL_MS              100U
@@ -590,40 +591,81 @@ static void PowerManager_TryLogContractPdos(void)
 
     selected_index = g_pm.status.tps.active_rdo.object_position;
 
-    Debug_Printf("[PD-PDO] role=%s list=%s count=%u requested=PDO%u active=PDO%u contract=%lumV/%lumA/%lumW",
+    Debug_Printf("[PD-PDO] ");
+    Debug_Printf("[PD-PDO] =========================== USB-C PD PDO TABLE ===========================");
+    Debug_Printf("[PD-PDO] Role: %-6s | List: %-14s | Entries: %u",
                  PowerManager_RoleToString(g_pm.status.tps.role),
-                 list_name, count, selected_index, selected_index,
-                 (unsigned long)g_pm.status.pd_snapshot.contract_voltage_mv,
-                 (unsigned long)g_pm.status.pd_snapshot.contract_current_ma,
-                 (unsigned long)g_pm.status.pd_snapshot.contract_power_mw);
+                 list_name, count);
+    Debug_Printf("[PD-PDO] +-----+---------+-------------------+-------------------+-----------+-----------------------+");
+    Debug_Printf("[PD-PDO] | PDO | TYPE    | VOLTAGE           | CURRENT LIMIT     | MAX POWER | STATE                 |");
+    Debug_Printf("[PD-PDO] +-----+---------+-------------------+-------------------+-----------+-----------------------+");
     for (i = 0U; i < count; ++i) {
+        char voltage_text[32];
+        char current_text[32];
+        char power_text[20];
         uint8_t index = (uint8_t)(i + 1U);
         uint32_t raw = (local_raw != NULL) ?
                        local_raw[i] : g_pm.partner_source_caps.pdo[i].raw;
         TPS25751_Pdo_t pdo = TPS25751_DecodePdo(raw);
-        const char *marker = (index == selected_index) ?
-                             "--> SELECTED+ACTIVE" : "   ";
+        const char *state = (index == selected_index) ?
+                            "<-- SELECTED + ACTIVE" : "";
+        const char *type;
         uint32_t supply_type = (raw >> 30) & 0x03U;
         uint32_t apdo_type = (raw >> 28) & 0x03U;
 
+        (void)snprintf(voltage_text, sizeof(voltage_text),
+                       "%lu.%03lu-%lu.%03lu V",
+                       (unsigned long)(pdo.min_voltage_mv / 1000U),
+                       (unsigned long)(pdo.min_voltage_mv % 1000U),
+                       (unsigned long)(pdo.max_voltage_mv / 1000U),
+                       (unsigned long)(pdo.max_voltage_mv % 1000U));
+        (void)snprintf(power_text, sizeof(power_text), "%lu.%03lu W",
+                       (unsigned long)(pdo.power_mw / 1000U),
+                       (unsigned long)(pdo.power_mw % 1000U));
+
         if ((supply_type == 3U) && (apdo_type == 2U)) {
-            Debug_Printf("[PD-PDO] %-19s %s PDO%u SPR_AVS 9-15V:%lumA 15-20V:%lumA raw=0x%08lX",
-                         marker, list_name, index,
-                         (unsigned long)(((raw >> 10) & 0x3FFU) * 10U),
-                         (unsigned long)((raw & 0x3FFU) * 10U),
-                         (unsigned long)raw);
+            type = "SPR AVS";
+            (void)snprintf(current_text, sizeof(current_text),
+                           "%lu.%03lu/%lu.%03lu A",
+                           (unsigned long)((((raw >> 10) & 0x3FFU) * 10U) / 1000U),
+                           (unsigned long)((((raw >> 10) & 0x3FFU) * 10U) % 1000U),
+                           (unsigned long)(((raw & 0x3FFU) * 10U) / 1000U),
+                           (unsigned long)(((raw & 0x3FFU) * 10U) % 1000U));
         } else {
-            const char *type = (supply_type == 0U) ? "FIXED" :
-                               ((supply_type == 3U) ? "PPS" : "OTHER");
-            Debug_Printf("[PD-PDO] %-19s %s PDO%u %s %lu-%lumV %lumA max=%lumW raw=0x%08lX",
-                         marker, list_name, index, type,
-                         (unsigned long)pdo.min_voltage_mv,
-                         (unsigned long)pdo.max_voltage_mv,
-                         (unsigned long)pdo.current_ma,
-                         (unsigned long)pdo.power_mw,
-                         (unsigned long)raw);
+            type = (supply_type == 0U) ? "FIXED" :
+                   ((supply_type == 1U) ? "BATTERY" :
+                   ((supply_type == 2U) ? "VARIABLE" : "PPS"));
+            if (pdo.current_ma != 0U) {
+                (void)snprintf(current_text, sizeof(current_text),
+                               "%lu.%03lu A",
+                               (unsigned long)(pdo.current_ma / 1000U),
+                               (unsigned long)(pdo.current_ma % 1000U));
+            } else {
+                (void)snprintf(current_text, sizeof(current_text), "power based");
+            }
         }
+
+        if (pdo.min_voltage_mv == pdo.max_voltage_mv) {
+            (void)snprintf(voltage_text, sizeof(voltage_text), "%lu.%03lu V",
+                           (unsigned long)(pdo.voltage_mv / 1000U),
+                           (unsigned long)(pdo.voltage_mv % 1000U));
+        }
+
+        Debug_Printf("[PD-PDO] | %3u | %-7s | %-17s | %-17s | %-9s | %-21s |",
+                     index, type, voltage_text, current_text, power_text, state);
     }
+
+    Debug_Printf("[PD-PDO] +-----+---------+-------------------+-------------------+-----------+-----------------------+");
+    Debug_Printf("[PD-PDO] ACTIVE CONTRACT: PDO%u -> %lu.%03lu V x %lu.%03lu A = %lu.%03lu W",
+                 selected_index,
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_voltage_mv / 1000U),
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_voltage_mv % 1000U),
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_current_ma / 1000U),
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_current_ma % 1000U),
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_power_mw / 1000U),
+                 (unsigned long)(g_pm.status.pd_snapshot.contract_power_mw % 1000U));
+    Debug_Printf("[PD-PDO] ========================================================================");
+    Debug_Printf("[PD-PDO] ");
 
     g_pm.pdo_report_pending = false;
 }
