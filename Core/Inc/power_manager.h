@@ -96,6 +96,5 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode);
 PowerManager_State_t PowerManager_GetState(void);
 BQ25731_Status_t PowerManager_GetBqStatus(void);
 bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out);
-bool PowerManager_IsPdCycleTestEnabled(void);
 
 #endif

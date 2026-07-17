@@ -23,8 +23,6 @@
 #define PM_POLICY_ROLE_DRIFT_MS       750U
 #define PM_POLICY_SWAP_RETRY_MS      3000U
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
-#define PM_SINK_TARGET_POWER_MW    100000U
-
 typedef enum {
     PM_JOB_NONE = 0,
     PM_JOB_READ_MODE,
@@ -45,10 +43,6 @@ typedef enum {
     PM_JOB_GET_SINK_CAPS,
     PM_JOB_READ_SINK_CAPS,
     PM_JOB_READ_SOURCE_CAPS,
-    PM_JOB_READ_LOCAL_SINK_CAPS,
-    PM_JOB_READ_AUTO_SINK_POLICY,
-    PM_JOB_WRITE_AUTO_SINK_POLICY,
-    PM_JOB_RENEGOTIATE_SOURCE_CAPS,
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_READ_OPTION0,
@@ -57,11 +51,7 @@ typedef enum {
     PM_JOB_BQ_WRITE_STARTUP_OPTION4,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
-    PM_JOB_BQ_READ_CURRENT,
-    PM_JOB_BQ_READ_VOLTAGE,
-    PM_JOB_BQ_READ_IIN,
     PM_JOB_BQ_READ_ID,
-    PM_JOB_BQ_READ_ADC,
     PM_JOB_BQ_READ_CONFIG_BLOCK,
     PM_JOB_BQ_READ_STATUS_BLOCK,
     PM_JOB_BQ_READ_ADC_BLOCK
@@ -87,10 +77,6 @@ typedef enum {
     PM_POLICY_GET_SINK_CAPS,
     PM_POLICY_READ_SINK_CAPS,
     PM_POLICY_READ_SOURCE_CAPS,
-    PM_POLICY_READ_LOCAL_SINK_CAPS,
-    PM_POLICY_READ_AUTO_SINK_POLICY,
-    PM_POLICY_WRITE_AUTO_SINK_POLICY,
-    PM_POLICY_RENEGOTIATE_SOURCE_CAPS,
     PM_POLICY_DECIDE,
     PM_POLICY_SWAP_TO_SOURCE,
     PM_POLICY_SWAP_TO_SINK,
@@ -108,7 +94,6 @@ typedef struct {
     PowerManager_BqInit_t bq_init;
     PowerManager_PolicyPhase_t policy_phase;
     uint8_t telemetry_phase;
-    uint8_t bq_phase;
     uint8_t bq_telemetry_phase;
     uint8_t port_config[TPS25751_PORT_CONFIG_LEN];
     uint8_t int_mask[TPS_INT_EVENT_BYTES];
@@ -142,14 +127,11 @@ typedef struct {
     uint8_t policy_cap_attempts;
     bool previous_attached;
     bool policy_swap_attempted;
-    bool policy_100w_attempted;
     bool partner_source_caps_current;
     bool partner_sink_observed;
     TPS25751_PowerRole_t policy_desired_role;
     TPS25751_Capabilities_t partner_sink_caps;
     TPS25751_Capabilities_t partner_source_caps;
-    TPS25751_Capabilities_t local_sink_caps;
-    TPS25751_AutoNegotiateSink_t auto_sink_policy;
 } PowerManager_Context_t;
 
 static PowerManager_Context_t g_pm;
@@ -206,10 +188,6 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_GET_SINK_CAPS: return "GET_SINK_CAPS";
         case PM_JOB_READ_SINK_CAPS: return "READ_SINK_CAPS";
         case PM_JOB_READ_SOURCE_CAPS: return "READ_SOURCE_CAPS";
-        case PM_JOB_READ_LOCAL_SINK_CAPS: return "READ_LOCAL_SINK_CAPS";
-        case PM_JOB_READ_AUTO_SINK_POLICY: return "READ_AUTO_SINK_POLICY";
-        case PM_JOB_WRITE_AUTO_SINK_POLICY: return "WRITE_AUTO_SINK_POLICY";
-        case PM_JOB_RENEGOTIATE_SOURCE_CAPS: return "RENEGOTIATE_SOURCE_CAPS";
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
@@ -218,11 +196,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_BQ_WRITE_STARTUP_OPTION4: return "BQ_WRITE_DITHER_OPTION4";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
-        case PM_JOB_BQ_READ_CURRENT: return "BQ_READ_CURRENT";
-        case PM_JOB_BQ_READ_VOLTAGE: return "BQ_READ_VOLTAGE";
-        case PM_JOB_BQ_READ_IIN: return "BQ_READ_IIN";
         case PM_JOB_BQ_READ_ID: return "BQ_READ_ID";
-        case PM_JOB_BQ_READ_ADC: return "BQ_READ_ADC";
         case PM_JOB_BQ_READ_CONFIG_BLOCK: return "BQ_READ_CONFIG";
         case PM_JOB_BQ_READ_STATUS_BLOCK: return "BQ_READ_STATUS";
         case PM_JOB_BQ_READ_ADC_BLOCK: return "BQ_READ_ADC_BLOCK";
@@ -563,131 +537,11 @@ static void PowerManager_LogCapabilities(
     }
 }
 
-static void PowerManager_LogSinkNegotiationLimit(void)
-{
-    const TPS25751_Pdo_t *active_pdo = &g_pm.status.tps.active_pdo;
-    const TPS25751_Rdo_t *active_rdo = &g_pm.status.tps.active_rdo;
-    const TPS25751_AutoNegotiateSink_t *policy = &g_pm.auto_sink_policy;
-    uint32_t local_power_mw = 0U;
-    uint32_t requested_power_mw = 0U;
-    const char *limiter = "NONE";
-    uint8_t i;
-
-    Debug_Printf("[PD-AUTO] raw=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-                 policy->raw[0], policy->raw[1], policy->raw[2],
-                 policy->raw[3], policy->raw[4], policy->raw[5],
-                 policy->raw[6], policy->raw[7], policy->raw[8],
-                 policy->raw[9], policy->raw[10], policy->raw[11],
-                 policy->raw[12], policy->raw[13], policy->raw[14],
-                 policy->raw[15], policy->raw[16], policy->raw[17],
-                 policy->raw[18], policy->raw[19], policy->raw[20],
-                 policy->raw[21], policy->raw[22], policy->raw[23]);
-    Debug_Printf("[PD-AUTO] min=%lumV max=%lumV min_power=%lumW mismatch=%lumW auto_min_v=%u auto_max_v=%u auto_min_power=%u no_mismatch=%u disable_on_mismatch=%u",
-                 (unsigned long)policy->min_voltage_mv,
-                 (unsigned long)policy->max_voltage_mv,
-                 (unsigned long)policy->sink_min_required_power_mw,
-                 (unsigned long)policy->capability_mismatch_power_mw,
-                 policy->auto_compute_min_voltage ? 1U : 0U,
-                 policy->auto_compute_max_voltage ? 1U : 0U,
-                 policy->auto_compute_min_power ? 1U : 0U,
-                 policy->no_capability_mismatch ? 1U : 0U,
-                 policy->auto_disable_sink_on_mismatch ? 1U : 0U);
-
-    if (!active_pdo->valid || !active_rdo->valid) {
-        return;
-    }
-    requested_power_mw = active_pdo->voltage_mv *
-                         active_rdo->operating_current_ma / 1000U;
-    for (i = 0U; i < g_pm.local_sink_caps.count; ++i) {
-        const TPS25751_Pdo_t *pdo = &g_pm.local_sink_caps.pdo[i];
-        if ((pdo->voltage_mv == active_pdo->voltage_mv) &&
-            (pdo->power_mw > local_power_mw)) {
-            local_power_mw = pdo->power_mw;
-        }
-    }
-
-    if (active_pdo->power_mw > requested_power_mw) {
-        if ((!policy->auto_compute_min_power) &&
-            (policy->sink_min_required_power_mw == requested_power_mw)) {
-            limiter = "AUTO_NEGOTIATE_SINK_EXPLICIT_MIN_POWER";
-        } else if (policy->auto_compute_min_power &&
-                   (local_power_mw == requested_power_mw)) {
-            limiter = "TX_SINK_CAPS_AUTO_COMPUTED_POWER";
-        } else if ((local_power_mw != 0U) &&
-                   (local_power_mw < active_pdo->power_mw)) {
-            limiter = "TX_SINK_CAPS";
-        } else {
-            limiter = "TPS_SINK_NEGOTIATION_POLICY";
-        }
-    }
-    Debug_Printf("[PD-LIMIT] source_offer=%lumW local_sink=%lumW requested=%lumW RDO=0x%08lX limiter=%s",
-                 (unsigned long)active_pdo->power_mw,
-                 (unsigned long)local_power_mw,
-                 (unsigned long)requested_power_mw,
-                 (unsigned long)active_rdo->raw,
-                 limiter);
-}
-
-static bool PowerManager_ShouldRequest100WSinkContract(void)
-{
-    const TPS25751_Pdo_t *active_pdo = &g_pm.status.tps.active_pdo;
-    const TPS25751_Rdo_t *active_rdo = &g_pm.status.tps.active_rdo;
-    uint8_t i;
-
-    if (g_pm.policy_100w_attempted ||
-        (g_pm.status.tps.role != TPS25751_ROLE_SINK) ||
-        !active_pdo->valid || !active_rdo->valid ||
-        (active_pdo->power_mw < PM_SINK_TARGET_POWER_MW) ||
-        (g_pm.auto_sink_policy.sink_min_required_power_mw >=
-         PM_SINK_TARGET_POWER_MW)) {
-        return false;
-    }
-
-    /* Do not ask TPS for more than the EEPROM capabilities permit.  The
-     * runtime policy is raised only when both the partner's selected Source
-     * PDO and our own TX Sink PDO support the complete 100 W contract. */
-    for (i = 0U; i < g_pm.local_sink_caps.count; ++i) {
-        const TPS25751_Pdo_t *local = &g_pm.local_sink_caps.pdo[i];
-
-        if ((local->voltage_mv == active_pdo->voltage_mv) &&
-            (local->power_mw >= PM_SINK_TARGET_POWER_MW)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool PowerManager_TrySchedule100WSinkContract(uint32_t now_ms)
-{
-    uint32_t previous_power_mw;
-
-    if (!PowerManager_ShouldRequest100WSinkContract()) {
-        return false;
-    }
-
-    previous_power_mw = g_pm.auto_sink_policy.sink_min_required_power_mw;
-    if (!TPS25751_PatchAutoNegotiateSinkMinPower(
-            g_pm.auto_sink_policy.raw,
-            PM_SINK_TARGET_POWER_MW)) {
-        return false;
-    }
-
-    g_pm.policy_100w_attempted = true;
-    g_pm.policy_phase = PM_POLICY_WRITE_AUTO_SINK_POLICY;
-    g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-    Debug_Printf("[PD-MAX] partner Source PDO and local Sink PDO support 100W; changing only AUTO_NEGOTIATE_SINK min_power %lu->100000mW",
-                 (unsigned long)previous_power_mw);
-    return true;
-}
-
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
-    memset(&g_pm.local_sink_caps, 0, sizeof(g_pm.local_sink_caps));
-    memset(&g_pm.auto_sink_policy, 0, sizeof(g_pm.auto_sink_policy));
     g_pm.policy_swap_attempted = false;
-    g_pm.policy_100w_attempted = false;
     g_pm.partner_source_caps_current = false;
     g_pm.partner_sink_observed = false;
     g_pm.policy_cap_attempts = 0U;
@@ -1061,34 +915,9 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_READ_SOURCE_CAPS) {
             memset(&g_pm.partner_source_caps, 0,
                    sizeof(g_pm.partner_source_caps));
-            g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
+            g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             PowerManager_HandleTpsError(operation_status, now_ms);
-        } else if (completed_job == PM_JOB_READ_LOCAL_SINK_CAPS) {
-            memset(&g_pm.local_sink_caps, 0,
-                   sizeof(g_pm.local_sink_caps));
-            g_pm.policy_phase = PM_POLICY_READ_AUTO_SINK_POLICY;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-POLICY] local TX_SINK_CAPS read failed: %s",
-                         TPS25751_StatusToString(operation_status));
-        } else if (completed_job == PM_JOB_READ_AUTO_SINK_POLICY) {
-            memset(&g_pm.auto_sink_policy, 0,
-                   sizeof(g_pm.auto_sink_policy));
-            g_pm.policy_phase = PM_POLICY_DECIDE;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-POLICY] AUTO_NEGOTIATE_SINK read failed: %s",
-                         TPS25751_StatusToString(operation_status));
-        } else if ((completed_job == PM_JOB_WRITE_AUTO_SINK_POLICY) ||
-                   (completed_job == PM_JOB_RENEGOTIATE_SOURCE_CAPS)) {
-            g_pm.policy_phase = PM_POLICY_DECIDE;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-MAX] 100W renegotiation failed step=%s task=%u status=%s; keeping existing valid contract",
-                         PowerManager_JobToString(completed_job),
-                         g_pm.tps.task_return_code,
-                         TPS25751_StatusToString(operation_status));
-            if (operation_status != TPS25751_COMMAND_ERROR) {
-                PowerManager_HandleTpsError(operation_status, now_ms);
-            }
         } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
                    (completed_job == PM_JOB_SWAP_TO_SINK)) {
             g_pm.policy_phase = PM_POLICY_DONE;
@@ -1104,11 +933,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if ((completed_job == PM_JOB_BQ_READ_CONFIG_BLOCK) ||
                    (completed_job == PM_JOB_BQ_READ_STATUS_BLOCK) ||
                    (completed_job == PM_JOB_BQ_READ_ADC_BLOCK) ||
-                   (completed_job == PM_JOB_BQ_READ_CURRENT) ||
-                   (completed_job == PM_JOB_BQ_READ_VOLTAGE) ||
-                   (completed_job == PM_JOB_BQ_READ_IIN) ||
-                   (completed_job == PM_JOB_BQ_READ_ID) ||
-                   (completed_job == PM_JOB_BQ_READ_ADC)) {
+                   (completed_job == PM_JOB_BQ_READ_ID)) {
             PowerManager_HandleBqTelemetryError(operation_status, now_ms);
         } else if (completed_job >= PM_JOB_BQ_READ_OPTION0) {
             PowerManager_HandleBqError(operation_status, now_ms);
@@ -1283,10 +1108,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.status.tps.active_rdo_raw);
             g_pm.telemetry_phase = 7U;
             PowerManager_UpdatePdSnapshot();
-            /* The first AUTO_NEGOTIATE_SINK read can finish before ACTIVE_RDO
-             * becomes valid.  Re-evaluate here so a single early snapshot
-             * cannot permanently suppress the 100 W renegotiation. */
-            (void)PowerManager_TrySchedule100WSinkContract(now_ms);
             break;
 
         case PM_JOB_READ_EVENT:
@@ -1331,7 +1152,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
                 Debug_Printf("[PD-POLICY] invalid Source PDO payload; ignoring it");
-                g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
+                g_pm.policy_phase = PM_POLICY_DECIDE;
                 g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
                 break;
             }
@@ -1341,53 +1162,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             }
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
-            g_pm.policy_phase = PM_POLICY_READ_LOCAL_SINK_CAPS;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            break;
-
-        case PM_JOB_READ_LOCAL_SINK_CAPS:
-            if (!TPS25751_DecodeCapabilities(&g_pm.local_sink_caps,
-                                             data, length)) {
-                memset(&g_pm.local_sink_caps, 0,
-                       sizeof(g_pm.local_sink_caps));
-                Debug_Printf("[PD-POLICY] invalid local TX_SINK_CAPS payload");
-            } else {
-                PowerManager_LogCapabilities("LOCAL_SINK",
-                                             &g_pm.local_sink_caps);
-            }
-            g_pm.policy_phase = PM_POLICY_READ_AUTO_SINK_POLICY;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            break;
-
-        case PM_JOB_READ_AUTO_SINK_POLICY:
-            if (!TPS25751_DecodeAutoNegotiateSink(&g_pm.auto_sink_policy,
-                                                  data, length)) {
-                memset(&g_pm.auto_sink_policy, 0,
-                       sizeof(g_pm.auto_sink_policy));
-                Debug_Printf("[PD-POLICY] invalid AUTO_NEGOTIATE_SINK payload");
-            } else {
-                PowerManager_LogSinkNegotiationLimit();
-            }
-            if (!PowerManager_TrySchedule100WSinkContract(now_ms)) {
-                g_pm.policy_phase = PM_POLICY_DECIDE;
-                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            }
-            break;
-
-        case PM_JOB_WRITE_AUTO_SINK_POLICY:
-            g_pm.policy_phase = PM_POLICY_RENEGOTIATE_SOURCE_CAPS;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-MAX] AUTO_NEGOTIATE_SINK updated in TPS RAM; requesting official GSrC renegotiation");
-            break;
-
-        case PM_JOB_RENEGOTIATE_SOURCE_CAPS:
-            (void)TPS25751_DecodeAutoNegotiateSink(
-                &g_pm.auto_sink_policy,
-                g_pm.auto_sink_policy.raw,
-                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-MAX] GSrC accepted; waiting for TPS-generated 100W RDO (PDO/RDO were not modified by firmware)");
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
@@ -1501,42 +1277,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             Debug_Printf("[BQ] TPS EEPROM owns power limits; STM startup writes only OOA/PWM_FREQ/DITHER and ADC_OPTION");
             break;
 
-        case PM_JOB_BQ_READ_CURRENT:
-            raw16 = PowerManager_ResultLe16(&valid);
-            if (!valid) {
-                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
-                break;
-            }
-            g_pm.status.bq.charge_current = raw16;
-            g_pm.status.bq.charge_current_ma =
-                BQ25731_DecodeChargeCurrentMa(raw16);
-            g_pm.bq_phase = 1U;
-            break;
-
-        case PM_JOB_BQ_READ_VOLTAGE:
-            raw16 = PowerManager_ResultLe16(&valid);
-            if (!valid) {
-                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
-                break;
-            }
-            g_pm.status.bq.charge_voltage = raw16;
-            g_pm.status.bq.charge_voltage_mv =
-                BQ25731_DecodeChargeVoltageMv(raw16);
-            g_pm.bq_phase = 2U;
-            break;
-
-        case PM_JOB_BQ_READ_IIN:
-            raw16 = PowerManager_ResultLe16(&valid);
-            if (!valid) {
-                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
-                break;
-            }
-            g_pm.status.bq.iin_host = raw16;
-            g_pm.status.bq.input_current_ma =
-                BQ25731_DecodeInputCurrentMa(raw16);
-            g_pm.bq_phase = 3U;
-            break;
-
         case PM_JOB_BQ_READ_ID:
             if ((data == NULL) || (length < 2U)) {
                 PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
@@ -1552,23 +1292,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.bq_init = PM_BQ_INIT_READ_OPTION0;
                 g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             }
-            break;
-
-        case PM_JOB_BQ_READ_ADC:
-            raw16 = PowerManager_ResultLe16(&valid);
-            if (!valid) {
-                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
-                break;
-            }
-            g_pm.status.bq.adc_option = raw16;
-            g_pm.status.bq.adc_configured =
-                ((raw16 & BQ25731_ADC_OPTION_VERIFY_MASK) ==
-                (BQ25731_ADC_OPTION_MONITORING &
-                 BQ25731_ADC_OPTION_VERIFY_MASK));
-            g_pm.status.bq.online = true;
-            g_pm.status.bq.updated_ms = now_ms;
-            g_pm.bq_phase = 0U;
-            PowerManager_LogBq();
             break;
 
         case PM_JOB_BQ_READ_CONFIG_BLOCK:
@@ -1700,26 +1423,6 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                 &g_pm.tps, TPS25751_REG_RX_SOURCE_CAPS,
                 TPS25751_RX_CAPS_LEN);
             break;
-        case PM_JOB_READ_LOCAL_SINK_CAPS:
-            status = TPS25751_StartReadRegister(
-                &g_pm.tps, TPS25751_REG_TX_SINK_CAPS,
-                TPS25751_TX_SINK_CAPS_LEN);
-            break;
-        case PM_JOB_READ_AUTO_SINK_POLICY:
-            status = TPS25751_StartReadRegister(
-                &g_pm.tps, TPS25751_REG_AUTO_NEGOTIATE_SINK,
-                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
-            break;
-        case PM_JOB_WRITE_AUTO_SINK_POLICY:
-            status = TPS25751_StartWriteRegister(
-                &g_pm.tps, TPS25751_REG_AUTO_NEGOTIATE_SINK,
-                g_pm.auto_sink_policy.raw,
-                TPS25751_AUTO_NEGOTIATE_SINK_LEN);
-            break;
-        case PM_JOB_RENEGOTIATE_SOURCE_CAPS:
-            status = TPS25751_StartCommand(&g_pm.tps, "GSrC",
-                                           NULL, 0U, 1U);
-            break;
         case PM_JOB_SWAP_TO_SOURCE:
             status = TPS25751_StartCommand(&g_pm.tps, "SWSr",
                                            NULL, 0U, 1U);
@@ -1758,27 +1461,8 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                                                 TPS25751_BUSY;
             break;
         case PM_JOB_BQ_VERIFY_ADC:
-        case PM_JOB_BQ_READ_ADC:
             bq_status = BQ25731_StartRead16(&g_pm.bq,
                                             BQ25731_REG_ADC_OPTION);
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_READ_CURRENT:
-            bq_status = BQ25731_StartRead16(&g_pm.bq,
-                                            BQ25731_REG_CHARGE_CURRENT);
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_READ_VOLTAGE:
-            bq_status = BQ25731_StartRead16(&g_pm.bq,
-                                            BQ25731_REG_CHARGE_VOLTAGE);
-            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
-                                                TPS25751_BUSY;
-            break;
-        case PM_JOB_BQ_READ_IIN:
-            bq_status = BQ25731_StartRead16(&g_pm.bq,
-                                            BQ25731_REG_IIN_HOST);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
@@ -1868,14 +1552,6 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         case PM_POLICY_GET_SINK_CAPS: return PM_JOB_GET_SINK_CAPS;
         case PM_POLICY_READ_SINK_CAPS: return PM_JOB_READ_SINK_CAPS;
         case PM_POLICY_READ_SOURCE_CAPS: return PM_JOB_READ_SOURCE_CAPS;
-        case PM_POLICY_READ_LOCAL_SINK_CAPS:
-            return PM_JOB_READ_LOCAL_SINK_CAPS;
-        case PM_POLICY_READ_AUTO_SINK_POLICY:
-            return PM_JOB_READ_AUTO_SINK_POLICY;
-        case PM_POLICY_WRITE_AUTO_SINK_POLICY:
-            return PM_JOB_WRITE_AUTO_SINK_POLICY;
-        case PM_POLICY_RENEGOTIATE_SOURCE_CAPS:
-            return PM_JOB_RENEGOTIATE_SOURCE_CAPS;
         case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
         case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
@@ -2077,9 +1753,4 @@ bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out)
            (g_pm.status.pd_snapshot.active_rdo_raw != 0U) &&
            (g_pm.status.pd_snapshot.contract_voltage_mv != 0U) &&
            (g_pm.status.pd_snapshot.contract_power_mw != 0U);
-}
-
-bool PowerManager_IsPdCycleTestEnabled(void)
-{
-    return false;
 }

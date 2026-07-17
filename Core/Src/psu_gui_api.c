@@ -240,10 +240,6 @@ PSU_GuiControlMode_t PSU_GuiGetControlMode(void)
 
 void PSU_Start(void)
 {
-    if (PowerManager_IsPdCycleTestEnabled()) {
-        return;
-    }
-
     App_ClearFaults();
     App_SetRequestedMode(MODE_CV);
 }
