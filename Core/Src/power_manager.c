@@ -129,12 +129,24 @@ typedef struct {
     bool policy_swap_attempted;
     bool partner_source_caps_current;
     bool partner_sink_observed;
+    bool pdo_report_pending;
     TPS25751_PowerRole_t policy_desired_role;
     TPS25751_Capabilities_t partner_sink_caps;
     TPS25751_Capabilities_t partner_source_caps;
 } PowerManager_Context_t;
 
 static PowerManager_Context_t g_pm;
+
+/* Exact Source PDO set programmed in the current TPS25751 EEPROM image. */
+static const uint32_t g_source_pdo_raw[] = {
+    0x200191F4UL, /* 5 V / 5 A */
+    0x0002D12CUL, /* 9 V / 3 A */
+    0x0003C12CUL, /* 12 V / 3 A */
+    0x0004B12CUL, /* 15 V / 3 A */
+    0x200641F4UL, /* 20 V / 5 A */
+    0xE3A4B1F4UL, /* SPR AVS: 9-15 V / 3 A, 15-20 V / 5 A */
+    0xC19032E4UL  /* PPS: 5-20 V / 5 A */
+};
 
 static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role);
 
@@ -333,6 +345,11 @@ static void PowerManager_UpdatePdSnapshot(void)
     if (t->active_pdo.valid) {
         snapshot->contract_voltage_mv = t->active_pdo.voltage_mv;
         current_ma = t->active_pdo.current_ma;
+    }
+    if (t->active_rdo.valid &&
+        (t->active_rdo.requested_voltage_mv != 0U)) {
+        snapshot->contract_voltage_mv =
+            t->active_rdo.requested_voltage_mv;
     }
     if (t->active_rdo.valid &&
         (t->active_rdo.operating_current_ma != 0U)) {
@@ -537,6 +554,80 @@ static void PowerManager_LogCapabilities(
     }
 }
 
+static void PowerManager_TryLogContractPdos(void)
+{
+    const uint32_t *local_raw = g_source_pdo_raw;
+    const char *list_name;
+    uint8_t selected_index;
+    uint8_t count;
+    uint8_t i;
+
+    if (!g_pm.pdo_report_pending ||
+        !PowerManager_HasTypecPowerConnection() ||
+        !g_pm.status.tps.active_pdo.valid ||
+        !g_pm.status.tps.active_rdo.valid) {
+        return;
+    }
+
+    if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) {
+        count = (uint8_t)(sizeof(g_source_pdo_raw) /
+                          sizeof(g_source_pdo_raw[0]));
+        list_name = "LOCAL_CONFIG";
+    } else if (g_pm.status.tps.role == TPS25751_ROLE_SINK) {
+        if (!g_pm.partner_source_caps_current) {
+            return;
+        }
+        count = g_pm.partner_source_caps.count;
+        local_raw = NULL;
+        list_name = "PARTNER_SOURCE";
+    } else {
+        return;
+    }
+
+    if (count == 0U) {
+        return;
+    }
+
+    selected_index = g_pm.status.tps.active_rdo.object_position;
+
+    Debug_Printf("[PD-PDO] role=%s list=%s count=%u requested=PDO%u active=PDO%u contract=%lumV/%lumA/%lumW",
+                 PowerManager_RoleToString(g_pm.status.tps.role),
+                 list_name, count, selected_index, selected_index,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_voltage_mv,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_current_ma,
+                 (unsigned long)g_pm.status.pd_snapshot.contract_power_mw);
+    for (i = 0U; i < count; ++i) {
+        uint8_t index = (uint8_t)(i + 1U);
+        uint32_t raw = (local_raw != NULL) ?
+                       local_raw[i] : g_pm.partner_source_caps.pdo[i].raw;
+        TPS25751_Pdo_t pdo = TPS25751_DecodePdo(raw);
+        const char *marker = (index == selected_index) ?
+                             "--> SELECTED+ACTIVE" : "   ";
+        uint32_t supply_type = (raw >> 30) & 0x03U;
+        uint32_t apdo_type = (raw >> 28) & 0x03U;
+
+        if ((supply_type == 3U) && (apdo_type == 2U)) {
+            Debug_Printf("[PD-PDO] %-19s %s PDO%u SPR_AVS 9-15V:%lumA 15-20V:%lumA raw=0x%08lX",
+                         marker, list_name, index,
+                         (unsigned long)(((raw >> 10) & 0x3FFU) * 10U),
+                         (unsigned long)((raw & 0x3FFU) * 10U),
+                         (unsigned long)raw);
+        } else {
+            const char *type = (supply_type == 0U) ? "FIXED" :
+                               ((supply_type == 3U) ? "PPS" : "OTHER");
+            Debug_Printf("[PD-PDO] %-19s %s PDO%u %s %lu-%lumV %lumA max=%lumW raw=0x%08lX",
+                         marker, list_name, index, type,
+                         (unsigned long)pdo.min_voltage_mv,
+                         (unsigned long)pdo.max_voltage_mv,
+                         (unsigned long)pdo.current_ma,
+                         (unsigned long)pdo.power_mw,
+                         (unsigned long)raw);
+        }
+    }
+
+    g_pm.pdo_report_pending = false;
+}
+
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
@@ -547,6 +638,7 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.policy_cap_attempts = 0U;
     g_pm.policy_role_mismatch_since_ms = 0U;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
+    g_pm.pdo_report_pending = attached;
 
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
@@ -876,6 +968,10 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     if (event.source_caps_received || event.new_contract_consumer) {
         g_pm.partner_source_caps_current = true;
     }
+    if (event.plug_changed || event.power_swap_complete ||
+        event.source_caps_received) {
+        g_pm.pdo_report_pending = g_pm.status.tps.attached;
+    }
 }
 
 static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
@@ -1047,6 +1143,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status_updated_ms = now_ms;
             if (g_pm.status.tps.attached &&
                 (g_pm.status.tps.role != old_role)) {
+                g_pm.pdo_report_pending = true;
                 Debug_Printf("[PD-ROLE] %s -> %s conn=%u STATUS=0x%02lX%08lX",
                              PowerManager_RoleToString(old_role),
                              PowerManager_RoleToString(g_pm.status.tps.role),
@@ -1095,6 +1192,10 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_READ_ACTIVE_PDO:
+            if (g_pm.status.tps.active_pdo_raw !=
+                TPS25751_ReadLe32(data)) {
+                g_pm.pdo_report_pending = g_pm.status.tps.attached;
+            }
             g_pm.status.tps.active_pdo_raw = TPS25751_ReadLe32(data);
             g_pm.status.tps.active_pdo = TPS25751_DecodePdo(
                 g_pm.status.tps.active_pdo_raw);
@@ -1103,11 +1204,17 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_READ_ACTIVE_RDO:
+            if (g_pm.status.tps.active_rdo_raw !=
+                TPS25751_ReadLe32(data)) {
+                g_pm.pdo_report_pending = g_pm.status.tps.attached;
+            }
             g_pm.status.tps.active_rdo_raw = TPS25751_ReadLe32(data);
             g_pm.status.tps.active_rdo = TPS25751_DecodeRdo(
-                g_pm.status.tps.active_rdo_raw);
+                g_pm.status.tps.active_rdo_raw,
+                &g_pm.status.tps.active_pdo);
             g_pm.telemetry_phase = 7U;
             PowerManager_UpdatePdSnapshot();
+            PowerManager_TryLogContractPdos();
             break;
 
         case PM_JOB_READ_EVENT:
@@ -1162,6 +1269,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             }
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
+            PowerManager_TryLogContractPdos();
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             break;
@@ -1396,11 +1504,13 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             break;
         case PM_JOB_READ_ACTIVE_PDO:
             status = TPS25751_StartReadRegister(&g_pm.tps,
-                TPS25751_REG_ACTIVE_PDO, TPS25751_ACTIVE_PDO_LEN);
+                TPS25751_REG_ACTIVE_PDO,
+                TPS25751_ACTIVE_PDO_PREFIX_LEN);
             break;
         case PM_JOB_READ_ACTIVE_RDO:
             status = TPS25751_StartReadRegister(&g_pm.tps,
-                TPS25751_REG_ACTIVE_RDO, TPS25751_ACTIVE_RDO_LEN);
+                TPS25751_REG_ACTIVE_RDO,
+                TPS25751_ACTIVE_RDO_PREFIX_LEN);
             break;
         case PM_JOB_READ_EVENT:
             status = TPS_IntEventStartRead(&g_pm.tps);

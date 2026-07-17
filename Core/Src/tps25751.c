@@ -388,7 +388,10 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
     }
 
     if (dev->operation == TPS25751_OP_READ_REGISTER) {
-        status = TPS25751_CheckRead(dev, true);
+        bool active_contract_register =
+            (dev->register_address == TPS25751_REG_ACTIVE_PDO) ||
+            (dev->register_address == TPS25751_REG_ACTIVE_RDO);
+        status = TPS25751_CheckRead(dev, !active_contract_register);
         TPS25751_Finish(dev, status);
         return status;
     }
@@ -658,13 +661,25 @@ TPS25751_Pdo_t TPS25751_DecodePdo(uint32_t raw)
         pdo.voltage_mv = pdo.max_voltage_mv;
         pdo.current_ma = (raw & 0x3FFU) * 10U;
         pdo.power_mw = pdo.voltage_mv * pdo.current_ma / 1000U;
-    } else if (supply_type == 3U && ((raw >> 28) & 0x03U) == 0U) {
-        pdo.valid = true;
-        pdo.min_voltage_mv = ((raw >> 8) & 0xFFU) * 100U;
-        pdo.max_voltage_mv = ((raw >> 17) & 0xFFU) * 100U;
-        pdo.voltage_mv = pdo.max_voltage_mv;
-        pdo.current_ma = (raw & 0x7FU) * 50U;
-        pdo.power_mw = pdo.voltage_mv * pdo.current_ma / 1000U;
+    } else if (supply_type == 3U) {
+        uint32_t apdo_type = (raw >> 28) & 0x03U;
+        if (apdo_type == 0U) {
+            pdo.valid = true;
+            pdo.min_voltage_mv = ((raw >> 8) & 0xFFU) * 100U;
+            pdo.max_voltage_mv = ((raw >> 17) & 0xFFU) * 100U;
+            pdo.voltage_mv = pdo.max_voltage_mv;
+            pdo.current_ma = (raw & 0x7FU) * 50U;
+            pdo.power_mw = pdo.voltage_mv * pdo.current_ma / 1000U;
+        } else if (apdo_type == 2U) {
+            /* Current TPS image uses SPR AVS 9..20 V.  Store the 15..20 V
+             * current limit, which determines its maximum advertised power. */
+            pdo.valid = true;
+            pdo.min_voltage_mv = 9000U;
+            pdo.max_voltage_mv = 20000U;
+            pdo.voltage_mv = pdo.max_voltage_mv;
+            pdo.current_ma = (raw & 0x3FFU) * 10U;
+            pdo.power_mw = 20000U * pdo.current_ma / 1000U;
+        }
     }
     return pdo;
 }
@@ -766,7 +781,9 @@ bool TPS25751_PatchAutoNegotiateSinkMinPower(
     return true;
 }
 
-TPS25751_Rdo_t TPS25751_DecodeRdo(uint32_t raw)
+TPS25751_Rdo_t TPS25751_DecodeRdo(
+    uint32_t raw,
+    const TPS25751_Pdo_t *pdo)
 {
     TPS25751_Rdo_t rdo;
 
@@ -776,8 +793,17 @@ TPS25751_Rdo_t TPS25751_DecodeRdo(uint32_t raw)
     if (rdo.valid) {
         rdo.object_position = (uint8_t)((raw >> 28) & 0x0FU);
         rdo.capability_mismatch = ((raw >> 26) & 1U) != 0U;
-        rdo.operating_current_ma = ((raw >> 10) & 0x3FFU) * 10U;
-        rdo.maximum_current_ma = (raw & 0x3FFU) * 10U;
+        if ((pdo != NULL) &&
+            (((pdo->raw >> 30) & 0x03U) == 3U)) {
+            rdo.requested_voltage_mv =
+                ((raw >> 9) & 0x0FFFU) * 20U;
+            rdo.operating_current_ma = (raw & 0x7FU) * 50U;
+            rdo.maximum_current_ma = rdo.operating_current_ma;
+        } else {
+            rdo.operating_current_ma =
+                ((raw >> 10) & 0x3FFU) * 10U;
+            rdo.maximum_current_ma = (raw & 0x3FFU) * 10U;
+        }
     }
     return rdo;
 }

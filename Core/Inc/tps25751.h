@@ -40,8 +40,8 @@
 #define TPS25751_RX_CAPS_LEN            53U
 #define TPS25751_TX_SINK_CAPS_LEN       53U
 #define TPS25751_AUTO_NEGOTIATE_SINK_LEN 24U
-#define TPS25751_ACTIVE_PDO_LEN         6U
-#define TPS25751_ACTIVE_RDO_LEN         12U
+#define TPS25751_ACTIVE_PDO_PREFIX_LEN  4U
+#define TPS25751_ACTIVE_RDO_PREFIX_LEN  4U
 #define TPS25751_POWER_STATUS_LEN       2U
 #define TPS25751_PD_STATUS_LEN          4U
 #define TPS25751_ADC_RESULTS_LEN        13U
@@ -101,6 +101,7 @@ typedef struct {
     bool valid;
     uint8_t object_position;
     bool capability_mismatch;
+    uint32_t requested_voltage_mv;
     uint32_t operating_current_ma;
     uint32_t maximum_current_ma;
 } TPS25751_Rdo_t;
@@ -231,7 +232,9 @@ void TPS25751_DecodePdStatus(TPS25751_Telemetry_t *telemetry,
 void TPS25751_DecodeAdcResults(TPS25751_Telemetry_t *telemetry,
                                const uint8_t data[TPS25751_ADC_RESULTS_LEN]);
 TPS25751_Pdo_t TPS25751_DecodePdo(uint32_t raw);
-TPS25751_Rdo_t TPS25751_DecodeRdo(uint32_t raw);
+TPS25751_Rdo_t TPS25751_DecodeRdo(
+    uint32_t raw,
+    const TPS25751_Pdo_t *pdo);
 bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
                                  const uint8_t *data,
                                  uint8_t length);
