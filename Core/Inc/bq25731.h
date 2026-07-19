@@ -20,10 +20,11 @@
 #define BQ25731_REG_ADC_IIN_CMPIN       0x2AU
 #define BQ25731_REG_ADC_VSYS_VBAT       0x2CU
 #define BQ25731_REG_MANUFACTURER_ID     0x2EU
+#define BQ25731_REG_CHARGE_OPTION1      0x30U
 #define BQ25731_REG_ADC_OPTION          0x3AU
 #define BQ25731_REG_CHARGE_OPTION4      0x3CU
 
-#define BQ25731_CONFIG_BLOCK_LEN        16U
+#define BQ25731_CONFIG_BLOCK_LEN         8U
 #define BQ25731_STATUS_BLOCK_LEN         6U
 #define BQ25731_ADC_BLOCK_LEN            8U
 
@@ -33,6 +34,8 @@
 #define BQ25731_CHARGE_OPTION0_EN_OOA   0x0400U
 #define BQ25731_CHARGE_OPTION0_PWM_FREQ 0x0200U
 #define BQ25731_CHARGE_OPTION4_DITHER_MASK 0x1800U
+#define BQ25731_CHARGE_OPTION1_5MOHM_MASK  0x0D00U
+#define BQ25731_CHARGE_OPTION1_FAST_5MOHM  0x0100U
 
 /* Startup-only acoustic/EMI tuning. 400 kHz minimizes switching loss and is
  * the TI-recommended setting for a 4.7 uH power inductor; use 800 kHz only
@@ -128,12 +131,15 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption0(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartWriteStartupOption4(
     BQ25731_Device_t *dev, uint16_t value);
+BQ25731_Status_t BQ25731_StartWriteStartupOption1(
+    BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
 
 uint16_t BQ25731_BuildStartupOption0(uint16_t current);
 uint16_t BQ25731_BuildStartupOption4(uint16_t current);
+uint16_t BQ25731_BuildStartupOption1(uint16_t current);
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0);
 uint32_t BQ25731_DecodeDitherPercent(uint16_t option4);
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw);

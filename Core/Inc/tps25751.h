@@ -21,12 +21,14 @@
 #define TPS25751_REG_BOOT_FLAGS         0x2DU
 #define TPS25751_REG_RX_SOURCE_CAPS     0x30U
 #define TPS25751_REG_RX_SINK_CAPS       0x31U
+#define TPS25751_REG_TX_SOURCE_CAPS     0x32U
 #define TPS25751_REG_TX_SINK_CAPS       0x33U
 #define TPS25751_REG_ACTIVE_PDO         0x34U
 #define TPS25751_REG_ACTIVE_RDO         0x35U
 #define TPS25751_REG_AUTO_NEGOTIATE_SINK 0x37U
 #define TPS25751_REG_POWER_STATUS       0x3FU
 #define TPS25751_REG_PD_STATUS          0x40U
+#define TPS25751_REG_TYPE_C_STATE       0x69U
 #define TPS25751_REG_ADC_RESULTS        0x6AU
 
 #define TPS25751_MODE_LEN               4U
@@ -38,12 +40,14 @@
 #define TPS25751_PORT_CONFIG_LEN        17U
 #define TPS25751_BOOT_FLAGS_LEN          5U
 #define TPS25751_RX_CAPS_LEN            53U
+#define TPS25751_TX_SOURCE_CAPS_LEN     63U
 #define TPS25751_TX_SINK_CAPS_LEN       53U
 #define TPS25751_AUTO_NEGOTIATE_SINK_LEN 24U
 #define TPS25751_ACTIVE_PDO_PREFIX_LEN  4U
 #define TPS25751_ACTIVE_RDO_PREFIX_LEN  4U
 #define TPS25751_POWER_STATUS_LEN       2U
 #define TPS25751_PD_STATUS_LEN          4U
+#define TPS25751_TYPE_C_STATE_LEN       4U
 #define TPS25751_ADC_RESULTS_LEN        13U
 
 typedef enum {
@@ -134,6 +138,12 @@ typedef struct {
     uint64_t power_path_raw;
     uint32_t power_status_raw;
     uint32_t pd_status_raw;
+    uint32_t typec_state_raw;
+
+    uint8_t typec_port_state;
+    uint8_t cc1_state;
+    uint8_t cc2_state;
+    uint8_t pd_cc_pin;
 
     uint8_t pp5v_state;
     uint8_t pphv_state;
@@ -229,6 +239,9 @@ void TPS25751_DecodePowerStatus(TPS25751_Telemetry_t *telemetry,
                                 const uint8_t data[TPS25751_POWER_STATUS_LEN]);
 void TPS25751_DecodePdStatus(TPS25751_Telemetry_t *telemetry,
                              const uint8_t data[TPS25751_PD_STATUS_LEN]);
+void TPS25751_DecodeTypecState(
+    TPS25751_Telemetry_t *telemetry,
+    const uint8_t data[TPS25751_TYPE_C_STATE_LEN]);
 void TPS25751_DecodeAdcResults(TPS25751_Telemetry_t *telemetry,
                                const uint8_t data[TPS25751_ADC_RESULTS_LEN]);
 TPS25751_Pdo_t TPS25751_DecodePdo(uint32_t raw);
@@ -238,6 +251,10 @@ TPS25751_Rdo_t TPS25751_DecodeRdo(
 bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
                                  const uint8_t *data,
                                  uint8_t length);
+bool TPS25751_DecodeTxSourceCapabilities(
+    TPS25751_Capabilities_t *capabilities,
+    const uint8_t *data,
+    uint8_t length);
 bool TPS25751_DecodeAutoNegotiateSink(
     TPS25751_AutoNegotiateSink_t *policy,
     const uint8_t *data,

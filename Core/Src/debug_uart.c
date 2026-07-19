@@ -22,6 +22,9 @@ static volatile uint32_t debug_tx_dma_len = 0U;
 static volatile uint32_t debug_tx_dropped = 0U;
 static volatile bool debug_tx_busy = false;
 static volatile bool debug_dma_ready = false;
+static volatile bool debug_tx_pending_session_eol = false;
+
+static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length);
 
 static void Debug_RestoreIrq(uint32_t primask)
 {
@@ -142,6 +145,18 @@ static void Debug_StartTx(void)
     }
 }
 
+static void Debug_QueueSessionEolIfPending(void)
+{
+    static const uint8_t session_eol[] = "\r\n";
+
+    if (!debug_tx_pending_session_eol) {
+        return;
+    }
+
+    debug_tx_pending_session_eol = false;
+    Debug_EnqueueBytes(session_eol, (uint32_t)(sizeof(session_eol) - 1U));
+}
+
 static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length)
 {
     uint32_t primask;
@@ -195,6 +210,7 @@ void Debug_Init(UART_HandleTypeDef *huart)
     debug_tx_dropped = 0U;
     debug_tx_busy = false;
     debug_dma_ready = false;
+    debug_tx_pending_session_eol = false;
 
     Debug_RestoreIrq(primask);
 
@@ -215,6 +231,7 @@ void Debug_Write(const char *text)
         return;
     }
 
+    Debug_QueueSessionEolIfPending();
     Debug_EnqueueBytes((const uint8_t *)text, (uint32_t)length);
 }
 
@@ -234,6 +251,7 @@ void Debug_Printf(const char *fmt, ...)
         (strncmp(fmt, "[TPS", 4U) != 0) &&
         (strncmp(fmt, "[PD", 3U) != 0) &&
         (strncmp(fmt, "[PM", 3U) != 0) &&
+        (strncmp(fmt, "[MON", 4U) != 0) &&
         (strncmp(fmt, "[APP", 4U) != 0) &&
         (strncmp(fmt, "[UART", 5U) != 0) &&
         (strncmp(fmt, "[FAULT", 6U) != 0)) {
@@ -264,6 +282,7 @@ void Debug_Printf(const char *fmt, ...)
         }
     }
 
+    Debug_QueueSessionEolIfPending();
     Debug_EnqueueBytes((const uint8_t *)buffer, tx_length);
 }
 
@@ -272,6 +291,7 @@ void Debug_BlankLine(void)
 #if (DEBUG_LOG_NON_BQ != 0U)
     static const uint8_t blank_line[] = "\r\n";
 
+    Debug_QueueSessionEolIfPending();
     Debug_EnqueueBytes(blank_line, (uint32_t)(sizeof(blank_line) - 1U));
 #endif
 }
@@ -338,6 +358,9 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     __disable_irq();
     debug_tx_busy = false;
     debug_tx_dma_len = 0U;
+    if ((debug_tx_used == 0U) && (debug_tx_dma_len == 0U)) {
+        debug_tx_pending_session_eol = true;
+    }
     Debug_RestoreIrq(primask);
 
     Debug_StartTx();

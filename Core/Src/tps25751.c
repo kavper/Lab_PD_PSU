@@ -621,6 +621,23 @@ void TPS25751_DecodePdStatus(TPS25751_Telemetry_t *telemetry,
         (uint8_t)((telemetry->pd_status_raw >> 16) & 0x3FU);
 }
 
+void TPS25751_DecodeTypecState(
+    TPS25751_Telemetry_t *telemetry,
+    const uint8_t data[TPS25751_TYPE_C_STATE_LEN])
+{
+    uint32_t raw;
+
+    if ((telemetry == NULL) || (data == NULL)) {
+        return;
+    }
+    raw = TPS25751_ReadLe32(data);
+    telemetry->typec_state_raw = raw;
+    telemetry->pd_cc_pin = (uint8_t)(raw & 0xFFU);
+    telemetry->cc1_state = (uint8_t)((raw >> 8) & 0xFFU);
+    telemetry->cc2_state = (uint8_t)((raw >> 16) & 0xFFU);
+    telemetry->typec_port_state = (uint8_t)((raw >> 24) & 0xFFU);
+}
+
 void TPS25751_DecodeAdcResults(TPS25751_Telemetry_t *telemetry,
                                const uint8_t data[TPS25751_ADC_RESULTS_LEN])
 {
@@ -684,27 +701,30 @@ TPS25751_Pdo_t TPS25751_DecodePdo(uint32_t raw)
     return pdo;
 }
 
-bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
-                                 const uint8_t *data,
-                                 uint8_t length)
+static bool TPS25751_DecodeCapabilitiesAt(
+    TPS25751_Capabilities_t *capabilities,
+    const uint8_t *data,
+    uint8_t length,
+    uint8_t pdo_offset)
 {
     uint8_t count;
     uint8_t i;
 
     if ((capabilities == NULL) || (data == NULL) ||
-        (length < TPS25751_RX_CAPS_LEN)) {
+        (length < pdo_offset)) {
         return false;
     }
 
     memset(capabilities, 0, sizeof(*capabilities));
     count = data[0] & 0x07U;
-    if (count > 7U) {
-        count = 7U;
+    if ((count > 7U) ||
+        (length < (uint8_t)(pdo_offset + (count * 4U)))) {
+        return false;
     }
     capabilities->count = count;
 
     for (i = 0U; i < count; ++i) {
-        uint32_t raw = TPS25751_ReadLe32(&data[1U + (i * 4U)]);
+        uint32_t raw = TPS25751_ReadLe32(&data[pdo_offset + (i * 4U)]);
         capabilities->pdo[i] = TPS25751_DecodePdo(raw);
         if (!capabilities->pdo[i].valid) {
             /* Never expose count=N with zero/invalid PDOs to role policy. */
@@ -724,6 +744,25 @@ bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
             (capabilities->pdo[0].raw & (1UL << 29)) != 0U;
     }
     return true;
+}
+
+bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
+                                 const uint8_t *data,
+                                 uint8_t length)
+{
+    /* RX_SOURCE_CAPS, RX_SINK_CAPS and TX_SINK_CAPS store PDO1 directly
+     * after the one-byte object-count field.  Validate only the bytes
+     * required by the advertised count, not the register's maximum size. */
+    return TPS25751_DecodeCapabilitiesAt(capabilities, data, length, 1U);
+}
+
+bool TPS25751_DecodeTxSourceCapabilities(
+    TPS25751_Capabilities_t *capabilities,
+    const uint8_t *data,
+    uint8_t length)
+{
+    /* TX_SOURCE_CAPS has two policy bytes between the object count and PDO1. */
+    return TPS25751_DecodeCapabilitiesAt(capabilities, data, length, 3U);
 }
 
 bool TPS25751_DecodeAutoNegotiateSink(

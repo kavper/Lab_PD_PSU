@@ -20,6 +20,9 @@
 #define BQ25731_ADC_VBAT_VSYS_MV_PER_LSB  64U
 #define BQ25731_OTG_VOLTAGE_MV_PER_LSB        8U
 
+static BQ25731_Status_t BQ25731_StartWriteFixed16(
+    BQ25731_Device_t *dev, uint8_t reg, uint16_t value);
+
 BQ25731_Status_t BQ25731_Init(BQ25731_Device_t *dev,
                               TPS25751_Device_t *tps,
                               uint8_t address_7bit)
@@ -121,6 +124,13 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption4(
         dev, BQ25731_REG_CHARGE_OPTION4, value);
 }
 
+BQ25731_Status_t BQ25731_StartWriteStartupOption1(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION1, value);
+}
+
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev)
 {
@@ -158,6 +168,13 @@ uint16_t BQ25731_BuildStartupOption4(uint16_t current)
     current &= (uint16_t)~BQ25731_CHARGE_OPTION4_DITHER_MASK;
     current |= (uint16_t)(dither_code << 11);
     return current;
+}
+
+uint16_t BQ25731_BuildStartupOption1(uint16_t current)
+{
+    /* Match the physical board population: RAC=5 mOhm, RSR=5 mOhm, with
+     * the BQ25731 compensation mode intended for a 5 mOhm input shunt. */
+    return current | BQ25731_CHARGE_OPTION1_5MOHM_MASK;
 }
 
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0)
@@ -208,15 +225,12 @@ bool BQ25731_DecodeConfigBlock(BQ25731_Telemetry_t *telemetry,
     telemetry->charge_current = TPS25751_ReadLe16(&data[0x02U]);
     telemetry->charge_voltage = TPS25751_ReadLe16(&data[0x04U]);
     telemetry->otg_voltage = TPS25751_ReadLe16(&data[0x06U]);
-    telemetry->iin_host = TPS25751_ReadLe16(&data[0x0EU]);
     telemetry->charge_current_ma =
         BQ25731_DecodeChargeCurrentMa(telemetry->charge_current);
     telemetry->charge_voltage_mv =
         BQ25731_DecodeChargeVoltageMv(telemetry->charge_voltage);
     telemetry->otg_voltage_mv =
         BQ25731_DecodeOtgVoltageMv(telemetry->otg_voltage);
-    telemetry->input_current_ma =
-        BQ25731_DecodeInputCurrentMa(telemetry->iin_host);
     return true;
 }
 
