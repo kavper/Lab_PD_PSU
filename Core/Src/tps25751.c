@@ -6,6 +6,12 @@
 #define TPS25751_COMMAND_TIMEOUT_MS   1000U
 #define TPS25751_COMMAND_POLL_MS      10U
 
+/* PORT_CONFIG (0x28): byte 0 bits 1:0 select the Type-C state machine;
+ * byte 1 bits 1:0 are register bits 9:8 (Type-C Support Options). */
+#define TPS25751_PORT_STATE_MASK       0x03U
+#define TPS25751_TYPEC_OPTIONS_MASK    0x03U
+#define TPS25751_TYPEC_TRY_SRC         0x01U
+
 enum {
     TPS_OP_STATE_START = 0,
     TPS_OP_STATE_WAIT_REGISTER,
@@ -760,14 +766,31 @@ TPS25751_Rdo_t TPS25751_DecodeRdo(
 bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode)
 {
-    uint8_t old_value;
+    uint8_t old_state;
+    uint8_t old_options;
+    uint8_t typec_options;
 
     if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
         return false;
     }
-    old_value = port_config[0];
-    port_config[0] = (uint8_t)((old_value & 0xFCU) | (uint8_t)mode);
-    return port_config[0] != old_value;
+
+    old_state = port_config[0];
+    old_options = port_config[1];
+
+    /* AUTO remains a true DRP port, but Try.SRC biases the initial Type-C
+     * attach toward Source.  This avoids first accepting 5 V from another
+     * DRP (for example a Mac) and then performing a time-critical PR_SWAP.
+     * Optional Try states do not apply to the single-role modes. */
+    typec_options = (mode == TPS25751_PORT_DRP) ?
+                    TPS25751_TYPEC_TRY_SRC : 0U;
+    port_config[0] = (uint8_t)(
+        (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
+    port_config[1] = (uint8_t)(
+        (old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK) |
+        typec_options);
+
+    return (port_config[0] != old_state) ||
+           (port_config[1] != old_options);
 }
 
 const char *TPS25751_StatusToString(TPS25751_Status_t status)

@@ -775,7 +775,10 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, OTG_EN_Pin|SD_Pin, GPIO_PIN_RESET);
+  /* BQ25731 OTG/VAP/FRS is held HIGH, matching TI PMP41013.  TPS25751
+   * controls the actual BQ EN_OTG bit over I2C. */
+  HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LED2_Pin LED1_Pin FLT_Pin STBY_Pin */
   GPIO_InitStruct.Pin = LED2_Pin|LED1_Pin|FLT_Pin|STBY_Pin;

@@ -9,7 +9,6 @@
 #define PM_MODE_POLL_MS              100U
 #define PM_BOOT_FLAGS_POLL_MS       1000U
 #define PM_TPS_STEP_MS                20U
-#define PM_TPS_STATUS_STALE_MS      1500U
 #define PM_PD_LOG_MS                2000U
 #define PM_BQ_START_DELAY_MS        1000U
 #define PM_BQ_INIT_STEP_MS           200U
@@ -17,7 +16,6 @@
 #define PM_BQ_TELEMETRY_MS          2000U
 #define PM_BQ_CONFIG_MS            10000U
 #define PM_BQ_MONITOR_HOLDOFF_MS    1500U
-#define PM_HARD_RESET_HOLDOFF_MS     250U
 #define PM_ERROR_LOG_MS             1000U
 #define PM_POLICY_STEP_MS             20U
 #define PM_POLICY_CAP_RETRY_MS       1500U
@@ -127,8 +125,6 @@ typedef struct {
     uint32_t bq_monitor_holdoff_until_ms;
     uint32_t policy_next_ms;
     uint32_t app_seen_ms;
-    uint32_t status_updated_ms;
-    uint32_t hard_reset_holdoff_until_ms;
     uint32_t last_pd_log_ms;
     uint32_t last_error_log_ms;
     uint32_t tps_error_count;
@@ -147,7 +143,6 @@ typedef struct {
     uint16_t bq_startup_option0_target;
     uint16_t bq_startup_option4_target;
     uint16_t bq_startup_option1_target;
-    uint8_t previous_hard_reset_reason;
     uint8_t policy_cap_attempts;
     bool previous_attached;
     bool policy_swap_attempted;
@@ -306,12 +301,8 @@ static void PowerManager_SetOtgPin(bool high)
     }
 }
 
-static void PowerManager_UpdateOtgGate(uint32_t now_ms)
+static void PowerManager_MaintainOtgPermissionPin(void)
 {
-    bool mode_allows_source;
-    bool status_is_fresh;
-    bool allow;
-
     if ((!g_pm.status.tps.attached) ||
         (g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
         (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
@@ -319,35 +310,11 @@ static void PowerManager_UpdateOtgGate(uint32_t now_ms)
         g_pm.status.source_fault_latched = false;
     }
 
-    mode_allows_source =
-        (g_pm.status.applied_mode == POWER_MANAGER_USER_AUTO) ||
-        (g_pm.status.applied_mode == POWER_MANAGER_USER_SOURCE_ONLY);
-    status_is_fresh = (g_pm.status_updated_ms != 0U) &&
-        ((uint32_t)(now_ms - g_pm.status_updated_ms) <=
-         PM_TPS_STATUS_STALE_MS);
-
-    allow = (g_pm.status.tps.mode == TPS25751_MODE_APP) &&
-            g_pm.status.applied_mode_valid && !g_pm.mode_update_pending &&
-            mode_allows_source && status_is_fresh &&
-            g_pm.status.tps.attached &&
-            (g_pm.status.tps.connection_state >= 6U) &&
-            (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
-            !g_pm.status.source_fault_latched &&
-            PowerManager_TickReached(now_ms,
-                                     g_pm.hard_reset_holdoff_until_ms);
-    if ((PM_VERBOSE_TRANSITION_LOGS != 0U) &&
-        (allow != g_pm.status.otg_pin_high)) {
-        Debug_Printf("[PD-OTG] pin=%s attached=%u conn=%u role=%s fresh=%u fault=%u holdoff=%u",
-                     allow ? "HIGH" : "LOW",
-                     g_pm.status.tps.attached ? 1U : 0U,
-                     g_pm.status.tps.connection_state,
-                     PowerManager_RoleToString(g_pm.status.tps.role),
-                     status_is_fresh ? 1U : 0U,
-                     g_pm.status.source_fault_latched ? 1U : 0U,
-                     PowerManager_TickReached(
-                         now_ms, g_pm.hard_reset_holdoff_until_ms) ? 0U : 1U);
-    }
-    PowerManager_SetOtgPin(allow);
+    /* TI PMP41013 straps BQ25731 OTG/VAP/FRS high and lets the PD
+     * controller own the actual EN_OTG register over I2C.  Keep PA4 high
+     * as the equivalent hardware permission; it must not follow attach,
+     * role or telemetry timing.  BQ IN_OTG is the authoritative run state. */
+    PowerManager_SetOtgPin(true);
 }
 
 static void PowerManager_UpdatePdSnapshot(void)
@@ -451,8 +418,7 @@ static void PowerManager_LogPd(uint32_t now_ms)
     if (PowerManager_HasSinkContract() && !bq->in_otg) {
         power_flow = "VBUS -> BAT";
     } else if (tps->attached &&
-               (tps->role == TPS25751_ROLE_SOURCE) &&
-               g_pm.status.otg_pin_high) {
+               (tps->role == TPS25751_ROLE_SOURCE) && bq->in_otg) {
         power_flow = "BAT -> VBUS";
     } else if (tps->attached) {
         power_flow = "TRANSITION";
@@ -485,10 +451,9 @@ static void PowerManager_LogPd(uint32_t now_ms)
     (void)snprintf(value, sizeof(value), "%s  desired=%s", role,
                    PowerManager_RoleToString(g_pm.policy_desired_role));
     (void)snprintf(details, sizeof(details),
-                   "mode=%s  attach=%u  conn=%u  OTG=%u",
+                   "mode=%s  conn=%u  EN_PIN=HIGH",
                    PowerManager_UserModeToString(g_pm.status.requested_mode),
-                   tps->attached ? 1U : 0U, tps->connection_state,
-                   g_pm.status.otg_pin_high ? 1U : 0U);
+                   tps->connection_state);
     PowerManager_LogMonitorRow("ROLE", value, details);
 
     (void)snprintf(value, sizeof(value), "PDO%u  %lu mV  %lu mA",
@@ -1124,23 +1089,9 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                      event.raw[10]);
     }
 
-    if (event.hard_reset) {
-        g_pm.hard_reset_holdoff_until_ms = now_ms +
-                                           PM_HARD_RESET_HOLDOFF_MS;
-        /* A pre-reset role sample is no longer proof that Source is safe. */
-        g_pm.status_updated_ms = 0U;
-        PowerManager_SetOtgPin(false);
-    }
     if (event.overcurrent || event.power_event_error ||
         event.unable_to_source) {
         g_pm.status.source_fault_latched = true;
-        PowerManager_SetOtgPin(false);
-    }
-    if (event.ext_source_safe_state) {
-        g_pm.hard_reset_holdoff_until_ms = now_ms +
-                                           PM_HARD_RESET_HOLDOFF_MS;
-        g_pm.status_updated_ms = 0U;
-        PowerManager_SetOtgPin(false);
     }
     if (event.i2c_controller_nack) {
         PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,
@@ -1282,7 +1233,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.local_source_caps_valid = false;
                 memset(&g_pm.local_source_caps, 0,
                        sizeof(g_pm.local_source_caps));
-                PowerManager_SetOtgPin(false);
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
             }
             break;
@@ -1335,7 +1285,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.applied_mode = g_pm.status.requested_mode;
             g_pm.status.applied_mode_valid = true;
             g_pm.status.source_fault_latched = false;
-            g_pm.status_updated_ms = 0U;
             g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
             break;
 
@@ -1359,7 +1308,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             TPS25751_PowerRole_t old_role = g_pm.status.tps.role;
             TPS25751_DecodeStatus(&g_pm.status.tps, data);
             g_pm.status.tps.updated_ms = now_ms;
-            g_pm.status_updated_ms = now_ms;
             if (g_pm.status.tps.attached &&
                 (g_pm.status.tps.role != old_role)) {
                 g_pm.pdo_report_pending = true;
@@ -1411,7 +1359,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             if (g_pm.status.tps.pp5v_overcurrent ||
                 g_pm.status.tps.ppcable_overcurrent) {
                 g_pm.status.source_fault_latched = true;
-                PowerManager_SetOtgPin(false);
             }
             g_pm.telemetry_phase = 3U;
             break;
@@ -1423,16 +1370,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_READ_PD_STATUS:
             TPS25751_DecodePdStatus(&g_pm.status.tps, data);
-            if ((g_pm.status.tps.hard_reset_reason != 0U) &&
-                (g_pm.status.tps.hard_reset_reason !=
-                 g_pm.previous_hard_reset_reason)) {
-                g_pm.hard_reset_holdoff_until_ms = now_ms +
-                                                   PM_HARD_RESET_HOLDOFF_MS;
-                g_pm.status_updated_ms = 0U;
-                PowerManager_SetOtgPin(false);
-            }
-            g_pm.previous_hard_reset_reason =
-                g_pm.status.tps.hard_reset_reason;
             g_pm.telemetry_phase = 5U;
             break;
 
@@ -2161,10 +2098,8 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     g_pm.next_bq_action_ms = now_ms + PM_BQ_START_DELAY_MS;
     g_pm.bq_monitor_holdoff_until_ms =
         now_ms + PM_BQ_MONITOR_HOLDOFF_MS;
-    g_pm.hard_reset_holdoff_until_ms = now_ms;
-
-    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
-    g_pm.status.otg_pin_high = false;
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
+    g_pm.status.otg_pin_high = true;
 
     if ((TPS25751_Init(&g_pm.tps, hi2c,
                        TPS25751_I2C_ADDR_DEFAULT) != TPS25751_OK) ||
@@ -2174,7 +2109,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG/VAP/FRS=HIGH TPS_OWNS_EN_OTG=1",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);
@@ -2191,13 +2126,13 @@ void PowerManager_Task(void)
         return;
     }
     now_ms = HAL_GetTick();
-    PowerManager_UpdateOtgGate(now_ms);
+    PowerManager_MaintainOtgPermissionPin();
 
     if (g_pm.job != PM_JOB_NONE) {
         operation_status = TPS25751_Task(&g_pm.tps, now_ms);
         if (operation_status != TPS25751_BUSY) {
             PowerManager_ProcessCompletedJob(operation_status, now_ms);
-            PowerManager_UpdateOtgGate(now_ms);
+            PowerManager_MaintainOtgPermissionPin();
         }
         return;
     }
@@ -2237,7 +2172,6 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
         g_pm.port_write_pending = false;
         g_pm.status.applied_mode_valid = false;
         g_pm.status.source_fault_latched = false;
-        PowerManager_SetOtgPin(false);
         PowerManager_ResetPolicy(HAL_GetTick(),
                                  g_pm.status.tps.attached);
     }
