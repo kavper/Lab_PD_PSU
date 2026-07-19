@@ -13,6 +13,7 @@
 #define GUI_FILTER_ALPHA 0.5f
 #define BTN_DEBOUNCE_MS 25u
 #define BTN_POLL_FALLBACK_LOCKOUT_MS 80u
+#define GUI_ENCODER_LONG_PRESS_MS 1200u
 #define GUI_V_SNAP_TO_SET 0.01f
 #define GUI_V_DEADBAND 0.02f
 #define GUI_MODE_AUTOFOLLOW_MS 1200u
@@ -32,12 +33,10 @@ static uint8_t pd_contract_valid = 0U;
 
 static float v_target_local = 0.0f;
 
-volatile uint8_t enc_click  = 0;
 volatile uint8_t onoff_click = 0;
 volatile uint8_t aux1_click = 0;
 volatile uint8_t aux2_click = 0;
 
-static volatile uint32_t enc_last_ms  = 0;
 static volatile uint32_t onoff_last_ms = 0;
 static volatile uint32_t aux1_last_ms = 0;
 static volatile uint32_t aux2_last_ms = 0;
@@ -109,13 +108,19 @@ static const float EDIT_STEPS[] = {10.0f, 1.0f, 0.1f, 0.01f};
 #define FRAC_P(x) ((int)(((x) - (int)(x)) * 100))
 
 /* ================== ZMIENNE STANU ================== */
-typedef enum { GUI_VIEW = 0, GUI_EDIT_V, GUI_EDIT_I } gui_mode_t;
+typedef enum {
+  GUI_VIEW = 0,
+  GUI_EDIT_V,
+  GUI_EDIT_I,
+  GUI_SETTINGS
+} gui_mode_t;
 
 static gui_mode_t gui_mode = GUI_VIEW;
 static bool output_enabled = false;
 static uint8_t gui_force_redraw = 1u;
 
 static float i_target_local = 1.0f;
+static PSU_GuiUsbMode_t settings_usb_mode = PSU_GUI_USB_MODE_AUTO;
 
 /* 0–3: V (10,1,0.1,0.01), 4–7: I (10,1,0.1,0.01) */
 static uint8_t edit_pos = 0;
@@ -226,8 +231,16 @@ typedef struct {
   uint8_t stable;
   uint8_t last_raw;
   uint8_t active_level;
+  uint8_t long_reported;
   uint32_t last_change_ms;
+  uint32_t pressed_since_ms;
 } btn_t;
+
+typedef enum {
+  BTN_EVENT_NONE = 0,
+  BTN_EVENT_SHORT_PRESS,
+  BTN_EVENT_LONG_PRESS
+} btn_event_t;
 
 static void BTN_Init(btn_t *b, uint8_t initial_raw, uint8_t active_level) {
   uint8_t raw = initial_raw ? 1u : 0u;
@@ -235,12 +248,14 @@ static void BTN_Init(btn_t *b, uint8_t initial_raw, uint8_t active_level) {
   b->stable = raw;
   b->last_raw = raw;
   b->active_level = active_level ? 1u : 0u;
+  b->long_reported = 0u;
   b->last_change_ms = HAL_GetTick();
+  b->pressed_since_ms = HAL_GetTick();
 }
 
 void BTN_enc_handle() {
-  debounce_set_flag_when_pressed(&enc_click, &enc_last_ms,
-                                 ENC_BTN_GPIO_Port, ENC_BTN_Pin, GPIO_PIN_SET);
+  /* The encoder button is polled so short and long presses can be
+   * distinguished. EXTI remains enabled for compatibility with the board. */
 }
 
 void BTN_onoff_handle() {
@@ -271,10 +286,41 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 }
 
 void BTN_reset() {
-  enc_click = 0;
   onoff_click = 0;
   aux1_click = 0;
   aux2_click = 0;
+}
+
+static btn_event_t BTN_EncoderEvent(btn_t *b, uint8_t raw_state) {
+  uint8_t raw = raw_state ? 1u : 0u;
+  uint32_t now = HAL_GetTick();
+
+  if (raw != b->last_raw) {
+    b->last_raw = raw;
+    b->last_change_ms = now;
+  }
+
+  if ((uint32_t)(now - b->last_change_ms) >= BTN_DEBOUNCE_MS) {
+    if (raw != b->stable) {
+      b->stable = raw;
+      if (b->stable == b->active_level) {
+        b->pressed_since_ms = now;
+        b->long_reported = 0u;
+      } else if (b->long_reported == 0u) {
+        return BTN_EVENT_SHORT_PRESS;
+      }
+    }
+  }
+
+  if ((b->stable == b->active_level) &&
+      (b->long_reported == 0u) &&
+      ((uint32_t)(now - b->pressed_since_ms) >=
+       GUI_ENCODER_LONG_PRESS_MS)) {
+    b->long_reported = 1u;
+    return BTN_EVENT_LONG_PRESS;
+  }
+
+  return BTN_EVENT_NONE;
 }
 
 static uint8_t BTN_Click(btn_t *b, uint8_t raw_state,
@@ -437,6 +483,35 @@ static int32_t GUI_GetEncoderTimerDelta(void) {
   return steps;
 }
 
+static char *GUI_UsbModeText(PSU_GuiUsbMode_t mode) {
+  switch (mode) {
+    case PSU_GUI_USB_MODE_SINK_ONLY:
+      return "SINK ONLY";
+    case PSU_GUI_USB_MODE_SOURCE_ONLY:
+      return "SOURCE ONLY";
+    case PSU_GUI_USB_MODE_AUTO:
+    default:
+      return "AUTO (DRP)";
+  }
+}
+
+static void GUI_OpenSettings(void) {
+  settings_usb_mode = PSU_GuiGetUsbMode();
+  gui_mode = GUI_SETTINGS;
+  GUI_SyncEncoder();
+  gui_force_redraw = 1u;
+}
+
+static void GUI_CloseSettings(bool apply) {
+  if (apply) {
+    (void)PSU_GuiSetUsbMode(settings_usb_mode);
+  }
+  gui_mode = GUI_VIEW;
+  edit_pos = GUI_GetUnitsCursorForMode(GUI_GetDisplayControlMode());
+  GUI_SyncEncoder();
+  gui_force_redraw = 1u;
+}
+
 /* ================== LOGIKA ENKODERA ================== */
 static void GUI_HandleEncoder(void) {
   int32_t delta = GUI_GetEncoderTimerDelta();
@@ -453,6 +528,17 @@ static void GUI_HandleEncoder(void) {
     GUI_HoldManualFocus();
   }
   gui_force_redraw = 1u;
+
+  if (gui_mode == GUI_SETTINGS) {
+    int32_t selected = (int32_t)settings_usb_mode + delta;
+
+    selected %= 3;
+    if (selected < 0) {
+      selected += 3;
+    }
+    settings_usb_mode = (PSU_GuiUsbMode_t)selected;
+    return;
+  }
 
   if (edit_pos < 4) {
     float step = EDIT_STEPS[edit_pos];
@@ -532,7 +618,9 @@ static void GUI_DrawMain(void) {
 
   ssd1306_SetCursor(2, 13);
   {
+#if (PSU_GUI_PD_DEBUG != 0U)
     static uint32_t last_pd_draw_log_ms = 0U;
+#endif
     if (pd_contract_valid != 0U) {
       snprintf(buf, sizeof(buf), "PD %uV %uW",
                (unsigned int)(pd_voltage_v + 0.5f),
@@ -655,6 +743,44 @@ static void GUI_DrawMain(void) {
   ssd1306_UpdateScreen();
 }
 
+static void GUI_DrawSettings(void) {
+  char buf[24];
+  PSU_GuiUsbMode_t applied_mode = PSU_GuiGetUsbMode();
+  uint8_t option;
+
+  ssd1306_Fill(Black);
+  ssd1306_SetCursor(24, 3);
+  ssd1306_WriteString("USTAWIENIA", Font_7x10, White);
+  ssd1306_Line(0, 16, 127, 16, White);
+
+  ssd1306_SetCursor(5, 22);
+  ssd1306_WriteString("TRYB PORTU USB-C", Font_6x8, White);
+
+  for (option = 0u; option < 3u; ++option) {
+    int y = 36 + ((int)option * 20);
+    SSD1306_COLOR text_color = White;
+
+    if ((PSU_GuiUsbMode_t)option == settings_usb_mode) {
+      GUI_FillRect(4, y - 3, 120, 15, White);
+      text_color = Black;
+    }
+
+    ssd1306_SetCursor(10, y);
+    ssd1306_WriteString(GUI_UsbModeText((PSU_GuiUsbMode_t)option),
+                        Font_7x10, text_color);
+  }
+
+  (void)snprintf(buf, sizeof(buf), "AKT: %s", GUI_UsbModeText(applied_mode));
+  ssd1306_SetCursor(5, 98);
+  ssd1306_WriteString(buf, Font_6x8, White);
+  ssd1306_SetCursor(5, 110);
+  ssd1306_WriteString("KLIK=ZAPISZ", Font_6x8, White);
+  ssd1306_SetCursor(5, 120);
+  ssd1306_WriteString("DLUGO=ANULUJ", Font_6x8, White);
+
+  ssd1306_UpdateScreen();
+}
+
 /* ================== API GLOWNE ================== */
 void GUI_Init(void) {
   GUI_InitInputGpio();
@@ -699,6 +825,7 @@ void GUI_Process(void) {
   uint32_t now = HAL_GetTick();
   PSU_GuiControlMode_t control_mode = GUI_GetDisplayControlMode();
   bool psu_output_enabled = (PSU_IsRunning() != 0U);
+  btn_event_t encoder_event;
 
   if (output_enabled != psu_output_enabled) {
     output_enabled = psu_output_enabled;
@@ -723,10 +850,8 @@ void GUI_Process(void) {
     inited = 1;
   }
 
-  if (BTN_Click(&btn_enc, HAL_GPIO_ReadPin(ENC_BTN_GPIO_Port, ENC_BTN_Pin),
-                &enc_last_ms)) {
-    enc_click = 1;
-  }
+  encoder_event = BTN_EncoderEvent(
+      &btn_enc, HAL_GPIO_ReadPin(ENC_BTN_GPIO_Port, ENC_BTN_Pin));
   if (BTN_Click(&btn_onoff, HAL_GPIO_ReadPin(BTN_ON_OFF_GPIO_Port, BTN_ON_OFF_Pin),
                 &onoff_last_ms)) {
     onoff_click = 1;
@@ -764,17 +889,34 @@ void GUI_Process(void) {
 
   GUI_HandleEncoder();
 
-  /* ON/OFF: akceptuj dedykowany przycisk i klik ENC. */
-  if (enc_click || onoff_click) {
+  if (encoder_event == BTN_EVENT_LONG_PRESS) {
+    if (gui_mode == GUI_SETTINGS) {
+      GUI_CloseSettings(false);
+    } else {
+      GUI_OpenSettings();
+    }
+  } else if (encoder_event == BTN_EVENT_SHORT_PRESS) {
+    if (gui_mode == GUI_SETTINGS) {
+      GUI_CloseSettings(true);
+    } else {
+      GUI_SetOutputEnabled(!output_enabled);
+    }
+  }
+
+  /* Dedykowany ON/OFF pozostaje aktywny także w ustawieniach. */
+  if (onoff_click) {
     GUI_SetOutputEnabled(!output_enabled);
     psu_output_enabled = (PSU_IsRunning() != 0U);
     output_enabled = psu_output_enabled;
-    enc_click = 0;
     onoff_click = 0;
   }
 
   /* Edycja pozycji cyfry */
-  if (gui_mode == GUI_VIEW) {
+  if (gui_mode == GUI_SETTINGS) {
+    aux1_click = 0;
+    aux2_click = 0;
+    control_focus_pending = 0u;
+  } else if (gui_mode == GUI_VIEW) {
     edit_pos = GUI_GetUnitsCursorForMode(control_mode);
     control_focus_pending = 0u;
 
@@ -824,5 +966,9 @@ void GUI_Process(void) {
   last_draw_ms = HAL_GetTick();
   gui_force_redraw = 0u;
 
-  GUI_DrawMain();
+  if (gui_mode == GUI_SETTINGS) {
+    GUI_DrawSettings();
+  } else {
+    GUI_DrawMain();
+  }
 }

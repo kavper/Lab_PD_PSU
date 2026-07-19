@@ -13,6 +13,12 @@ typedef enum {
     PSU_GUI_CONTROL_MODE_CC
 } PSU_GuiControlMode_t;
 
+typedef enum {
+    PSU_GUI_USB_MODE_AUTO = 0,
+    PSU_GUI_USB_MODE_SINK_ONLY,
+    PSU_GUI_USB_MODE_SOURCE_ONLY
+} PSU_GuiUsbMode_t;
+
 void PSU_GuiInit(void);
 void PSU_GuiReset(void);
 
@@ -38,6 +44,8 @@ uint8_t PSU_GuiGetPdContract(float *voltage_v,
                              uint32_t *active_rdo_raw);
 uint8_t PSU_GuiGetTransferPower(float *power_w);
 PSU_GuiControlMode_t PSU_GuiGetControlMode(void);
+PSU_GuiUsbMode_t PSU_GuiGetUsbMode(void);
+uint8_t PSU_GuiSetUsbMode(PSU_GuiUsbMode_t mode);
 
 void PSU_Start(void);
 void PSU_Stop(void);

@@ -238,6 +238,43 @@ PSU_GuiControlMode_t PSU_GuiGetControlMode(void)
     return PSU_GUI_CONTROL_MODE_CV;
 }
 
+PSU_GuiUsbMode_t PSU_GuiGetUsbMode(void)
+{
+    PowerManager_Status_t status;
+
+    PowerManager_GetStatus(&status);
+    switch (status.requested_mode) {
+        case POWER_MANAGER_USER_SINK_ONLY:
+            return PSU_GUI_USB_MODE_SINK_ONLY;
+        case POWER_MANAGER_USER_SOURCE_ONLY:
+            return PSU_GUI_USB_MODE_SOURCE_ONLY;
+        case POWER_MANAGER_USER_AUTO:
+        default:
+            return PSU_GUI_USB_MODE_AUTO;
+    }
+}
+
+uint8_t PSU_GuiSetUsbMode(PSU_GuiUsbMode_t mode)
+{
+    PowerManager_UserMode_t requested_mode;
+
+    switch (mode) {
+        case PSU_GUI_USB_MODE_AUTO:
+            requested_mode = POWER_MANAGER_USER_AUTO;
+            break;
+        case PSU_GUI_USB_MODE_SINK_ONLY:
+            requested_mode = POWER_MANAGER_USER_SINK_ONLY;
+            break;
+        case PSU_GUI_USB_MODE_SOURCE_ONLY:
+            requested_mode = POWER_MANAGER_USER_SOURCE_ONLY;
+            break;
+        default:
+            return 0U;
+    }
+
+    return PowerManager_SetUserMode(requested_mode) ? 1U : 0U;
+}
+
 void PSU_Start(void)
 {
     App_ClearFaults();
