@@ -6,54 +6,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Public bus address and register map used by the power manager. */
 #define BQ25731_I2C_ADDR_7BIT           0x6BU
 
 #define BQ25731_REG_CHARGE_OPTION0      0x00U
-#define BQ25731_REG_CHARGE_CURRENT      0x02U
-#define BQ25731_REG_CHARGE_VOLTAGE      0x04U
-#define BQ25731_REG_OTG_VOLTAGE         0x06U
 #define BQ25731_REG_IIN_HOST            0x0EU
 #define BQ25731_REG_CHARGER_STATUS      0x20U
-#define BQ25731_REG_IIN_DPM             0x24U
 #define BQ25731_REG_ADC_VBUS_PSYS       0x26U
-#define BQ25731_REG_ADC_IBAT            0x28U
-#define BQ25731_REG_ADC_IIN_CMPIN       0x2AU
-#define BQ25731_REG_ADC_VSYS_VBAT       0x2CU
 #define BQ25731_REG_MANUFACTURER_ID     0x2EU
 #define BQ25731_REG_CHARGE_OPTION1      0x30U
 #define BQ25731_REG_ADC_OPTION          0x3AU
 #define BQ25731_REG_CHARGE_OPTION4      0x3CU
 
+/* Lengths of the contiguous register blocks read by this driver. */
 #define BQ25731_CONFIG_BLOCK_LEN         8U
 #define BQ25731_STATUS_BLOCK_LEN         6U
 #define BQ25731_ADC_BLOCK_LEN            8U
 
-#define BQ25731_CHARGE_OPTION0_LWPWR    0x8000U
-#define BQ25731_CHARGE_OPTION0_WDT_MASK 0x6000U
-#define BQ25731_CHARGE_OPTION0_INHIBIT  0x0001U
+/* Option fields inspected by the power-manager startup verification. */
 #define BQ25731_CHARGE_OPTION0_EN_OOA   0x0400U
 #define BQ25731_CHARGE_OPTION0_PWM_FREQ 0x0200U
 #define BQ25731_CHARGE_OPTION4_DITHER_MASK 0x1800U
 #define BQ25731_CHARGE_OPTION1_5MOHM_MASK  0x0D00U
-#define BQ25731_CHARGE_OPTION1_FAST_5MOHM  0x0100U
-
-/* Startup-only acoustic/EMI tuning. 400 kHz minimizes switching loss and is
- * the TI-recommended setting for a 4.7 uH power inductor; use 800 kHz only
- * with the matching 2.2 uH power stage. */
-#define BQ25731_INIT_PWM_FREQUENCY_KHZ  400U
-#define BQ25731_INIT_DITHER_PERCENT       6U
-#define BQ25731_INIT_OUT_OF_AUDIO_ENABLE  1U
-
-#if ((BQ25731_INIT_PWM_FREQUENCY_KHZ != 400U) && \
-     (BQ25731_INIT_PWM_FREQUENCY_KHZ != 800U))
-#error "BQ25731 PWM frequency must be 400 or 800 kHz"
-#endif
-#if ((BQ25731_INIT_DITHER_PERCENT != 0U) && \
-     (BQ25731_INIT_DITHER_PERCENT != 2U) && \
-     (BQ25731_INIT_DITHER_PERCENT != 4U) && \
-     (BQ25731_INIT_DITHER_PERCENT != 6U))
-#error "BQ25731 dithering must be 0, 2, 4 or 6 percent"
-#endif
+/* Monitoring ADC configuration shared with startup verification. */
 #define BQ25731_ADC_OPTION_MONITORING   0xE05FU
 /* ADC_START (bit 14) is a trigger and may read back as zero. Verify the
  * persistent continuous-conversion, full-scale and channel-enable fields. */

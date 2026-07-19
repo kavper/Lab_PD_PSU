@@ -220,6 +220,7 @@ static long App_FracPart(int32_t fixed, int32_t scale)
     return (long)(labs((long)fixed) % (long)scale);
 }
 
+#if (APP_RUNTIME_DEBUG != 0U)
 static const char *App_ModeText(App_Mode_t mode)
 {
     switch (mode) {
@@ -280,6 +281,7 @@ static void App_FaultText(uint32_t faults, char *text, size_t text_len)
         text[strlen(text) - 1U] = '\0';
     }
 }
+#endif
 
 static void App_TimebaseInit(void)
 {
@@ -1216,6 +1218,7 @@ static void App_ControlSlowTask(void)
     }
 }
 
+#if (APP_RUNTIME_DEBUG != 0U)
 static void App_DebugTask(void)
 {
     uint32_t now_ms = HAL_GetTick();
@@ -1416,6 +1419,7 @@ static void App_DebugTask(void)
                  (unsigned long)uart_dropped);
     Debug_BlankLine();
 }
+#endif
 
 static void App_ControlTimerInit(void)
 {

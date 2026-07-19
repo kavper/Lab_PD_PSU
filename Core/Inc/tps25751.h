@@ -6,9 +6,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Public transport limits. */
 #define TPS25751_I2C_ADDR_DEFAULT       0x21U
 #define TPS25751_MAX_PAYLOAD            64U
 
+/* Register map used by the TPS driver and the power manager. */
 #define TPS25751_REG_MODE               0x03U
 #define TPS25751_REG_CMD1               0x08U
 #define TPS25751_REG_DATA1              0x09U
@@ -22,15 +24,14 @@
 #define TPS25751_REG_RX_SOURCE_CAPS     0x30U
 #define TPS25751_REG_RX_SINK_CAPS       0x31U
 #define TPS25751_REG_TX_SOURCE_CAPS     0x32U
-#define TPS25751_REG_TX_SINK_CAPS       0x33U
 #define TPS25751_REG_ACTIVE_PDO         0x34U
 #define TPS25751_REG_ACTIVE_RDO         0x35U
-#define TPS25751_REG_AUTO_NEGOTIATE_SINK 0x37U
 #define TPS25751_REG_POWER_STATUS       0x3FU
 #define TPS25751_REG_PD_STATUS          0x40U
 #define TPS25751_REG_TYPE_C_STATE       0x69U
 #define TPS25751_REG_ADC_RESULTS        0x6AU
 
+/* Payload lengths required by the public register API. */
 #define TPS25751_MODE_LEN               4U
 #define TPS25751_STATUS_LEN             5U
 #define TPS25751_POWER_PATH_LEN         5U
@@ -41,8 +42,6 @@
 #define TPS25751_BOOT_FLAGS_LEN          5U
 #define TPS25751_RX_CAPS_LEN            53U
 #define TPS25751_TX_SOURCE_CAPS_LEN     63U
-#define TPS25751_TX_SINK_CAPS_LEN       53U
-#define TPS25751_AUTO_NEGOTIATE_SINK_LEN 24U
 #define TPS25751_ACTIVE_PDO_PREFIX_LEN  4U
 #define TPS25751_ACTIVE_RDO_PREFIX_LEN  4U
 #define TPS25751_POWER_STATUS_LEN       2U
@@ -109,19 +108,6 @@ typedef struct {
     uint32_t operating_current_ma;
     uint32_t maximum_current_ma;
 } TPS25751_Rdo_t;
-
-typedef struct {
-    uint8_t raw[TPS25751_AUTO_NEGOTIATE_SINK_LEN];
-    uint32_t min_voltage_mv;
-    uint32_t max_voltage_mv;
-    uint32_t sink_min_required_power_mw;
-    uint32_t capability_mismatch_power_mw;
-    bool auto_compute_min_voltage;
-    bool auto_compute_max_voltage;
-    bool auto_compute_min_power;
-    bool no_capability_mismatch;
-    bool auto_disable_sink_on_mismatch;
-} TPS25751_AutoNegotiateSink_t;
 
 typedef struct {
     TPS25751_Mode_t mode;
@@ -255,13 +241,6 @@ bool TPS25751_DecodeTxSourceCapabilities(
     TPS25751_Capabilities_t *capabilities,
     const uint8_t *data,
     uint8_t length);
-bool TPS25751_DecodeAutoNegotiateSink(
-    TPS25751_AutoNegotiateSink_t *policy,
-    const uint8_t *data,
-    uint8_t length);
-bool TPS25751_PatchAutoNegotiateSinkMinPower(
-    uint8_t data[TPS25751_AUTO_NEGOTIATE_SINK_LEN],
-    uint32_t min_power_mw);
 bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode);
 

@@ -2,6 +2,22 @@
 
 #include <string.h>
 
+/* Private startup tuning. 400 kHz matches the populated 4.7 uH inductor. */
+#define BQ25731_INIT_PWM_FREQUENCY_KHZ    400U
+#define BQ25731_INIT_DITHER_PERCENT         6U
+#define BQ25731_INIT_OUT_OF_AUDIO_ENABLE    1U
+
+#if ((BQ25731_INIT_PWM_FREQUENCY_KHZ != 400U) && \
+     (BQ25731_INIT_PWM_FREQUENCY_KHZ != 800U))
+#error "BQ25731 PWM frequency must be 400 or 800 kHz"
+#endif
+#if ((BQ25731_INIT_DITHER_PERCENT != 0U) && \
+     (BQ25731_INIT_DITHER_PERCENT != 2U) && \
+     (BQ25731_INIT_DITHER_PERCENT != 4U) && \
+     (BQ25731_INIT_DITHER_PERCENT != 6U))
+#error "BQ25731 dithering must be 0, 2, 4 or 6 percent"
+#endif
+
 #define BQ25731_CHGSTATUS_IN_OTG          0x0100U
 #define BQ25731_CHGSTATUS_IN_PRECHARGE    0x0200U
 #define BQ25731_CHGSTATUS_IN_FAST_CHARGE  0x0400U

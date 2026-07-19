@@ -19,7 +19,6 @@
 #define PM_BQ_MONITOR_HOLDOFF_MS    1500U
 #define PM_HARD_RESET_HOLDOFF_MS     250U
 #define PM_ERROR_LOG_MS             1000U
-#define PM_POLICY_SETTLE_MS          500U
 #define PM_POLICY_STEP_MS             20U
 #define PM_POLICY_CAP_RETRY_MS       1500U
 #define PM_POLICY_ROLE_DRIFT_MS       750U
@@ -159,7 +158,6 @@ typedef struct {
     bool local_source_caps_valid;
     bool source_caps_trace_pending;
     bool bq_iin_trace_pending;
-    bool bq_config_log_pending;
     bool typec_trace_valid;
     TPS25751_PowerRole_t policy_desired_role;
     TPS25751_Capabilities_t local_source_caps;
@@ -583,18 +581,6 @@ static void PowerManager_LogPd(uint32_t now_ms)
 
     Debug_Printf("[MON] =======================================================================================");
     Debug_Printf("[MON] ");
-}
-
-static void PowerManager_LogBq(void)
-{
-    /* Periodic BQ values are presented by PowerManager_LogPd() as one
-     * coherent monitor table after the complete TPS telemetry cycle. */
-}
-
-static void PowerManager_LogBqMonitor(void)
-{
-    /* Kept as the BQ telemetry completion hook.  Output is consolidated in
-     * the periodic monitor table to avoid interleaved duplicate lines. */
 }
 
 static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role)
@@ -1237,7 +1223,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_HandleTpsError(operation_status, now_ms);
         } else if (completed_job == PM_JOB_BQ_TRACE_IIN_HOST) {
             g_pm.bq_iin_trace_pending = false;
-            g_pm.bq_config_log_pending = false;
             Debug_Printf("[BQ-TRACE t=%lu] IIN_HOST read failed status=%s task=%u",
                          (unsigned long)now_ms,
                          TPS25751_StatusToString(operation_status),
@@ -1603,10 +1588,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.iin_host = raw16;
             g_pm.status.bq.input_current_ma =
                 BQ25731_DecodeInputCurrentMa(raw16);
-            if (g_pm.bq_config_log_pending) {
-                g_pm.bq_config_log_pending = false;
-                PowerManager_LogBq();
-            }
             break;
 
         case PM_JOB_BQ_READ_OPTION0:
@@ -1775,7 +1756,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             /* IIN_HOST sits outside the compact configuration block and is
              * volatile across adapter transitions.  Read it separately so
              * the human-readable line never reports a stale/zero value. */
-            g_pm.bq_config_log_pending = true;
             g_pm.bq_iin_trace_pending = true;
             break;
 
@@ -1806,7 +1786,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.status.bq.id_valid) {
                 PowerManager_SetState(POWER_MANAGER_RUN);
             }
-            PowerManager_LogBqMonitor();
             break;
 
         default:

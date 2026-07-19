@@ -42,41 +42,6 @@ uint32_t TPS25751_ReadLe32(const uint8_t *data)
            ((uint32_t)data[3] << 24);
 }
 
-static uint32_t TPS25751_GetLeBitField(const uint8_t *data,
-                                       uint16_t start_bit,
-                                       uint8_t width)
-{
-    uint32_t value = 0U;
-    uint8_t i;
-
-    for (i = 0U; i < width; ++i) {
-        uint16_t bit = (uint16_t)(start_bit + i);
-        if ((data[bit / 8U] & (uint8_t)(1U << (bit % 8U))) != 0U) {
-            value |= (1UL << i);
-        }
-    }
-    return value;
-}
-
-static void TPS25751_SetLeBitField(uint8_t *data,
-                                   uint16_t start_bit,
-                                   uint8_t width,
-                                   uint32_t value)
-{
-    uint8_t i;
-
-    for (i = 0U; i < width; ++i) {
-        uint16_t bit = (uint16_t)(start_bit + i);
-        uint8_t mask = (uint8_t)(1U << (bit % 8U));
-
-        if ((value & (1UL << i)) != 0U) {
-            data[bit / 8U] |= mask;
-        } else {
-            data[bit / 8U] &= (uint8_t)~mask;
-        }
-    }
-}
-
 static void TPS25751_WriteLe32(uint8_t *data, uint32_t value)
 {
     data[0] = (uint8_t)value;
@@ -750,7 +715,7 @@ bool TPS25751_DecodeCapabilities(TPS25751_Capabilities_t *capabilities,
                                  const uint8_t *data,
                                  uint8_t length)
 {
-    /* RX_SOURCE_CAPS, RX_SINK_CAPS and TX_SINK_CAPS store PDO1 directly
+    /* RX_SOURCE_CAPS and RX_SINK_CAPS store PDO1 directly
      * after the one-byte object-count field.  Validate only the bytes
      * required by the advertised count, not the register's maximum size. */
     return TPS25751_DecodeCapabilitiesAt(capabilities, data, length, 1U);
@@ -763,61 +728,6 @@ bool TPS25751_DecodeTxSourceCapabilities(
 {
     /* TX_SOURCE_CAPS has two policy bytes between the object count and PDO1. */
     return TPS25751_DecodeCapabilitiesAt(capabilities, data, length, 3U);
-}
-
-bool TPS25751_DecodeAutoNegotiateSink(
-    TPS25751_AutoNegotiateSink_t *policy,
-    const uint8_t *data,
-    uint8_t length)
-{
-    if ((policy == NULL) || (data == NULL) ||
-        (length < TPS25751_AUTO_NEGOTIATE_SINK_LEN)) {
-        return false;
-    }
-
-    memset(policy, 0, sizeof(*policy));
-    memcpy(policy->raw, data, TPS25751_AUTO_NEGOTIATE_SINK_LEN);
-    policy->capability_mismatch_power_mw =
-        TPS25751_GetLeBitField(data, 52U, 10U) * 250U;
-    policy->min_voltage_mv =
-        TPS25751_GetLeBitField(data, 42U, 10U) * 50U;
-    policy->max_voltage_mv =
-        TPS25751_GetLeBitField(data, 32U, 10U) * 50U;
-    policy->sink_min_required_power_mw =
-        TPS25751_GetLeBitField(data, 22U, 10U) * 250U;
-    policy->auto_disable_sink_on_mismatch =
-        TPS25751_GetLeBitField(data, 6U, 1U) != 0U;
-    policy->auto_compute_max_voltage =
-        TPS25751_GetLeBitField(data, 5U, 1U) != 0U;
-    policy->auto_compute_min_voltage =
-        TPS25751_GetLeBitField(data, 4U, 1U) != 0U;
-    policy->no_capability_mismatch =
-        TPS25751_GetLeBitField(data, 3U, 1U) != 0U;
-    policy->auto_compute_min_power =
-        TPS25751_GetLeBitField(data, 2U, 1U) != 0U;
-    return true;
-}
-
-bool TPS25751_PatchAutoNegotiateSinkMinPower(
-    uint8_t data[TPS25751_AUTO_NEGOTIATE_SINK_LEN],
-    uint32_t min_power_mw)
-{
-    uint32_t encoded_power;
-
-    if ((data == NULL) || (min_power_mw > 255750U) ||
-        ((min_power_mw % 250U) != 0U)) {
-        return false;
-    }
-
-    encoded_power = min_power_mw / 250U;
-
-    /* TPS25751 AUTO_NEGOTIATE_SINK: use the explicit requested power and
-     * keep "No USB PD Capability Mismatch" enabled.  All other policy
-     * fields, including the voltage limits, are preserved byte-for-byte. */
-    TPS25751_SetLeBitField(data, 2U, 1U, 0U);
-    TPS25751_SetLeBitField(data, 3U, 1U, 1U);
-    TPS25751_SetLeBitField(data, 22U, 10U, encoded_power);
-    return true;
 }
 
 TPS25751_Rdo_t TPS25751_DecodeRdo(
