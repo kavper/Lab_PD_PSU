@@ -1,0 +1,30 @@
+#ifndef BQ76922_H
+#define BQ76922_H
+
+#include "stm32g4xx_hal.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* BQ76922 on I2C_USBPD together with TPS25751. Schematic note: 0x08. */
+#define BQ76922_I2C_ADDR_7BIT            0x08U
+
+typedef enum {
+    BQ76922_OK = 0,
+    BQ76922_NOT_READY,
+    BQ76922_I2C_ERROR,
+    BQ76922_INVALID_ARG
+} BQ76922_Status_t;
+
+typedef struct {
+    I2C_HandleTypeDef *hi2c;
+    uint8_t address_7bit;
+    bool probed;
+    bool present;
+} BQ76922_Device_t;
+
+void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);
+BQ76922_Status_t BQ76922_Probe(BQ76922_Device_t *dev);
+bool BQ76922_IsPresent(const BQ76922_Device_t *dev);
+
+#endif /* BQ76922_H */

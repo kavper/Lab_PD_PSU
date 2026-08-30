@@ -46,17 +46,15 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/bq25731.c
+    Core/Src/bq76922.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
-    Core/Src/gui.c
     Core/Src/measurements.c
     Core/Src/power_manager.c
     Core/Src/power_stage.c
     Core/Src/psu_gui_api.c
     Core/Src/tps25751.c
     Core/Src/tps_int_event.c
-    Drivers/ssd1306/ssd1306.c
-    Drivers/ssd1306/ssd1306_fonts.c
 )
 
 # Add include paths

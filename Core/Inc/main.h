@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "board_rev.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -59,65 +59,68 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define LED2_Pin GPIO_PIN_14
-#define LED2_GPIO_Port GPIOC
-#define LED1_Pin GPIO_PIN_15
-#define LED1_GPIO_Port GPIOC
+#define PGOOD_5V_Pin GPIO_PIN_14
+#define PGOOD_5V_GPIO_Port GPIOC
 #define RESET_Pin GPIO_PIN_10
 #define RESET_GPIO_Port GPIOG
+#define ADC_VBUS_Pin GPIO_PIN_0
+#define ADC_VBUS_GPIO_Port GPIOC
 #define ADC_VBAT_Pin GPIO_PIN_0
 #define ADC_VBAT_GPIO_Port GPIOA
+#define I_IN_BUCK_Pin GPIO_PIN_1
+#define I_IN_BUCK_GPIO_Port GPIOA
+#define I_OUT_BOOST_Pin GPIO_PIN_3
+#define I_OUT_BOOST_GPIO_Port GPIOA
+#define STM_OTG_EN_Pin GPIO_PIN_4
+#define STM_OTG_EN_GPIO_Port GPIOA
+#define FAN_TACH_Pin GPIO_PIN_5
+#define FAN_TACH_GPIO_Port GPIOA
+#define FAN_PWM_Pin GPIO_PIN_7
+#define FAN_PWM_GPIO_Port GPIOA
+#define ADC_REMOTE_P_Pin GPIO_PIN_0
+#define ADC_REMOTE_P_GPIO_Port GPIOB
+#define ADC_REMOTE_N_Pin GPIO_PIN_1
+#define ADC_REMOTE_N_GPIO_Port GPIOB
 #define ADC_VOUT_Pin GPIO_PIN_2
-#define ADC_VOUT_GPIO_Port GPIOA
-#define OTG_EN_Pin GPIO_PIN_4
-#define OTG_EN_GPIO_Port GPIOA
-#define ADC_IOUT_Pin GPIO_PIN_6
-#define ADC_IOUT_GPIO_Port GPIOA
-#define SD_Pin GPIO_PIN_7
-#define SD_GPIO_Port GPIOA
-#define FLT_Pin GPIO_PIN_4
-#define FLT_GPIO_Port GPIOC
-#define STBY_Pin GPIO_PIN_5
-#define STBY_GPIO_Port GPIOC
-#define BTN_ON_OFF_Pin GPIO_PIN_0
-#define BTN_ON_OFF_GPIO_Port GPIOB
-#define BTN_AUX1_Pin GPIO_PIN_1
-#define BTN_AUX1_GPIO_Port GPIOB
-#define BTN_AUX2_Pin GPIO_PIN_2
-#define BTN_AUX2_GPIO_Port GPIOB
-#define I2C_OLED_SCL_Pin GPIO_PIN_8
-#define I2C_OLED_SCL_GPIO_Port GPIOC
-#define I2C_OLED_SDA_Pin GPIO_PIN_9
-#define I2C_OLED_SDA_GPIO_Port GPIOC
-#define ENC_BTN_Pin GPIO_PIN_5
-#define ENC_BTN_GPIO_Port GPIOB
-#define ENC_A_Pin GPIO_PIN_6
-#define ENC_A_GPIO_Port GPIOB
-#define ENC_B_Pin GPIO_PIN_7
-#define ENC_B_GPIO_Port GPIOB
+#define ADC_VOUT_GPIO_Port GPIOB
+#define HRTIM_FLT_Pin GPIO_PIN_10
+#define HRTIM_FLT_GPIO_Port GPIOB
+#define I_L_MEAS_Pin GPIO_PIN_11
+#define I_L_MEAS_GPIO_Port GPIOB
+#define ADC_LOCAL_VOUT_Pin GPIO_PIN_14
+#define ADC_LOCAL_VOUT_GPIO_Port GPIOB
+#define I_L_ZERO_Pin GPIO_PIN_15
+#define I_L_ZERO_GPIO_Port GPIOB
+#define BMS_ALERT_Pin GPIO_PIN_10
+#define BMS_ALERT_GPIO_Port GPIOA
+#define BOOST_TR_FLT_Pin GPIO_PIN_15
+#define BOOST_TR_FLT_GPIO_Port GPIOA
+#define BUCK_TR_EN_Pin GPIO_PIN_10
+#define BUCK_TR_EN_GPIO_Port GPIOC
+#define BUCK_TR_FLT_Pin GPIO_PIN_11
+#define BUCK_TR_FLT_GPIO_Port GPIOC
+#define BOOST_TR_EN_Pin GPIO_PIN_12
+#define BOOST_TR_EN_GPIO_Port GPIOC
+#define LED_Pin GPIO_PIN_2
+#define LED_GPIO_Port GPIOD
+#define BLEED_ON_Pin GPIO_PIN_5
+#define BLEED_ON_GPIO_Port GPIOB
+#define REMOTE_ON_Pin GPIO_PIN_6
+#define REMOTE_ON_GPIO_Port GPIOB
+#define POWER_PERMIT_G4_Pin GPIO_PIN_7
+#define POWER_PERMIT_G4_GPIO_Port GPIOB
+#define I2C_USBPD_IRQ_Pin GPIO_PIN_9
+#define I2C_USBPD_IRQ_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#ifndef BTN_ONOFF_Pin
-#define BTN_ONOFF_Pin BTN_ON_OFF_Pin
-#define BTN_ONOFF_GPIO_Port BTN_ON_OFF_GPIO_Port
-#endif
-
-#ifndef ENC_A_Pin
-#define ENC_A_Pin GPIO_PIN_6
-#define ENC_A_GPIO_Port GPIOB
-#endif
-
-#ifndef ENC_B_Pin
-#define ENC_B_Pin GPIO_PIN_7
-#define ENC_B_GPIO_Port GPIOB
-#endif
-
-#ifndef ENC_SW_Pin
-#define ENC_SW_Pin ENC_BTN_Pin
-#define ENC_SW_GPIO_Port ENC_BTN_GPIO_Port
-#define ENC_SW_EXTI_IRQn EXTI9_5_IRQn
-#endif
-
+#define LED1_Pin LED_Pin
+#define LED1_GPIO_Port LED_GPIO_Port
+#define LED2_Pin LED_Pin
+#define LED2_GPIO_Port LED_GPIO_Port
+#define OTG_EN_Pin STM_OTG_EN_Pin
+#define OTG_EN_GPIO_Port STM_OTG_EN_GPIO_Port
+#define FLT_Pin HRTIM_FLT_Pin
+#define FLT_GPIO_Port HRTIM_FLT_GPIO_Port
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

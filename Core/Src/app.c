@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "board_rev.h"
 #include "control_cv.h"
 #include "debug_uart.h"
 #include "measurements.h"
@@ -30,7 +31,7 @@
 #define DUTY_MAX_ABS                         1.000f
 
 #define DUTY_BUCK_MIN                        0.020f
-#define DUTY_BUCK_MAX                        0.950f
+#define DUTY_BUCK_MAX                        1.000f
 
 /* BUCK_BOOST mixed-mode duty limits are set here. */
 #define DUTY_MIXED_A                         0.80f
@@ -321,21 +322,19 @@ static void App_LedTask(void)
 {
     uint32_t now_ms = HAL_GetTick();
 
-    HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
-
     if ((uint32_t)(now_ms - app.last_led_tick_ms) >= APP_LED_BLINK_MS) {
         app.last_led_tick_ms = now_ms;
         app.led_blink_state = !app.led_blink_state;
-        HAL_GPIO_WritePin(LED2_GPIO_Port,
-                          LED2_Pin,
+        HAL_GPIO_WritePin(LED_GPIO_Port,
+                          LED_Pin,
                           app.led_blink_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
     }
 }
 
 static bool App_IsDriverAwake(void)
 {
-    return (HAL_GPIO_ReadPin(STBY_GPIO_Port, STBY_Pin) == GPIO_PIN_SET) &&
-           (HAL_GPIO_ReadPin(SD_GPIO_Port, SD_Pin) == GPIO_PIN_SET);
+    return (HAL_GPIO_ReadPin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin) == GPIO_PIN_SET) &&
+           (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
 }
 
 static bool App_IsZeroSetpointTarget(void)
@@ -1524,8 +1523,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     app.buck_boost_softstart_start_duty_c = BUCK_BOOST_DUTY_C_INIT_MIN;
     app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
 
-    HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
     PowerManager_Init(hi2c_pd);
     App_ControlTimerInit();
@@ -1540,7 +1538,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     buck_enter_margin_x100 = App_ToFixed(REGION_BUCK_ENTER_MARGIN_V, 100);
     buck_exit_margin_x100 = App_ToFixed(REGION_BUCK_EXIT_MARGIN_V, 100);
 
-    Debug_Printf("\r\n[APP] Start. ctrl=%lu Hz hold=%lu ms reset=0x%08lX",
+    Debug_Printf("\r\n[APP] Start hw=%s ctrl=%lu Hz hold=%lu ms reset=0x%08lX",
+                 BOARD_HW_REV_STRING,
                  (unsigned long)APP_CTRL_FREQ_HZ,
                  (unsigned long)APP_STARTUP_HOLD_MS,
                  (unsigned long)reset_flags);

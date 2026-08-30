@@ -1,7 +1,8 @@
 #include "measurements.h"
+#include "board_rev.h"
 
 #define MEAS_ADC_TIMEOUT_MS              5U
-#define MEAS_ADC_VREF_V                  3.3f
+#define MEAS_ADC_VREF_V                  BOARD_VREF_V
 #define MEAS_ADC_FULL_SCALE              4095.0f
 #define MEAS_IIR_ALPHA                   0.20f
 #define MEAS_DMA_DEPTH                   64U
@@ -10,17 +11,10 @@
 #define MEAS_ADC2_DMA_LENGTH             MEAS_DMA_DEPTH
 #define MEAS_DMA_SENTINEL                0xFFFFU
 
-/*
- * TODO: ustaw zgodnie z realnym torem pomiarowym.
- * Tymczasowe 11:1 daje sensowny zakres bring-up ok. 0..36 V z ADC 3.3 V.
- * VOUT skorygowane po wydluzeniu sample time: FW 30.00 V -> miernik 28.85 V.
- */
-#define MEAS_VIN_DIVIDER_RATIO           11.0f
-#define MEAS_VOUT_DIVIDER_RATIO          10.807530f
-/* Kalibracja 2-punktowa: 0.008 A -> 0.000 A, 2.764 A -> 2.741 A. */
-#define MEAS_IOUT_CAL_GAIN               1.813604f
-#define MEAS_IOUT_A_PER_V                (1.0f * MEAS_IOUT_CAL_GAIN)
-#define MEAS_IOUT_OFFSET_A               -0.007956f
+#define MEAS_VIN_DIVIDER_RATIO           BOARD_DIVIDER_RATIO
+#define MEAS_VOUT_DIVIDER_RATIO          BOARD_DIVIDER_RATIO
+#define MEAS_IOUT_A_PER_V                BOARD_INA296_A_PER_V
+#define MEAS_IOUT_OFFSET_A               0.0f
 
 typedef struct {
     ADC_HandleTypeDef *hadc1;
@@ -257,10 +251,12 @@ bool Measurements_Update(Measurements_t *meas)
         return false;
     }
 
-    /* ADC1 rank2: ADC_CHANNEL_1 (PA0, ADC_VBAT_Pin -> tymczasowo traktowane jako VIN). */
-    raw_vout = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
-    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
-    raw_iout = adc2_dma_buffer[adc2_slot];
+    /* ADC1 rank1: ADC_CHANNEL_1 PA0 ADC_VBAT (VIN).
+     * ADC1 rank2: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3).
+     * ADC2 rank1: ADC_CHANNEL_12 PB2 ADC_VOUT. */
+    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
+    raw_iout = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
+    raw_vout = adc2_dma_buffer[adc2_slot];
 
     if ((raw_vout == MEAS_DMA_SENTINEL) ||
         (raw_vin == MEAS_DMA_SENTINEL) ||
@@ -281,11 +277,8 @@ bool Measurements_Update(Measurements_t *meas)
     vout = Meas_AdcToVoltage(raw_vout) * MEAS_VOUT_DIVIDER_RATIO;
     vin = Meas_AdcToVoltage(raw_vin) * MEAS_VIN_DIVIDER_RATIO;
     vbat = vin;
-    iout = Meas_AdcToVoltage(raw_iout) * MEAS_IOUT_A_PER_V + MEAS_IOUT_OFFSET_A;
-
-    if (iout < 0.0f) {
-        iout = 0.0f;
-    }
+    iout = (Meas_AdcToVoltage(raw_iout) - BOARD_INA296_OFFSET_V) *
+           MEAS_IOUT_A_PER_V + MEAS_IOUT_OFFSET_A;
 
     if (!g_meas_ctx.filter_ready) {
         g_meas_ctx.vin_filt = vin;

@@ -5,13 +5,27 @@
 #define POWER_STAGE_DUTY_SCALE               10000U
 #define POWER_STAGE_MASTER_REFRESH_PRESCALER HRTIM_PRESCALERRATIO_DIV4
 #define POWER_STAGE_MASTER_MAX_PERIOD        0xFFFFU
-#define POWER_STAGE_ENABLE_DELAY_MS          1U
+#define POWER_STAGE_ENABLE_DELAY_MS          5U
 #define POWER_STAGE_PERIOD_MIN_TICKS         64U
 #define POWER_STAGE_PERIOD_MAX_TICKS         0xFFDFU
 #define POWER_STAGE_ADC_TRIGGER_10K          5000U
 #define POWER_STAGE_TIMERS                   (HRTIM_TIMERID_TIMER_A | HRTIM_TIMERID_TIMER_C)
 #define POWER_STAGE_OUTPUTS                  (HRTIM_OUTPUT_TA1 | HRTIM_OUTPUT_TA2 | \
                                               HRTIM_OUTPUT_TC1 | HRTIM_OUTPUT_TC2)
+
+static void PowerStage_SetIsolatedSupplies(bool enable)
+{
+    GPIO_PinState state = enable ? GPIO_PIN_SET : GPIO_PIN_RESET;
+
+    HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin, state);
+    HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin, state);
+}
+
+static bool PowerStage_IsolatedSuppliesEnabled(void)
+{
+    return (HAL_GPIO_ReadPin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin) == GPIO_PIN_SET) &&
+           (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
+}
 
 typedef enum {
     POWER_STAGE_OUTPUT_NONE = 0,
@@ -715,8 +729,6 @@ static bool PowerStage_StartCounters(void)
 
 void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
 {
-    GPIO_InitTypeDef gpio_cfg = {0};
-
     ps.hhrtim = hhrtim;
     ps.region = POWER_REGION_BUCK;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -741,14 +753,9 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.refresh_a_active = false;
     ps.refresh_c_active = false;
 
-    /* FLT ma byc wejsciem open-drain z zewnetrznym pull-up. */
-    gpio_cfg.Pin = FLT_Pin;
-    gpio_cfg.Mode = GPIO_MODE_INPUT;
-    gpio_cfg.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(FLT_GPIO_Port, &gpio_cfg);
+    /* ACS37100 FAULT is HRTIM_FLT3 (PB10), configured as AF in CubeMX. */
 
-    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
+    PowerStage_SetIsolatedSupplies(false);
 
     PowerStage_ConfigureComplementaryOutputs();
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -768,8 +775,7 @@ bool PowerStage_Enable(void)
     ps.last_error = POWER_STAGE_ERR_NONE;
     PowerStage_DisableBurstMode();
 
-    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
+    PowerStage_SetIsolatedSupplies(true);
     HAL_Delay(POWER_STAGE_ENABLE_DELAY_MS);
 
     if (PowerStage_IsFaultActive()) {
@@ -811,8 +817,7 @@ void PowerStage_Disable(void)
     PowerStage_DisableBurstMode();
     PowerStage_SetDuty(0.0f, 0.0f);
 
-    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+    PowerStage_SetIsolatedSupplies(false);
     ps.enabled = false;
     ps.discharge_active = false;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -835,8 +840,7 @@ void PowerStage_SuspendOutputsKeepDriverOn(void)
     PowerStage_DisableBurstMode();
     PowerStage_SetDuty(0.0f, 0.0f);
 
-    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
+    PowerStage_SetIsolatedSupplies(true);
     ps.enabled = false;
     ps.discharge_active = false;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -1055,8 +1059,7 @@ void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods)
         (void)HAL_HRTIM_BurstModeSoftwareTrigger(ps.hhrtim);
     }
 
-    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(SD_GPIO_Port, SD_Pin, GPIO_PIN_SET);
+    PowerStage_SetIsolatedSupplies(true);
 
     if (PowerStage_IsFaultActive()) {
         ps.last_error = POWER_STAGE_ERR_DRIVER_FAULT;
@@ -1162,7 +1165,20 @@ PowerStage_Region_t PowerStage_GetRegion(void)
 
 bool PowerStage_IsFaultActive(void)
 {
-    return (HAL_GPIO_ReadPin(FLT_GPIO_Port, FLT_Pin) == GPIO_PIN_RESET);
+    if (HAL_GPIO_ReadPin(FLT_GPIO_Port, FLT_Pin) == GPIO_PIN_RESET) {
+        return true;
+    }
+
+    if (PowerStage_IsolatedSuppliesEnabled()) {
+        if (HAL_GPIO_ReadPin(BUCK_TR_FLT_GPIO_Port, BUCK_TR_FLT_Pin) == GPIO_PIN_RESET) {
+            return true;
+        }
+        if (HAL_GPIO_ReadPin(BOOST_TR_FLT_GPIO_Port, BOOST_TR_FLT_Pin) == GPIO_PIN_RESET) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool PowerStage_IsEnabled(void)
