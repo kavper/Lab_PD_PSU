@@ -341,15 +341,13 @@ void HAL_HRTIM_MspPostInit(HRTIM_HandleTypeDef* hhrtim)
     GPIO_InitStruct.Alternate = GPIO_AF13_HRTIM1;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+    /* USER CODE BEGIN HRTIM1_MspPostInit 1 */
     GPIO_InitStruct.Pin = HRTIM_FLT_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF13_HRTIM1;
     HAL_GPIO_Init(HRTIM_FLT_GPIO_Port, &GPIO_InitStruct);
-
-    /* USER CODE BEGIN HRTIM1_MspPostInit 1 */
-
     /* USER CODE END HRTIM1_MspPostInit 1 */
   }
 
@@ -408,8 +406,8 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
     */
     GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF8_I2C4;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
@@ -422,7 +420,12 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
     HAL_NVIC_SetPriority(I2C4_ER_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(I2C4_ER_IRQn);
     /* USER CODE BEGIN I2C4_MspInit 1 */
-
+    GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF8_I2C4;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
     /* USER CODE END I2C4_MspInit 1 */
   }
 

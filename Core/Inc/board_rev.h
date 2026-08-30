@@ -2,17 +2,20 @@
 #define BOARD_REV_H
 
 /*
- * This firmware branch targets PCB revision 2 (August 2026 schematic).
- * Previous hardware stays on git branch main.
+ * Hardware revision 2 (schematic 2026-08-30). Previous PCB stays on git main.
  *
- * Rev2 highlights:
- * - USB-PD: TPS25751D family on I2C4 (PC6/PC7), IRQ on PB9
- * - BMS: BQ76922 on the same I2C_USBPD bus, address 0x08, ALERT on PA10
- * - Charger BQ25731 still on TPS master I2C (I2C_CONFIG), STM_OTG_EN on PA4
- * - GaN MP1918 + UCC33420 isolated HS supplies (100% duty, no bootstrap refresh)
- * - Output current: INA296A3 on 1 mOhm, I_OUT_BOOST = PA3
- * - Inductor current ACS37100 is debug-only (PB11/PB15) + HRTIM_FLT on PB10
- * - No OLED/encoder/buttons on this MCU (GUI lives off-board via USART1 to H7)
+ * CubeMX workflow:
+ * - Pins, ADC ranks, HRTIM, I2C4, USART2, DMA live in Lab_PD_PSU.ioc.
+ *   After you change something in CubeMX, Generate Code (Keep User Code = ON).
+ * - Application logic is in Core/Src files CubeMX does not own
+ *   (app, measurements, power_stage, power_manager, board_mx, ...).
+ * - Extra HAL that CubeMX would wipe goes in USER CODE blocks, which call
+ *   board_mx.c. Do not put app logic in the generated MX_* bodies.
+ * - main.h pin #defines are regenerated from CubeMX labels. Aliases
+ *   (LED1, OTG_EN, FLT) stay in USER CODE BEGIN Private defines.
+ *
+ * If CubeMX restores HSE-only clock (Error_Handler on oscillator fail),
+ * keep the USER CODE call to BoardMx_StartHsiPll() in SystemClock_Config.
  */
 
 #define BOARD_HW_REV                         2U
@@ -24,14 +27,12 @@
 #define BOARD_DIVIDER_RATIO \
     ((BOARD_DIVIDER_TOP_OHM + BOARD_DIVIDER_BOT_OHM) / BOARD_DIVIDER_BOT_OHM)
 
-/* INA296A3: 100 V/V, 1 mOhm shunt, REF1=GND REF2=+VREF => mid-scale 1.5 V. */
 #define BOARD_INA296_GAIN                    100.0f
 #define BOARD_INA296_SHUNT_OHM               0.001f
 #define BOARD_INA296_A_PER_V \
     (1.0f / (BOARD_INA296_GAIN * BOARD_INA296_SHUNT_OHM))
 #define BOARD_INA296_OFFSET_V                (BOARD_VREF_V * 0.5f)
 
-/* ACS37100-025B3: ~52.8 mV/A, differential VOUT-VREF. Debug only. */
 #define BOARD_ACS37100_V_PER_A               0.0528f
 
 #define BOARD_HAS_OLED                       0U

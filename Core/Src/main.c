@@ -6,6 +6,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app.h"
+#include "board_mx.h"
 #include "power_stage.h"
 /* USER CODE END Includes */
 
@@ -109,7 +110,6 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-  HAL_StatusTypeDef oscillator_status;
 
   /** Configure the main internal regulator output voltage
   */
@@ -127,28 +127,14 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
-  oscillator_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
-  if (oscillator_status != HAL_OK)
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
-    /* A replacement MCU can expose a marginal OSC_IN/OSC_OUT solder joint.
-     * Keep the board diagnosable and fully functional by falling back to
-     * HSI16. DIV4 gives the same 4 MHz PLL input as HSE8/DIV2, so SYSCLK and
-     * all peripheral clocks remain at their generated 170 MHz values. */
-    RCC_OscInitStruct = (RCC_OscInitTypeDef){0};
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-    RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
-    RCC_OscInitStruct.PLL.PLLN = 85;
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-    RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    /* USER CODE BEGIN Clock_OscConfig_Error */
+    if (BoardMx_StartHsiPll() != HAL_OK)
     {
       Error_Handler();
     }
+    /* USER CODE END Clock_OscConfig_Error */
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
@@ -472,18 +458,7 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN HRTIM1_Init 2 */
-  {
-    HRTIM_FaultCfgTypeDef fault_cfg = {0};
-
-    fault_cfg.Source = HRTIM_FAULTSOURCE_DIGITALINPUT;
-    fault_cfg.Polarity = HRTIM_FAULTPOLARITY_LOW;
-    fault_cfg.Filter = HRTIM_FAULTFILTER_NONE;
-    fault_cfg.Lock = HRTIM_FAULTLOCK_READWRITE;
-    if (HAL_HRTIM_FaultConfig(&hhrtim1, HRTIM_FAULT_3, &fault_cfg) != HAL_OK) {
-      Error_Handler();
-    }
-    HAL_HRTIM_FaultModeCtl(&hhrtim1, HRTIM_FAULT_3, HRTIM_FAULTMODECTL_ENABLED);
-  }
+  BoardMx_ApplyHrtimFault(&hhrtim1);
   /* USER CODE END HRTIM1_Init 2 */
   HAL_HRTIM_MspPostInit(&hhrtim1);
 

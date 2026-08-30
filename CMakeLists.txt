@@ -45,6 +45,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
+    Core/Src/board_mx.c
     Core/Src/bq25731.c
     Core/Src/bq76922.c
     Core/Src/control_cv.c
