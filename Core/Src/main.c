@@ -27,6 +27,7 @@ ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
 DMA_HandleTypeDef hdma_adc2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 HRTIM_HandleTypeDef hhrtim1;
 
@@ -75,6 +76,11 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  /* Stable hook if CubeMX rewrites SystemClock_Config without OscConfig USER CODE. */
+  if (BoardMx_EnsureSysclkPll() != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -130,6 +136,7 @@ void SystemClock_Config(void)
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     /* USER CODE BEGIN Clock_OscConfig_Error */
+    /* Keep User Code: CubeMX may wrap Error_Handler here; keep the HSI PLL call. */
     if (BoardMx_StartHsiPll() != HAL_OK)
     {
       Error_Handler();
@@ -222,6 +229,7 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
+  /* Rank 1 PA0 ADC1_IN1 ADC_VBAT = VIN. Rank 2 PA3 ADC1_IN4 I_OUT_BOOST INA296. */
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -278,6 +286,7 @@ static void MX_ADC2_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC2_Init 2 */
+  /* Rank 1 PB2 ADC2_IN12 ADC_VOUT. Matches measurements.c DMA slot 0. */
   /* USER CODE END ADC2_Init 2 */
 
 }
@@ -574,6 +583,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -625,10 +637,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = FAN_TACH_Pin|BMS_ALERT_Pin|BOOST_TR_FLT_Pin;
+  GPIO_InitStruct.Pin = FAN_TACH_Pin|BOOST_TR_FLT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = BMS_ALERT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BMS_ALERT_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = BUCK_TR_EN_Pin|BOOST_TR_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -647,10 +664,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = POWER_PERMIT_G4_Pin|I2C_USBPD_IRQ_Pin;
+  GPIO_InitStruct.Pin = POWER_PERMIT_G4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(POWER_PERMIT_G4_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = I2C_USBPD_IRQ_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(I2C_USBPD_IRQ_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = I_IN_BUCK_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -668,11 +690,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ADC_VBUS_GPIO_Port, &GPIO_InitStruct);
 
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+/* CubeMX workflow: Keep User Code ON, Generate, do not edit MX_* bodies.
+ * Pins/clocks/peripherals belong in Lab_PD_PSU.ioc so they show in CubeMX. */
 /* USER CODE END 4 */
 
 /**

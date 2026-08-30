@@ -251,9 +251,9 @@ bool Measurements_Update(Measurements_t *meas)
         return false;
     }
 
-    /* ADC1 rank1: ADC_CHANNEL_1 PA0 ADC_VBAT (VIN).
-     * ADC1 rank2: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3).
-     * ADC2 rank1: ADC_CHANNEL_12 PB2 ADC_VOUT. */
+    /* ADC1 rank1 DMA[0]: ADC_CHANNEL_1 PA0 ADC_VBAT (VIN via 51k/4.7k).
+     * ADC1 rank2 DMA[1]: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3).
+     * ADC2 rank1 DMA[0]: ADC_CHANNEL_12 PB2 ADC_VOUT. Keep ranks in Lab_PD_PSU.ioc. */
     raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
     raw_iout = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
     raw_vout = adc2_dma_buffer[adc2_slot];

@@ -4,18 +4,36 @@
 /*
  * Hardware revision 2 (schematic 2026-08-30). Previous PCB stays on git main.
  *
- * CubeMX workflow:
- * - Pins, ADC ranks, HRTIM, I2C4, USART2, DMA live in Lab_PD_PSU.ioc.
- *   After you change something in CubeMX, Generate Code (Keep User Code = ON).
- * - Application logic is in Core/Src files CubeMX does not own
- *   (app, measurements, power_stage, power_manager, board_mx, ...).
- * - Extra HAL that CubeMX would wipe goes in USER CODE blocks, which call
- *   board_mx.c. Do not put app logic in the generated MX_* bodies.
- * - main.h pin #defines are regenerated from CubeMX labels. Aliases
- *   (LED1, OTG_EN, FLT) stay in USER CODE BEGIN Private defines.
+ * =============================================================================
+ * CubeMX <-> handwritten firmware  /  CubeMX <-> kod ręczny
+ * =============================================================================
  *
- * If CubeMX restores HSE-only clock (Error_Handler on oscillator fail),
- * keep the USER CODE call to BoardMx_StartHsiPll() in SystemClock_Config.
+ * PL:
+ * 1. Lab_PD_PSU.ioc jest jedynym źródłem prawdy dla pinów, zegara, ADC, HRTIM,
+ *    I2C4, USART2, DMA i NVIC. To, co ma być widoczne w CubeMX, musi być w IOC.
+ *    Nie chowaj konfiguracji MX tylko w plikach .c.
+ * 2. Project Manager: Keep User Code = ON (KeepUserCode=true w .ioc).
+ *    Generate Code NIE może kasować firmware w USER CODE ani plików, których
+ *    CubeMX nie regeneruje.
+ * 3. Po Generate sprawdź cmake/stm32cubemx/CMakeLists.txt (CubeMX go nadpisuje).
+ *    Źródła aplikacji dopisuj w głównym CMakeLists.txt ORAZ w .extSettings
+ *    (Keil/IAR/Makefile). Nie edytuj cmake/stm32cubemx ręcznie.
+ * 4. Nie edytuj ciał MX_* (poza blokami USER CODE). Dodatkowy HAL:
+ *    board_mx.c, wołany z USER CODE.
+ * 5. main.h: etykiety pinów regeneruje CubeMX. Aliasy (LED1, OTG_EN, FLT)
+ *    zostają w USER CODE BEGIN Private defines.
+ * 6. gui.c / OLED nie są na tej rewizji MCU — nie dodawaj ich do CMake/.extSettings.
+ *
+ * EN:
+ * 1. Lab_PD_PSU.ioc is the GUI source of truth for pins/clocks/peripherals.
+ * 2. Keep User Code ON. App logic lives in Core/Src files CubeMX does not own.
+ * 3. New app .c files: add to root CMakeLists.txt and .extSettings (same list).
+ * 4. Do not put MX-visible pin config only in C.
+ *
+ * Clock: HSE 8 MHz -> PLL 170 MHz is in the IOC. If the crystal fails,
+ * USER CODE Clock_OscConfig_Error and SysInit call board_mx HSI PLL fallback.
+ * If CubeMX rewrites SystemClock_Config to Error_Handler-only, Keep User Code
+ * still preserves those USER CODE blocks; SysInit is the stable second hook.
  */
 
 #define BOARD_HW_REV                         2U

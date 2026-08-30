@@ -1,0 +1,6 @@
+[ProjectFiles]
+HeaderPath=Drivers/ssd1306
+SourceFiles=Core/Src/app.c;Core/Src/board_mx.c;Core/Src/bq25731.c;Core/Src/bq76922.c;Core/Src/control_cv.c;Core/Src/debug_uart.c;Core/Src/measurements.c;Core/Src/power_manager.c;Core/Src/power_stage.c;Core/Src/psu_gui_api.c;Core/Src/tps25751.c;Core/Src/tps_int_event.c
+
+[Groups]
+App=Core/Src/app.c;Core/Src/board_mx.c;Core/Src/bq25731.c;Core/Src/bq76922.c;Core/Src/control_cv.c;Core/Src/debug_uart.c;Core/Src/measurements.c;Core/Src/power_manager.c;Core/Src/power_stage.c;Core/Src/psu_gui_api.c;Core/Src/tps25751.c;Core/Src/tps_int_event.c

@@ -1,10 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
 #
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
-#
-# User is free to modify the file as much as necessary
+# This file is generated only once (CubeMX does not overwrite it).
+# cmake/stm32cubemx/CMakeLists.txt IS overwritten on Generate Code.
+# Application .c files: list them below AND in .extSettings.
 #
 
 # Setup compiler settings
@@ -34,7 +33,8 @@ enable_language(C ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
-# Add STM32CubeMX generated sources
+# CubeMX overwrites cmake/stm32cubemx/CMakeLists.txt on Generate Code.
+# Keep application sources here (this file is generated only once).
 add_subdirectory(cmake/stm32cubemx)
 
 # Link directories setup
@@ -42,7 +42,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# Add sources to executable
+# Explicit app list (no GLOB — avoids picking up junk / gui.c).
+# NEW Core/Src/*.c for the firmware: add it HERE and in .extSettings.
+# Do not list CubeMX-owned files (main.c, stm32g4xx_it.c, stm32g4xx_hal_msp.c,
+# system_stm32g4xx.c, sysmem.c, syscalls.c) — they come from cmake/stm32cubemx.
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/board_mx.c

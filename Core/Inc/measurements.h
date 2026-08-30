@@ -16,6 +16,9 @@ typedef struct {
     bool valid;
 } Measurements_t;
 
+/* CubeMX ADC ranks (Lab_PD_PSU.ioc) must match DMA unpacking in measurements.c:
+ * ADC1 rank1 PA0 ADC_VBAT VIN, rank2 PA3 I_OUT_BOOST, ADC2 rank1 PB2 ADC_VOUT. */
+
 void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2);
 bool Measurements_Update(Measurements_t *meas);
 uint8_t Measurements_GetLastError(void);

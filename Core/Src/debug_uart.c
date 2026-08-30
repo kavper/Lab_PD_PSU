@@ -44,6 +44,14 @@ static bool Debug_UartDmaInit(UART_HandleTypeDef *huart)
         return false;
     }
 
+    if ((huart->hdmatx != NULL) && (huart->hdmatx->Instance != NULL)) {
+        HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 6, 0);
+        HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+        HAL_NVIC_SetPriority(USART2_IRQn, 6, 0);
+        HAL_NVIC_EnableIRQ(USART2_IRQn);
+        return true;
+    }
+
     __HAL_RCC_DMAMUX1_CLK_ENABLE();
     __HAL_RCC_DMA1_CLK_ENABLE();
 
