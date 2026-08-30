@@ -76,6 +76,30 @@ static bool LdoLink_ParseU8Token(const char *line, const char *key, uint8_t *out
     return true;
 }
 
+static bool LdoLink_ParseU32Token(const char *line, const char *key, uint32_t *out)
+{
+    const char *p;
+    char *end;
+    unsigned long value;
+
+    if ((line == NULL) || (key == NULL) || (out == NULL)) {
+        return false;
+    }
+
+    p = strstr(line, key);
+    if (p == NULL) {
+        return false;
+    }
+
+    value = strtoul(p + strlen(key), &end, 10);
+    if (end == (p + strlen(key))) {
+        return false;
+    }
+
+    *out = (uint32_t)value;
+    return true;
+}
+
 static void LdoLink_ParseFaultToken(const char *line)
 {
     const char *p;
@@ -133,6 +157,24 @@ static void LdoLink_HandleTlmLine(const char *line)
     }
     if (LdoLink_ParseU8Token(line, "cccv=", &value)) {
         s_status.cc_cv = (value != 0U) ? 1U : 0U;
+    }
+    if (LdoLink_ParseU32Token(line, "vset=", &s_status.vset_mv)) {
+        /* keep */
+    }
+    if (LdoLink_ParseU32Token(line, "vout=", &s_status.vout_mv)) {
+        /* keep */
+    }
+    if (LdoLink_ParseU32Token(line, "vin=", &s_status.vin_mv)) {
+        /* keep */
+    }
+    if (LdoLink_ParseU32Token(line, "iset=", &s_status.iset_ma)) {
+        /* keep */
+    }
+    if (LdoLink_ParseU32Token(line, "iout=", &s_status.iout_ma)) {
+        /* keep */
+    }
+    if (LdoLink_ParseU32Token(line, "vpre=", &s_status.vpre_mv)) {
+        s_status.vpre_present = true;
     }
     LdoLink_ParseFaultToken(line);
 

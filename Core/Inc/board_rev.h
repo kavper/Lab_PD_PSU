@@ -65,4 +65,9 @@
 /* POWER_PERMIT_G4 PB6: HIGH enables power-stage LDO, LOW kills it. */
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
+/* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
+#define BOARD_VPRE_MIN_V                     3.0f
+#define BOARD_VPRE_MAX_V                     36.0f
+#define BOARD_VPRE_MARGIN_V                  3.0f
+
 #endif /* BOARD_REV_H */

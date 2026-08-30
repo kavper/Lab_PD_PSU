@@ -1,6 +1,6 @@
 #include "power_stage.h"
 
-#include "ldo_link.h"
+#include "ldo_prereg.h"
 
 #include <stddef.h>
 
@@ -25,12 +25,12 @@ static void PowerStage_SetIsolatedSupplies(bool enable)
 
 void PowerStage_SetPowerPermit(bool permit)
 {
-    LdoLink_SetDcdcPermitRequest(permit);
+    LdoPrereg_SetPermitOverrideOff(!permit);
 }
 
 bool PowerStage_IsPowerPermitted(void)
 {
-    return LdoLink_IsPowerPermitted();
+    return LdoPrereg_IsPermitGranted();
 }
 
 static bool PowerStage_IsolatedSuppliesEnabled(void)
@@ -815,7 +815,6 @@ bool PowerStage_Enable(void)
     ps.enabled = true;
     ps.discharge_active = false;
     ps.last_error = POWER_STAGE_ERR_NONE;
-    LdoLink_SetDcdcPermitRequest(true);
     return true;
 }
 
@@ -831,7 +830,6 @@ void PowerStage_Disable(void)
     PowerStage_SetDuty(0.0f, 0.0f);
 
     PowerStage_SetIsolatedSupplies(false);
-    LdoLink_SetDcdcPermitRequest(false);
     ps.enabled = false;
     ps.discharge_active = false;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;

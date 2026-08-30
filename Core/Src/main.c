@@ -8,6 +8,7 @@
 #include "app.h"
 #include "board_mx.h"
 #include "ldo_link.h"
+#include "ldo_prereg.h"
 #include "host_link.h"
 #include "power_stage.h"
 /* USER CODE END Includes */
@@ -97,8 +98,9 @@ int main(void)
   MX_HRTIM1_Init();
   /* USER CODE BEGIN 2 */
   App_Init(&hhrtim1, &hadc1, &hadc2, &huart1, &hi2c4);
-  HostLink_Init(&huart1);
-  LdoLink_Init(&huart3);
+    HostLink_Init(&huart1);
+    LdoLink_Init(&huart3);
+    LdoPrereg_Init();
 
   /* USER CODE END 2 */
 

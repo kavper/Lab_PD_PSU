@@ -18,6 +18,13 @@ typedef struct {
     uint8_t pgood;
     uint8_t kill_reported;
     uint8_t cc_cv;
+    uint32_t vset_mv;
+    uint32_t vout_mv;
+    uint32_t vin_mv;
+    uint32_t iset_ma;
+    uint32_t iout_ma;
+    uint32_t vpre_mv;
+    bool vpre_present;
     uint32_t last_tlm_ms;
     uint32_t tlm_count;
     char fault[16];

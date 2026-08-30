@@ -3,6 +3,7 @@
 #include "app.h"
 #include "bq76922.h"
 #include "ldo_link.h"
+#include "ldo_prereg.h"
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
@@ -12,7 +13,7 @@
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
-#define HOST_LINK_TX_MAX             256U
+#define HOST_LINK_TX_MAX             384U
 #define HOST_LINK_TEL_DEFAULT_MS     200U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -80,11 +81,18 @@ static void HostLink_SendTelemetry(void)
     BQ76922_GetSnapshot(&g_bq76922, &bms);
     pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
 
+    LdoPrereg_Status_t prereg;
+    LdoLink_Status_t ldo;
+
+    LdoPrereg_GetStatus(&prereg);
+    LdoLink_GetStatus(&ldo);
+
     n = snprintf(line, sizeof(line),
                  "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u bms=%u alert=%u alarm=0x%04X c1_mv=%d c2_mv=%d c3_mv=%d "
-                 "c4_mv=%d c5_mv=%d pack_mv=%d i_cc2_ma=%d\r\n",
+                 "c4_mv=%d c5_mv=%d pack_mv=%d i_cc2_ma=%d "
+                 "g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
@@ -98,7 +106,7 @@ static void HostLink_SendTelemetry(void)
                  (long)HostLink_Mv(pd_v),
                  (long)HostLink_Ma(pd_a),
                  (long)HostLink_Ma(pd_w),
-                 (unsigned int)LdoLink_IsPowerPermitted(),
+                 (unsigned int)LdoPrereg_IsPermitGranted(),
                  (unsigned int)(bms.present ? 1U : 0U),
                  (unsigned int)((bms.alert_latched || bms.alert_pin) ? 1U : 0U),
                  (unsigned int)bms.alarm_status,
@@ -108,7 +116,13 @@ static void HostLink_SendTelemetry(void)
                  (int)bms.cell_mv[3],
                  (int)bms.cell_mv[4],
                  (int)bms.pack_mv,
-                 (int)bms.cc2_ma);
+                 (int)bms.cc2_ma,
+                 (unsigned int)(prereg.g0_active ? 1U : 0U),
+                 (unsigned int)(ldo.output_on ? 1U : 0U),
+                 (unsigned long)ldo.vout_mv,
+                 (long)(prereg.vpre_request_v * 1000.0f),
+                 (long)(prereg.vpre_command_v * 1000.0f),
+                 (unsigned int)(prereg.regulation_ok ? 1U : 0U));
     if (n > 0) {
         HostLink_Tx(line);
     }
@@ -221,11 +235,19 @@ static void HostLink_HandleLine(char *line)
     arg = HostLink_SkipToken(line);
 
     if (HostLink_EqToken(line, "ON")) {
-        PSU_Start();
-        HostLink_Tx("OK\r\n");
+        if (LdoPrereg_IsG0Active()) {
+            LdoPrereg_SetForceDisable(false);
+            LdoPrereg_SetPermitOverrideOff(false);
+            HostLink_Tx("OK G0\r\n");
+        } else {
+            PSU_Start();
+            HostLink_Tx("OK\r\n");
+        }
         return;
     }
     if (HostLink_EqToken(line, "OFF")) {
+        LdoPrereg_SetForceDisable(true);
+        LdoPrereg_SetPermitOverrideOff(true);
         PSU_Stop();
         HostLink_Tx("OK\r\n");
         return;
@@ -268,11 +290,12 @@ static void HostLink_HandleLine(char *line)
             return;
         }
         if (u32 == 0U) {
+            LdoPrereg_SetPermitOverrideOff(true);
+            LdoPrereg_SetForceDisable(true);
             PSU_Stop();
-            PowerStage_ForceSafeState();
-            LdoLink_SetDcdcPermitRequest(false);
         } else {
-            LdoLink_SetDcdcPermitRequest(true);
+            LdoPrereg_SetPermitOverrideOff(false);
+            LdoPrereg_SetForceDisable(false);
         }
         HostLink_Tx("OK\r\n");
         return;

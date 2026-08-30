@@ -5,6 +5,7 @@
 #include "control_cv.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
+#include "ldo_prereg.h"
 #include "host_link.h"
 #include "measurements.h"
 #include "power_manager.h"
@@ -1197,12 +1198,22 @@ static void App_DisableStageSlow(void)
 
 static void App_ControlSlowTask(void)
 {
+    bool g0_control;
+
     if (app.fault_flags != FAULT_NONE) {
         return;
     }
 
-    if (app.requested_mode == MODE_CC) {
-        app.pending_disable_request = true;
+    g0_control = LdoPrereg_IsG0Active();
+
+    if (g0_control) {
+        float prereg_v = LdoPrereg_GetCommandV();
+
+        app.requested_mode = LdoPrereg_ShouldEnableDcdc() ? MODE_CV : MODE_IDLE;
+        App_SetCvSetpoint(prereg_v);
+    } else if (app.requested_mode == MODE_CC) {
+        /* CC lives on G0 LDO; DCDC stays a pre-regulator only. */
+        app.requested_mode = MODE_IDLE;
     }
 
     if (app.requested_mode == MODE_CV) {
@@ -1212,7 +1223,7 @@ static void App_ControlSlowTask(void)
             }
         }
     } else {
-        if (app.stage_enabled && app.pending_disable_request) {
+        if (app.stage_enabled) {
             App_DisableStageSlow();
         }
 
@@ -1577,10 +1588,11 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 void App_Run(void)
 {
     App_LedTask();
+    LdoLink_Task();
+    LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_ControlSlowTask();
     PowerManager_Task();
     BQ76922_Task(&g_bq76922, HAL_GetTick());
-    LdoLink_Task();
     HostLink_Task();
 #if (APP_RUNTIME_DEBUG != 0U)
     App_DebugTask();
@@ -1596,7 +1608,8 @@ void App_SetRequestedMode(App_Mode_t mode)
     }
 
     if (mode == MODE_CC) {
-        app.requested_mode = MODE_CC;
+        /* CC is handled by G0 LDO; DCDC is pre-regulator only. */
+        app.requested_mode = MODE_IDLE;
         ControlCv_SetTarget(&app.cv, 0.0f);
         return;
     }

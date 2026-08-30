@@ -56,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/fan_pwm.c
     Core/Src/host_link.c
     Core/Src/ldo_link.c
+    Core/Src/ldo_prereg.c
     Core/Src/measurements.c
     Core/Src/power_manager.c
     Core/Src/power_stage.c
