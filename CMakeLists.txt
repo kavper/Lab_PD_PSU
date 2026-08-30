@@ -61,6 +61,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/power_manager.c
     Core/Src/power_stage.c
     Core/Src/psu_gui_api.c
+    Core/Src/status_led.c
     Core/Src/tps25751.c
     Core/Src/tps_int_event.c
 )

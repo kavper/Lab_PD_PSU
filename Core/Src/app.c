@@ -1,15 +1,18 @@
 #include "app.h"
 
 #include "board_rev.h"
+#include "bms_board.h"
 #include "bq76922.h"
 #include "control_cv.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "host_link.h"
+#include "ldo_link.h"
 #include "measurements.h"
 #include "power_manager.h"
 #include "power_stage.h"
+#include "status_led.h"
 
 BQ76922_Device_t g_bq76922;
 
@@ -25,7 +28,7 @@ BQ76922_Device_t g_bq76922;
 #define APP_RUNTIME_DEBUG                    0U
 #endif
 #define APP_STARTUP_HOLD_MS                  2000U
-#define APP_LED_BLINK_MS                     250U
+#define APP_G0_LINK_STALE_MS                 500U
 
 #define VOUT_SETPOINT_DEFAULT_V              10.00f
 #define VOUT_OVP_LIMIT                       35.00f
@@ -112,8 +115,6 @@ typedef struct {
 
     uint32_t startup_tick_ms;
     uint32_t last_debug_tick_ms;
-    uint32_t last_led_tick_ms;
-
     uint32_t last_ctrl_tick_us;
     uint32_t adc_last_update_us;
     uint32_t last_adc_dma_updates;
@@ -162,7 +163,6 @@ typedef struct {
     bool timebase_ready;
     bool fast_loop_running;
     bool timebase_glitch;
-    bool led_blink_state;
     bool low_setpoint_start_active;
 } App_Context_t;
 
@@ -283,6 +283,9 @@ static void App_FaultText(uint32_t faults, char *text, size_t text_len)
     if ((faults & FAULT_ADC) != 0U) {
         (void)strncat(text, "ADC|", text_len - strlen(text) - 1U);
     }
+    if ((faults & FAULT_BMS) != 0U) {
+        (void)strncat(text, "BMS|", text_len - strlen(text) - 1U);
+    }
 
     if (strlen(text) > 0U) {
         text[strlen(text) - 1U] = '\0';
@@ -324,17 +327,34 @@ static uint32_t App_StartupHoldRemainingMs(void)
     return APP_STARTUP_HOLD_MS - elapsed_ms;
 }
 
-static void App_LedTask(void)
+static void App_StatusLedUpdate(void)
 {
+    BQ76922_Snapshot_t bms;
+    LdoLink_Status_t ldo;
     uint32_t now_ms = HAL_GetTick();
+    StatusLed_Pattern_t pattern = STATUS_LED_PATTERN_OFF;
 
-    if ((uint32_t)(now_ms - app.last_led_tick_ms) >= APP_LED_BLINK_MS) {
-        app.last_led_tick_ms = now_ms;
-        app.led_blink_state = !app.led_blink_state;
-        HAL_GPIO_WritePin(LED_GPIO_Port,
-                          LED_Pin,
-                          app.led_blink_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    LdoLink_GetStatus(&ldo);
+
+    if ((app.fault_flags != FAULT_NONE) ||
+        bms.shutdown_request ||
+        (bms.state == BQ76922_STATE_FAULT)) {
+        pattern = STATUS_LED_PATTERN_SOS;
+    } else if (bms.state == BQ76922_STATE_WARN) {
+        pattern = STATUS_LED_PATTERN_DOUBLE_PULSE;
+    } else if (App_StartupHoldRemainingMs() != 0U) {
+        pattern = STATUS_LED_PATTERN_SLOW_BLINK;
+    } else if ((ldo.tlm_count > 0U) &&
+               ((uint32_t)(now_ms - ldo.last_tlm_ms) > APP_G0_LINK_STALE_MS)) {
+        pattern = STATUS_LED_PATTERN_FAST_BLINK;
+    } else if (app.stage_enabled || ldo.output_on ||
+               (bms.state == BQ76922_STATE_CHARGING) ||
+               (bms.state == BQ76922_STATE_DISCHARGING)) {
+        pattern = STATUS_LED_PATTERN_SOLID_ON;
     }
+
+    StatusLed_SetPattern(pattern);
 }
 
 static bool App_IsDriverAwake(void)
@@ -831,6 +851,19 @@ static void App_FaultShutdown(uint32_t reason)
 #if (CONTROL_CV_USE_2P2Z != 0)
     Control2p2z_Reset(&app.cv_2p2z, DUTY_STARTUP_MIN);
 #endif
+}
+
+static void App_BmsShutdownTask(void)
+{
+    if (!BQ76922_IsShutdownRequested(&g_bq76922)) {
+        return;
+    }
+
+    LdoPrereg_SetForceDisable(true);
+
+    if (app.fault_flags == FAULT_NONE) {
+        App_FaultShutdown(FAULT_BMS);
+    }
 }
 
 static void App_UpdateFaultFlagsFast(bool adc_ok)
@@ -1528,7 +1561,6 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 
     app.startup_tick_ms = HAL_GetTick();
     app.last_debug_tick_ms = app.startup_tick_ms;
-    app.last_led_tick_ms = app.startup_tick_ms;
     app.last_ctrl_tick_us = App_Micros();
     app.adc_last_update_us = app.last_ctrl_tick_us;
     app.last_adc_dma_updates = Measurements_GetDmaUpdateCount();
@@ -1539,7 +1571,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     app.buck_boost_softstart_start_duty_c = BUCK_BOOST_DUTY_C_INIT_MIN;
     app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
 
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    StatusLed_Init();
 
     PowerManager_Init(hi2c_pd);
     BQ76922_Bind(&g_bq76922, hi2c_pd);
@@ -1578,9 +1610,13 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  App_FracPart(buck_exit_margin_x100, 100),
                  (unsigned long)APP_DEBUG_PERIOD_MS,
                  (unsigned int)APP_DEBUG_VERBOSE);
-    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV slew_up/down=%ld/%ld mV/s permit_settle=150ms",
-                 (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
-                 (long)10L, (long)0L);
+    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV slew +10/-0.3 V/s permit_settle=150ms",
+                 (long)(BOARD_VPRE_MARGIN_V * 1000.0f));
+    Debug_Printf("[APP] BMS: 5S Li-ion COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
+                 (unsigned int)BMS_COV_THRESHOLD_MV,
+                 (unsigned int)BMS_CUV_THRESHOLD_MV,
+                 (unsigned int)BMS_ENABLED_PROTECTIONS_A,
+                 (unsigned int)BMS_ENABLED_PROTECTIONS_B);
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
 #endif
@@ -1590,12 +1626,14 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 
 void App_Run(void)
 {
-    App_LedTask();
     LdoLink_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_ControlSlowTask();
     PowerManager_Task();
     BQ76922_Task(&g_bq76922, HAL_GetTick());
+    App_BmsShutdownTask();
+    App_StatusLedUpdate();
+    StatusLed_Task();
     HostLink_Task();
 #if (APP_RUNTIME_DEBUG != 0U)
     App_DebugTask();
@@ -1642,6 +1680,8 @@ void App_ClearFaults(void)
     app.fault_flags = FAULT_NONE;
     app.ocp_hit_count = 0U;
     app.pending_disable_request = false;
+    BQ76922_ClearShutdownRequest(&g_bq76922);
+    LdoPrereg_SetForceDisable(false);
 
     if (app.requested_mode == MODE_CV) {
         ControlCv_SetTarget(&app.cv, app.cv_user_setpoint);

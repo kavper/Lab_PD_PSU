@@ -13,7 +13,7 @@
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
-#define HOST_LINK_TX_MAX             384U
+#define HOST_LINK_TX_MAX             448U
 #define HOST_LINK_TEL_DEFAULT_MS     200U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -90,9 +90,9 @@ static void HostLink_SendTelemetry(void)
     n = snprintf(line, sizeof(line),
                  "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
-                 "permit=%u bms=%u alert=%u alarm=0x%04X c1_mv=%d c2_mv=%d c3_mv=%d "
-                 "c4_mv=%d c5_mv=%d pack_mv=%d i_cc2_ma=%d "
-                 "g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u\r\n",
+                 "permit=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
+                 "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
+                 "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
@@ -108,6 +108,9 @@ static void HostLink_SendTelemetry(void)
                  (long)HostLink_Ma(pd_w),
                  (unsigned int)LdoPrereg_IsPermitGranted(),
                  (unsigned int)(bms.present ? 1U : 0U),
+                 (unsigned int)(bms.configured ? 1U : 0U),
+                 (unsigned int)bms.state,
+                 (unsigned long)bms.fault_flags,
                  (unsigned int)((bms.alert_latched || bms.alert_pin) ? 1U : 0U),
                  (unsigned int)bms.alarm_status,
                  (int)bms.cell_mv[0],
@@ -115,6 +118,8 @@ static void HostLink_SendTelemetry(void)
                  (int)bms.cell_mv[2],
                  (int)bms.cell_mv[3],
                  (int)bms.cell_mv[4],
+                 (int)bms.min_cell_mv,
+                 (int)bms.max_cell_mv,
                  (int)bms.pack_mv,
                  (int)bms.cc2_ma,
                  (unsigned int)(prereg.g0_active ? 1U : 0U),

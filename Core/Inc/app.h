@@ -22,7 +22,8 @@ typedef enum {
     FAULT_OVP    = (1U << 1),
     FAULT_OCP    = (1U << 2),
     FAULT_UVIN   = (1U << 3),
-    FAULT_ADC    = (1U << 4)
+    FAULT_ADC    = (1U << 4),
+    FAULT_BMS    = (1U << 5)
 } App_FaultFlags_t;
 
 void App_Init(HRTIM_HandleTypeDef *hhrtim,
