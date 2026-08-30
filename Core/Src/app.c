@@ -1,11 +1,15 @@
 #include "app.h"
 
 #include "board_rev.h"
+#include "bq76922.h"
 #include "control_cv.h"
 #include "debug_uart.h"
+#include "host_link.h"
 #include "measurements.h"
 #include "power_manager.h"
 #include "power_stage.h"
+
+BQ76922_Device_t g_bq76922;
 
 #include <stdlib.h>
 #include <string.h>
@@ -1526,6 +1530,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
     PowerManager_Init(hi2c_pd);
+    BQ76922_Bind(&g_bq76922, hi2c_pd);
     App_ControlTimerInit();
 
     PowerStage_ForceSafeState();
@@ -1573,6 +1578,8 @@ void App_Run(void)
     App_LedTask();
     App_ControlSlowTask();
     PowerManager_Task();
+    BQ76922_Task(&g_bq76922, HAL_GetTick());
+    HostLink_Task();
 #if (APP_RUNTIME_DEBUG != 0U)
     App_DebugTask();
 #endif

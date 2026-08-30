@@ -1,0 +1,372 @@
+#include "host_link.h"
+
+#include "app.h"
+#include "bq76922.h"
+#include "power_manager.h"
+#include "power_stage.h"
+#include "psu_gui_api.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <string.h>
+
+#define HOST_LINK_RX_LINE_MAX        96U
+#define HOST_LINK_TX_MAX             256U
+#define HOST_LINK_TEL_DEFAULT_MS     200U
+
+static UART_HandleTypeDef *s_huart = NULL;
+static uint8_t s_rx_byte;
+static char s_rx_line[HOST_LINK_RX_LINE_MAX];
+static volatile uint8_t s_rx_len;
+static volatile bool s_line_ready;
+static volatile bool s_rx_overflow;
+static uint32_t s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
+static uint32_t s_last_tel_ms;
+
+static void HostLink_ArmRx(void)
+{
+    if (s_huart != NULL) {
+        (void)HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1U);
+    }
+}
+
+static void HostLink_Tx(const char *text)
+{
+    size_t len;
+
+    if ((s_huart == NULL) || (text == NULL)) {
+        return;
+    }
+    len = strlen(text);
+    if (len == 0U) {
+        return;
+    }
+    (void)HAL_UART_Transmit(s_huart, (uint8_t *)text, (uint16_t)len, 40U);
+}
+
+static int32_t HostLink_Mv(float volts)
+{
+    return (int32_t)((volts * 1000.0f) + ((volts >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static int32_t HostLink_Ma(float amps)
+{
+    return (int32_t)((amps * 1000.0f) + ((amps >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static const char *HostLink_ModeName(void)
+{
+    switch (App_GetRequestedMode()) {
+        case MODE_CC:
+            return "CC";
+        case MODE_CV:
+            return "CV";
+        default:
+            return "IDLE";
+    }
+}
+
+static void HostLink_SendTelemetry(void)
+{
+    char line[HOST_LINK_TX_MAX];
+    BQ76922_Snapshot_t bms;
+    float pd_v = 0.0f;
+    float pd_a = 0.0f;
+    float pd_w = 0.0f;
+    uint8_t pd_ok;
+    int n;
+
+    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
+
+    n = snprintf(line, sizeof(line),
+                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
+                 "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
+                 "permit=%u bms=%u alert=%u alarm=0x%04X c1_mv=%d c2_mv=%d c3_mv=%d "
+                 "c4_mv=%d c5_mv=%d pack_mv=%d i_cc2_ma=%d\r\n",
+                 (long)HostLink_Mv(App_GetInputVoltage()),
+                 (long)HostLink_Mv(App_GetOutputVoltage()),
+                 (long)HostLink_Ma(App_GetOutputCurrent()),
+                 (long)HostLink_Mv(App_GetCvSetpoint()),
+                 (long)HostLink_Ma(App_GetCurrentLimit()),
+                 (unsigned long)(PowerStage_GetDutyA() * 1000000.0f + 0.5f),
+                 (unsigned int)PSU_IsRunning(),
+                 HostLink_ModeName(),
+                 (unsigned long)App_GetFaultFlags(),
+                 (unsigned int)pd_ok,
+                 (long)HostLink_Mv(pd_v),
+                 (long)HostLink_Ma(pd_a),
+                 (long)HostLink_Mv(pd_w),
+                 (unsigned int)PowerStage_IsPowerPermitted(),
+                 (unsigned int)(bms.present ? 1U : 0U),
+                 (unsigned int)((bms.alert_latched || bms.alert_pin) ? 1U : 0U),
+                 (unsigned int)bms.alarm_status,
+                 (int)bms.cell_mv[0],
+                 (int)bms.cell_mv[1],
+                 (int)bms.cell_mv[2],
+                 (int)bms.cell_mv[3],
+                 (int)bms.cell_mv[4],
+                 (int)bms.pack_mv,
+                 (int)bms.cc2_ma);
+    if (n > 0) {
+        HostLink_Tx(line);
+    }
+}
+
+static bool HostLink_EqToken(const char *s, const char *token)
+{
+    while ((*s != '\0') && (*token != '\0')) {
+        if (toupper((unsigned char)*s) != toupper((unsigned char)*token)) {
+            return false;
+        }
+        s++;
+        token++;
+    }
+    return (*token == '\0') && ((*s == '\0') || isspace((unsigned char)*s));
+}
+
+static const char *HostLink_SkipToken(const char *s)
+{
+    while ((*s != '\0') && !isspace((unsigned char)*s)) {
+        s++;
+    }
+    while (isspace((unsigned char)*s)) {
+        s++;
+    }
+    return s;
+}
+
+static bool HostLink_ParseFloat(const char *s, float *out)
+{
+    float value = 0.0f;
+    float frac = 0.1f;
+    bool neg = false;
+    bool seen = false;
+    bool after_dot = false;
+
+    if ((s == NULL) || (out == NULL)) {
+        return false;
+    }
+    while (isspace((unsigned char)*s)) {
+        s++;
+    }
+    if (*s == '-') {
+        neg = true;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    while (*s != '\0') {
+        if ((*s >= '0') && (*s <= '9')) {
+            seen = true;
+            if (!after_dot) {
+                value = (value * 10.0f) + (float)(*s - '0');
+            } else {
+                value += (float)(*s - '0') * frac;
+                frac *= 0.1f;
+            }
+        } else if ((*s == '.') && !after_dot) {
+            after_dot = true;
+        } else if (isspace((unsigned char)*s)) {
+            break;
+        } else {
+            return false;
+        }
+        s++;
+    }
+    if (!seen) {
+        return false;
+    }
+    *out = neg ? -value : value;
+    return true;
+}
+
+static bool HostLink_ParseU32(const char *s, uint32_t *out)
+{
+    uint32_t value = 0U;
+    bool seen = false;
+
+    if ((s == NULL) || (out == NULL)) {
+        return false;
+    }
+    while (isspace((unsigned char)*s)) {
+        s++;
+    }
+    while ((*s >= '0') && (*s <= '9')) {
+        seen = true;
+        value = (value * 10U) + (uint32_t)(*s - '0');
+        s++;
+    }
+    if (!seen) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+static void HostLink_HandleLine(char *line)
+{
+    const char *arg;
+    float value;
+    uint32_t u32;
+
+    while ((*line != '\0') && isspace((unsigned char)*line)) {
+        line++;
+    }
+    if (*line == '\0') {
+        return;
+    }
+
+    arg = HostLink_SkipToken(line);
+
+    if (HostLink_EqToken(line, "ON")) {
+        PSU_Start();
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "OFF")) {
+        PSU_Stop();
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "SET")) {
+        if (!HostLink_ParseFloat(arg, &value)) {
+            HostLink_Tx("ERR SET\r\n");
+            return;
+        }
+        PSU_GuiSetTargetVoltage(value);
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "ILIM")) {
+        if (!HostLink_ParseFloat(arg, &value)) {
+            HostLink_Tx("ERR ILIM\r\n");
+            return;
+        }
+        PSU_GuiSetTargetCurrent(value);
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "USB")) {
+        if (HostLink_EqToken(arg, "AUTO")) {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_AUTO);
+        } else if (HostLink_EqToken(arg, "SINK")) {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SINK_ONLY);
+        } else if (HostLink_EqToken(arg, "SOURCE")) {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SOURCE_ONLY);
+        } else {
+            HostLink_Tx("ERR USB\r\n");
+            return;
+        }
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "PERMIT")) {
+        if (!HostLink_ParseU32(arg, &u32)) {
+            HostLink_Tx("ERR PERMIT\r\n");
+            return;
+        }
+        if (u32 == 0U) {
+            PSU_Stop();
+            PowerStage_ForceSafeState();
+        } else {
+            PowerStage_SetPowerPermit(true);
+        }
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "TEL")) {
+        if (*arg == '\0') {
+            s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
+        } else if (!HostLink_ParseU32(arg, &s_tel_period_ms)) {
+            HostLink_Tx("ERR TEL\r\n");
+            return;
+        }
+        HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "?")) {
+        HostLink_SendTelemetry();
+        return;
+    }
+
+    HostLink_Tx("ERR CMD\r\n");
+}
+
+void HostLink_Init(UART_HandleTypeDef *huart)
+{
+    s_huart = huart;
+    s_rx_len = 0U;
+    s_line_ready = false;
+    s_rx_overflow = false;
+    s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
+    s_last_tel_ms = HAL_GetTick();
+    HostLink_ArmRx();
+    HostLink_Tx("OK HOST 115200 T/cmd USART1\r\n");
+}
+
+void HostLink_Task(void)
+{
+    uint32_t now_ms;
+    char line[HOST_LINK_RX_LINE_MAX];
+
+    if (s_huart == NULL) {
+        return;
+    }
+
+    if (s_line_ready) {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        memcpy(line, s_rx_line, sizeof(line));
+        s_line_ready = false;
+        s_rx_len = 0U;
+        if (primask == 0U) {
+            __enable_irq();
+        }
+        HostLink_HandleLine(line);
+    } else if (s_rx_overflow) {
+        s_rx_overflow = false;
+        HostLink_Tx("ERR LINE\r\n");
+    }
+
+    now_ms = HAL_GetTick();
+    if ((s_tel_period_ms > 0U) &&
+        ((uint32_t)(now_ms - s_last_tel_ms) >= s_tel_period_ms)) {
+        s_last_tel_ms = now_ms;
+        HostLink_SendTelemetry();
+    }
+}
+
+void HostLink_OnUartError(UART_HandleTypeDef *huart)
+{
+    if ((huart != NULL) && (huart == s_huart)) {
+        HostLink_ArmRx();
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint8_t ch;
+
+    if ((huart == NULL) || (huart != s_huart)) {
+        return;
+    }
+
+    ch = s_rx_byte;
+    if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
+        if (s_rx_len > 0U) {
+            s_rx_line[s_rx_len] = '\0';
+            s_line_ready = true;
+            s_rx_len = 0U;
+        }
+    } else if (!s_line_ready) {
+        if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
+            s_rx_line[s_rx_len++] = (char)ch;
+        } else {
+            s_rx_overflow = true;
+            s_rx_len = 0U;
+        }
+    }
+
+    HostLink_ArmRx();
+}

@@ -65,6 +65,8 @@ typedef enum {
 } PowerStage_Error_t;
 
 void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim);
+void PowerStage_SetPowerPermit(bool permit);
+bool PowerStage_IsPowerPermitted(void);
 bool PowerStage_Enable(void);
 void PowerStage_Disable(void);
 void PowerStage_SuspendOutputsKeepDriverOn(void);

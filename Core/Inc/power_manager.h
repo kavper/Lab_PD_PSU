@@ -89,6 +89,7 @@ typedef struct {
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c);
 void PowerManager_Task(void);
+bool PowerManager_IsI2cIdle(void);
 void PowerManager_GetStatus(PowerManager_Status_t *out);
 bool PowerManager_SetUserMode(PowerManager_UserMode_t mode);
 

@@ -13,12 +13,38 @@
 #define POWER_STAGE_OUTPUTS                  (HRTIM_OUTPUT_TA1 | HRTIM_OUTPUT_TA2 | \
                                               HRTIM_OUTPUT_TC1 | HRTIM_OUTPUT_TC2)
 
+static void PowerStage_SetPowerPermitPin(bool permit)
+{
+    /* HIGH enables the power-stage LDO; LOW kills it. */
+    HAL_GPIO_WritePin(POWER_PERMIT_G4_GPIO_Port, POWER_PERMIT_G4_Pin,
+                      permit ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void PowerStage_SetPowerPermit(bool permit)
+{
+    PowerStage_SetPowerPermitPin(permit);
+}
+
+bool PowerStage_IsPowerPermitted(void)
+{
+    return HAL_GPIO_ReadPin(POWER_PERMIT_G4_GPIO_Port, POWER_PERMIT_G4_Pin) ==
+           GPIO_PIN_SET;
+}
+
 static void PowerStage_SetIsolatedSupplies(bool enable)
 {
     GPIO_PinState state = enable ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
+    if (enable) {
+        PowerStage_SetPowerPermitPin(true);
+    }
+
     HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin, state);
     HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin, state);
+
+    if (!enable) {
+        PowerStage_SetPowerPermitPin(false);
+    }
 }
 
 static bool PowerStage_IsolatedSuppliesEnabled(void)

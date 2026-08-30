@@ -101,6 +101,10 @@ void Error_Handler(void);
 #define BUCK_TR_FLT_GPIO_Port GPIOC
 #define BOOST_TR_EN_Pin GPIO_PIN_12
 #define BOOST_TR_EN_GPIO_Port GPIOC
+#define UART_H7_TX_Pin GPIO_PIN_4
+#define UART_H7_TX_GPIO_Port GPIOC
+#define UART_H7_RX_Pin GPIO_PIN_5
+#define UART_H7_RX_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_2
 #define LED_GPIO_Port GPIOD
 #define BLEED_ON_Pin GPIO_PIN_5

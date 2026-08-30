@@ -1,4 +1,5 @@
 #include "debug_uart.h"
+#include "host_link.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -377,6 +378,8 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     uint32_t primask;
+
+    HostLink_OnUartError(huart);
 
     if (huart != debug_uart) {
         return;

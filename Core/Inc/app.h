@@ -1,9 +1,12 @@
 #ifndef APP_H
 #define APP_H
 
+#include "bq76922.h"
 #include "main.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+extern BQ76922_Device_t g_bq76922;
 
 typedef enum {
     MODE_IDLE = 0,

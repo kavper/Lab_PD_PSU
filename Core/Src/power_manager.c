@@ -2116,6 +2116,20 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
 }
 
+bool PowerManager_IsI2cIdle(void)
+{
+    if ((!g_pm.initialized) || (g_pm.hi2c == NULL)) {
+        return false;
+    }
+    if (g_pm.job != PM_JOB_NONE) {
+        return false;
+    }
+    if (TPS25751_IsBusy(&g_pm.tps)) {
+        return false;
+    }
+    return HAL_I2C_GetState(g_pm.hi2c) == HAL_I2C_STATE_READY;
+}
+
 void PowerManager_Task(void)
 {
     uint32_t now_ms;

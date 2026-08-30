@@ -58,4 +58,11 @@
 #define BOARD_HAS_FRONT_BUTTONS              0U
 #define BOARD_HAS_ISOLATED_GAN_SUPPLY        1U
 
+/* Silk TPS2571D is TPS25751D — keep tps25751.c. */
+#define BOARD_USBPD_IS_TPS25751              1U
+/* BQ25731 CELL_BATPRESZ 4-cell strap is intentional (sheet title still says 5S). */
+#define BOARD_CHARGER_CELL_COUNT             4U
+/* POWER_PERMIT_G4 PB7: HIGH enables power-stage LDO, LOW kills it. */
+#define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
+
 #endif /* BOARD_REV_H */
