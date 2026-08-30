@@ -4,6 +4,7 @@
 #include "bq76922.h"
 #include "control_cv.h"
 #include "debug_uart.h"
+#include "ldo_link.h"
 #include "host_link.h"
 #include "measurements.h"
 #include "power_manager.h"
@@ -1579,6 +1580,7 @@ void App_Run(void)
     App_ControlSlowTask();
     PowerManager_Task();
     BQ76922_Task(&g_bq76922, HAL_GetTick());
+    LdoLink_Task();
     HostLink_Task();
 #if (APP_RUNTIME_DEBUG != 0U)
     App_DebugTask();

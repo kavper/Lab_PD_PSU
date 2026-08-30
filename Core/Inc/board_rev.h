@@ -10,7 +10,7 @@
  *
  * PL:
  * 1. Lab_PD_PSU.ioc jest jedynym źródłem prawdy dla pinów, zegara, ADC, HRTIM,
- *    I2C4, USART2, DMA i NVIC. To, co ma być widoczne w CubeMX, musi być w IOC.
+ *    I2C4, USART1/3, DMA i NVIC. To, co ma być widoczne w CubeMX, musi być w IOC.
  *    Nie chowaj konfiguracji MX tylko w plikach .c.
  * 2. Project Manager: Keep User Code = ON (KeepUserCode=true w .ioc).
  *    Generate Code NIE może kasować firmware w USER CODE ani plików, których
@@ -62,7 +62,7 @@
 #define BOARD_USBPD_IS_TPS25751              1U
 /* BQ25731 CELL_BATPRESZ 4-cell strap is intentional (sheet title still says 5S). */
 #define BOARD_CHARGER_CELL_COUNT             4U
-/* POWER_PERMIT_G4 PB7: HIGH enables power-stage LDO, LOW kills it. */
+/* POWER_PERMIT_G4 PB6: HIGH enables power-stage LDO, LOW kills it. */
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
 #endif /* BOARD_REV_H */

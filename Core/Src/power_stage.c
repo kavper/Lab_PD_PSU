@@ -1,5 +1,7 @@
 #include "power_stage.h"
 
+#include "ldo_link.h"
+
 #include <stddef.h>
 
 #define POWER_STAGE_DUTY_SCALE               10000U
@@ -13,38 +15,22 @@
 #define POWER_STAGE_OUTPUTS                  (HRTIM_OUTPUT_TA1 | HRTIM_OUTPUT_TA2 | \
                                               HRTIM_OUTPUT_TC1 | HRTIM_OUTPUT_TC2)
 
-static void PowerStage_SetPowerPermitPin(bool permit)
-{
-    /* HIGH enables the power-stage LDO; LOW kills it. */
-    HAL_GPIO_WritePin(POWER_PERMIT_G4_GPIO_Port, POWER_PERMIT_G4_Pin,
-                      permit ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-void PowerStage_SetPowerPermit(bool permit)
-{
-    PowerStage_SetPowerPermitPin(permit);
-}
-
-bool PowerStage_IsPowerPermitted(void)
-{
-    return HAL_GPIO_ReadPin(POWER_PERMIT_G4_GPIO_Port, POWER_PERMIT_G4_Pin) ==
-           GPIO_PIN_SET;
-}
-
 static void PowerStage_SetIsolatedSupplies(bool enable)
 {
     GPIO_PinState state = enable ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
-    if (enable) {
-        PowerStage_SetPowerPermitPin(true);
-    }
-
     HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin, state);
     HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin, state);
+}
 
-    if (!enable) {
-        PowerStage_SetPowerPermitPin(false);
-    }
+void PowerStage_SetPowerPermit(bool permit)
+{
+    LdoLink_SetDcdcPermitRequest(permit);
+}
+
+bool PowerStage_IsPowerPermitted(void)
+{
+    return LdoLink_IsPowerPermitted();
 }
 
 static bool PowerStage_IsolatedSuppliesEnabled(void)
@@ -829,6 +815,7 @@ bool PowerStage_Enable(void)
     ps.enabled = true;
     ps.discharge_active = false;
     ps.last_error = POWER_STAGE_ERR_NONE;
+    LdoLink_SetDcdcPermitRequest(true);
     return true;
 }
 
@@ -844,6 +831,7 @@ void PowerStage_Disable(void)
     PowerStage_SetDuty(0.0f, 0.0f);
 
     PowerStage_SetIsolatedSupplies(false);
+    LdoLink_SetDcdcPermitRequest(false);
     ps.enabled = false;
     ps.discharge_active = false;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;

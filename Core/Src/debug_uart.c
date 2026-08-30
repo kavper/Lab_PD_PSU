@@ -1,5 +1,6 @@
 #include "debug_uart.h"
 #include "host_link.h"
+#include "ldo_link.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,7 @@ static volatile uint32_t debug_tx_dma_len = 0U;
 static volatile uint32_t debug_tx_dropped = 0U;
 static volatile bool debug_tx_busy = false;
 static volatile bool debug_dma_ready = false;
+static volatile bool debug_blocking_ready = false;
 static volatile bool debug_tx_pending_session_eol = false;
 
 static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length);
@@ -100,7 +102,7 @@ static bool Debug_PrepareNextChunk(uint16_t *length)
     primask = __get_PRIMASK();
     __disable_irq();
 
-    if ((!debug_dma_ready) || debug_tx_busy || (debug_tx_used == 0U)) {
+    if (((!debug_dma_ready) && (!debug_blocking_ready)) || debug_tx_busy || (debug_tx_used == 0U)) {
         Debug_RestoreIrq(primask);
         return false;
     }
@@ -131,11 +133,51 @@ static bool Debug_PrepareNextChunk(uint16_t *length)
     return true;
 }
 
+static void Debug_StartBlockingTx(void)
+{
+    uint16_t length;
+
+    if ((debug_uart == NULL) || (!debug_blocking_ready) || debug_tx_busy) {
+        return;
+    }
+
+    if (!Debug_PrepareNextChunk(&length)) {
+        return;
+    }
+
+    if (HAL_UART_Transmit(debug_uart, debug_tx_dma_buffer, length, 20U) != HAL_OK) {
+        uint32_t primask = __get_PRIMASK();
+
+        __disable_irq();
+        debug_tx_busy = false;
+        debug_tx_dma_len = 0U;
+        debug_tx_dropped++;
+        Debug_RestoreIrq(primask);
+        return;
+    }
+
+    debug_tx_busy = false;
+    debug_tx_dma_len = 0U;
+    if (debug_tx_used == 0U) {
+        debug_tx_pending_session_eol = true;
+    }
+    Debug_StartBlockingTx();
+}
+
 static void Debug_StartTx(void)
 {
     uint16_t length;
 
-    if ((debug_uart == NULL) || (!debug_dma_ready)) {
+    if (debug_uart == NULL) {
+        return;
+    }
+
+    if (debug_blocking_ready) {
+        Debug_StartBlockingTx();
+        return;
+    }
+
+    if (!debug_dma_ready) {
         return;
     }
 
@@ -172,7 +214,11 @@ static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length)
     uint32_t free_bytes;
     uint32_t first;
 
-    if ((data == NULL) || (length == 0U) || (!debug_dma_ready)) {
+    if ((data == NULL) || (length == 0U)) {
+        return;
+    }
+
+    if ((!debug_dma_ready) && (!debug_blocking_ready)) {
         return;
     }
 
@@ -219,11 +265,13 @@ void Debug_Init(UART_HandleTypeDef *huart)
     debug_tx_dropped = 0U;
     debug_tx_busy = false;
     debug_dma_ready = false;
+    debug_blocking_ready = false;
     debug_tx_pending_session_eol = false;
 
     Debug_RestoreIrq(primask);
 
     debug_dma_ready = Debug_UartDmaInit(huart);
+    debug_blocking_ready = (!debug_dma_ready) && (huart != NULL);
 }
 
 void Debug_Write(const char *text)
@@ -263,6 +311,7 @@ void Debug_Printf(const char *fmt, ...)
         (strncmp(fmt, "[MON", 4U) != 0) &&
         (strncmp(fmt, "[APP", 4U) != 0) &&
         (strncmp(fmt, "[UART", 5U) != 0) &&
+        (strncmp(fmt, "[LDO", 4U) != 0) &&
         (strncmp(fmt, "[FAULT", 6U) != 0)) {
         return;
     }
@@ -380,6 +429,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     uint32_t primask;
 
     HostLink_OnUartError(huart);
+    LdoLink_OnUartError(huart);
 
     if (huart != debug_uart) {
         return;

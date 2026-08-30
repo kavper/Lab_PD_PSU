@@ -36,6 +36,8 @@
 
 void HostLink_Init(UART_HandleTypeDef *huart);
 void HostLink_Task(void);
+void HostLink_RxCplt(UART_HandleTypeDef *huart);
 void HostLink_OnUartError(UART_HandleTypeDef *huart);
+void HostLink_ForwardLine(const char *line);
 
 #endif /* HOST_LINK_H */

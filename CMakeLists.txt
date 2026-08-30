@@ -53,7 +53,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bq76922.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
+    Core/Src/fan_pwm.c
     Core/Src/host_link.c
+    Core/Src/ldo_link.c
     Core/Src/measurements.c
     Core/Src/power_manager.c
     Core/Src/power_stage.c

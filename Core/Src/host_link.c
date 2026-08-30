@@ -2,6 +2,7 @@
 
 #include "app.h"
 #include "bq76922.h"
+#include "ldo_link.h"
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
@@ -96,8 +97,8 @@ static void HostLink_SendTelemetry(void)
                  (unsigned int)pd_ok,
                  (long)HostLink_Mv(pd_v),
                  (long)HostLink_Ma(pd_a),
-                 (long)HostLink_Mv(pd_w),
-                 (unsigned int)PowerStage_IsPowerPermitted(),
+                 (long)HostLink_Ma(pd_w),
+                 (unsigned int)LdoLink_IsPowerPermitted(),
                  (unsigned int)(bms.present ? 1U : 0U),
                  (unsigned int)((bms.alert_latched || bms.alert_pin) ? 1U : 0U),
                  (unsigned int)bms.alarm_status,
@@ -269,8 +270,9 @@ static void HostLink_HandleLine(char *line)
         if (u32 == 0U) {
             PSU_Stop();
             PowerStage_ForceSafeState();
+            LdoLink_SetDcdcPermitRequest(false);
         } else {
-            PowerStage_SetPowerPermit(true);
+            LdoLink_SetDcdcPermitRequest(true);
         }
         HostLink_Tx("OK\r\n");
         return;
@@ -337,6 +339,15 @@ void HostLink_Task(void)
     }
 }
 
+void HostLink_ForwardLine(const char *line)
+{
+    if ((line == NULL) || (s_huart == NULL)) {
+        return;
+    }
+    HostLink_Tx(line);
+    HostLink_Tx("\r\n");
+}
+
 void HostLink_OnUartError(UART_HandleTypeDef *huart)
 {
     if ((huart != NULL) && (huart == s_huart)) {
@@ -344,7 +355,7 @@ void HostLink_OnUartError(UART_HandleTypeDef *huart)
     }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+void HostLink_RxCplt(UART_HandleTypeDef *huart)
 {
     uint8_t ch;
 
@@ -369,4 +380,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 
     HostLink_ArmRx();
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    HostLink_RxCplt(huart);
+    LdoLink_RxCplt(huart);
 }
