@@ -1578,6 +1578,9 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  App_FracPart(buck_exit_margin_x100, 100),
                  (unsigned long)APP_DEBUG_PERIOD_MS,
                  (unsigned int)APP_DEBUG_VERBOSE);
+    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV slew_up/down=%ld/%ld mV/s permit_settle=150ms",
+                 (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
+                 (long)10L, (long)0L);
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
 #endif
