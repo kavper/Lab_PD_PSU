@@ -38,14 +38,12 @@ if [[ ! -f "${ELF}" ]]; then
     exit 1
 fi
 
-if command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
-    arm-none-eabi-objcopy -O binary "${ELF}" "${BIN}"
-elif command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
-    arm-none-eabi-objcopy -O binary "${ELF}" "${BIN}"
-else
-    echo "error: arm-none-eabi-objcopy not found" >&2
+if ! command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
+    echo "error: arm-none-eabi-objcopy not found (brew install arm-gcc-none-eabi)" >&2
     exit 1
 fi
+
+arm-none-eabi-objcopy -O binary "${ELF}" "${BIN}"
 
 BIN_SIZE="$(wc -c < "${BIN}" | tr -d ' ')"
 echo "BIN size: ${BIN_SIZE} bytes"
