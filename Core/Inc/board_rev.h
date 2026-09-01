@@ -78,4 +78,12 @@
 #define BOARD_BRINGUP_LOCAL_CV               1U
 #endif
 
+/*
+ * No G0 on USART3: auto-enter CV after startup hold (2 s) without host ON.
+ * Disable before shipping with G0 LDO.
+ */
+#ifndef BOARD_BRINGUP_AUTO_ON
+#define BOARD_BRINGUP_AUTO_ON                1U
+#endif
+
 #endif /* BOARD_REV_H */

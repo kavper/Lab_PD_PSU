@@ -1268,6 +1268,14 @@ static void App_ControlSlowTask(void)
         app.requested_mode = MODE_IDLE;
     }
 
+#if (BOARD_BRINGUP_AUTO_ON != 0U)
+    if (!LdoPrereg_IsG0Active() &&
+        (app.requested_mode == MODE_IDLE) &&
+        (App_StartupHoldRemainingMs() == 0U)) {
+        App_SetRequestedMode(MODE_CV);
+    }
+#endif
+
     if (app.requested_mode == MODE_CV) {
         if (App_StartupHoldRemainingMs() == 0U) {
             if (!app.stage_enabled) {
@@ -1639,6 +1647,10 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_B);
 #else
     Debug_Printf("[APP] BMS: disabled (bring-up, no I2C/fault shutdown)");
+#endif
+#if (BOARD_BRINGUP_AUTO_ON != 0U)
+    Debug_Printf("[APP] Bring-up: no G0 -> auto CV after %lu ms hold (send OFF to stop)",
+                 (unsigned long)APP_STARTUP_HOLD_MS);
 #endif
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
