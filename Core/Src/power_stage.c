@@ -1,5 +1,6 @@
 #include "power_stage.h"
 
+#include "board_rev.h"
 #include "ldo_prereg.h"
 
 #include <stddef.h>
@@ -17,10 +18,14 @@
 
 static void PowerStage_SetIsolatedSupplies(bool enable)
 {
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     GPIO_PinState state = enable ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
     HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin, state);
     HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin, state);
+#else
+    (void)enable;
+#endif
 }
 
 void PowerStage_SetPowerPermit(bool permit)
@@ -33,11 +38,13 @@ bool PowerStage_IsPowerPermitted(void)
     return LdoPrereg_IsPermitGranted();
 }
 
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
 static bool PowerStage_IsolatedSuppliesEnabled(void)
 {
     return (HAL_GPIO_ReadPin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin) == GPIO_PIN_SET) &&
            (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
 }
+#endif
 
 typedef enum {
     POWER_STAGE_OUTPUT_NONE = 0,
@@ -787,6 +794,7 @@ bool PowerStage_Enable(void)
     ps.last_error = POWER_STAGE_ERR_NONE;
     PowerStage_DisableBurstMode();
 
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     PowerStage_SetIsolatedSupplies(true);
     HAL_Delay(POWER_STAGE_ENABLE_DELAY_MS);
 
@@ -795,6 +803,7 @@ bool PowerStage_Enable(void)
         PowerStage_ForceSafeState();
         return false;
     }
+#endif
 
     PowerStage_ConfigureComplementaryOutputs();
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -802,6 +811,7 @@ bool PowerStage_Enable(void)
     PowerStage_SetDuty(ps.duty_a, ps.duty_c);
 
     if (!PowerStage_StartCounters()) {
+        ps.last_error = POWER_STAGE_ERR_COUNTER_START;
         PowerStage_ForceSafeState();
         return false;
     }
@@ -1181,6 +1191,7 @@ bool PowerStage_IsFaultActive(void)
         return true;
     }
 
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     if (PowerStage_IsolatedSuppliesEnabled()) {
         if (HAL_GPIO_ReadPin(BUCK_TR_FLT_GPIO_Port, BUCK_TR_FLT_Pin) == GPIO_PIN_RESET) {
             return true;
@@ -1189,8 +1200,33 @@ bool PowerStage_IsFaultActive(void)
             return true;
         }
     }
+#endif
 
     return false;
+}
+
+void PowerStage_GetFaultPins(uint8_t *main_flt, uint8_t *buck_flt, uint8_t *boost_flt)
+{
+    if (main_flt != NULL) {
+        *main_flt = (HAL_GPIO_ReadPin(FLT_GPIO_Port, FLT_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+    }
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
+    if (buck_flt != NULL) {
+        *buck_flt = (HAL_GPIO_ReadPin(BUCK_TR_FLT_GPIO_Port, BUCK_TR_FLT_Pin) == GPIO_PIN_RESET) ?
+                    1U : 0U;
+    }
+    if (boost_flt != NULL) {
+        *boost_flt = (HAL_GPIO_ReadPin(BOOST_TR_FLT_GPIO_Port, BOOST_TR_FLT_Pin) == GPIO_PIN_RESET) ?
+                     1U : 0U;
+    }
+#else
+    if (buck_flt != NULL) {
+        *buck_flt = 0U;
+    }
+    if (boost_flt != NULL) {
+        *boost_flt = 0U;
+    }
+#endif
 }
 
 bool PowerStage_IsEnabled(void)

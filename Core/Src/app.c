@@ -167,6 +167,8 @@ typedef struct {
 } App_Context_t;
 
 static App_Context_t app;
+static uint32_t s_permit_granted_since_ms;
+static bool s_permit_granted_latched;
 
 static float App_Clamp(float value, float min_value, float max_value)
 {
@@ -362,8 +364,12 @@ static void App_StatusLedUpdate(void)
 
 static bool App_IsDriverAwake(void)
 {
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     return (HAL_GPIO_ReadPin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin) == GPIO_PIN_SET) &&
            (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
+#else
+    return PowerStage_IsEnabled();
+#endif
 }
 
 bool App_IsG0OutputMaster(void)
@@ -905,7 +911,7 @@ static void App_UpdateFaultFlagsFast(bool adc_ok)
         flags |= FAULT_ADC;
     }
 
-    if ((app.stage_enabled || App_IsDriverAwake()) && PowerStage_IsFaultActive()) {
+    if (app.stage_enabled && PowerStage_IsFaultActive()) {
         flags |= FAULT_DRIVER;
     }
 
@@ -1298,7 +1304,23 @@ static void App_ControlSlowTask(void)
 
     if (app.requested_mode == MODE_CV) {
         if (App_StartupHoldRemainingMs() == 0U) {
-            if (!app.stage_enabled) {
+            bool permit_ok = LdoPrereg_IsPermitGranted();
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+            uint32_t now_ms = HAL_GetTick();
+
+            if (!permit_ok) {
+                s_permit_granted_latched = false;
+            } else if (!s_permit_granted_latched) {
+                s_permit_granted_latched = true;
+                s_permit_granted_since_ms = now_ms;
+            }
+
+            if (permit_ok && s_permit_granted_latched &&
+                ((uint32_t)(now_ms - s_permit_granted_since_ms) < BOARD_PERMIT_HW_SETTLE_MS)) {
+                permit_ok = false;
+            }
+#endif
+            if (permit_ok && (!app.stage_enabled)) {
                 (void)App_EnableStageSlow();
             }
         }
@@ -1671,6 +1693,11 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 #if (BOARD_BRINGUP_AUTO_ON != 0U)
     Debug_Printf("[APP] Bring-up: no G0 -> auto CV after %lu ms hold (send OFF to stop)",
                  (unsigned long)APP_STARTUP_HOLD_MS);
+#endif
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
+    Debug_Printf("[APP] GaN: isolated TR supplies enabled (BUCK/BOOST_TR_EN)");
+#else
+    Debug_Printf("[APP] GaN: direct +5V drivers (TR_EN/TR_FLT ignored)");
 #endif
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");

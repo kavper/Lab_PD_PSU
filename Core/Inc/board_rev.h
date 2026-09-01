@@ -56,7 +56,13 @@
 #define BOARD_HAS_OLED                       0U
 #define BOARD_HAS_ENCODER                    0U
 #define BOARD_HAS_FRONT_BUTTONS              0U
-#define BOARD_HAS_ISOLATED_GAN_SUPPLY        1U
+/*
+ * Isolated DC-DC gate-driver supplies (BUCK_TR_EN / BOOST_TR_EN + TR_FLT).
+ * Set to 0 for bring-up with direct +5V MP1918 drivers (no translator boards).
+ */
+#ifndef BOARD_HAS_ISOLATED_GAN_SUPPLY
+#define BOARD_HAS_ISOLATED_GAN_SUPPLY        0U
+#endif
 
 /* Silk TPS2571D is TPS25751D — keep tps25751.c. */
 #define BOARD_USBPD_IS_TPS25751              1U
@@ -84,6 +90,11 @@
  */
 #ifndef BOARD_BRINGUP_AUTO_ON
 #define BOARD_BRINGUP_AUTO_ON                1U
+#endif
+
+/* Wait after POWER_PERMIT before enabling isolated GaN supplies (no G0). */
+#ifndef BOARD_PERMIT_HW_SETTLE_MS
+#define BOARD_PERMIT_HW_SETTLE_MS            250U
 #endif
 
 #endif /* BOARD_REV_H */

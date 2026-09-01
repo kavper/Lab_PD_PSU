@@ -99,6 +99,7 @@ void PowerStage_SetAdcTriggerPoint10k(uint32_t trigger_point_10k);
 void PowerStage_SetRegion(PowerStage_Region_t region);
 PowerStage_Region_t PowerStage_GetRegion(void);
 bool PowerStage_IsFaultActive(void);
+void PowerStage_GetFaultPins(uint8_t *main_flt, uint8_t *buck_flt, uint8_t *boost_flt);
 bool PowerStage_IsEnabled(void);
 bool PowerStage_IsDischarging(void);
 uint8_t PowerStage_GetLastError(void);
