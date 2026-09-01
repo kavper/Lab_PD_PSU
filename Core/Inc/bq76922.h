@@ -77,6 +77,7 @@ typedef struct {
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);
 BQ76922_Status_t BQ76922_Probe(BQ76922_Device_t *dev);
 bool BQ76922_IsPresent(const BQ76922_Device_t *dev);
+bool BQ76922_IsEnabled(void);
 bool BQ76922_IsShutdownRequested(const BQ76922_Device_t *dev);
 BQ76922_State_t BQ76922_GetState(const BQ76922_Device_t *dev);
 

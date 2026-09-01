@@ -1,5 +1,6 @@
 #include "ldo_prereg.h"
 
+#include "app.h"
 #include "board_rev.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
@@ -228,7 +229,19 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.vpre_g0_v = 0.0f;
         s_status.regulation_ok = false;
         s_status.dcdc_enable_request = false;
+
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+        if ((App_GetRequestedMode() == MODE_CV) &&
+            (!s_force_disable) &&
+            (!s_status.permit_override_off)) {
+            s_status.permit_granted = true;
+        } else {
+            s_status.permit_granted = false;
+        }
+#else
         s_status.permit_granted = false;
+#endif
+
         s_regulation_since_ms = 0U;
         s_out_of_reg_since_ms = 0U;
 

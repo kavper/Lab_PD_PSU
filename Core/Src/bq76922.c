@@ -431,9 +431,23 @@ bool BQ76922_IsPresent(const BQ76922_Device_t *dev)
     return (dev != NULL) && dev->snapshot.present;
 }
 
+bool BQ76922_IsEnabled(void)
+{
+#if (BMS_ENABLE != 0U)
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool BQ76922_IsShutdownRequested(const BQ76922_Device_t *dev)
 {
+#if (BMS_ENABLE == 0U)
+    (void)dev;
+    return false;
+#else
     return (dev != NULL) && dev->snapshot.shutdown_request;
+#endif
 }
 
 BQ76922_State_t BQ76922_GetState(const BQ76922_Device_t *dev)
@@ -472,6 +486,11 @@ void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev)
 
 void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
 {
+#if (BMS_ENABLE == 0U)
+    (void)dev;
+    (void)now_ms;
+    return;
+#else
     uint8_t buf[2];
     BQ76922_Status_t status;
 
@@ -563,6 +582,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     }
 
     dev->next_action_ms = now_ms + BQ76922_SCAN_PERIOD_MS;
+#endif /* BMS_ENABLE */
 }
 
 void BQ76922_GetSnapshot(const BQ76922_Device_t *dev, BQ76922_Snapshot_t *out)

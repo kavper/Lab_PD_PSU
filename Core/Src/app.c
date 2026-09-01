@@ -338,10 +338,10 @@ static void App_StatusLedUpdate(void)
     LdoLink_GetStatus(&ldo);
 
     if ((app.fault_flags != FAULT_NONE) ||
-        bms.shutdown_request ||
-        (bms.state == BQ76922_STATE_FAULT)) {
+        (BQ76922_IsEnabled() &&
+         (bms.shutdown_request || (bms.state == BQ76922_STATE_FAULT)))) {
         pattern = STATUS_LED_PATTERN_SOS;
-    } else if (bms.state == BQ76922_STATE_WARN) {
+    } else if (BQ76922_IsEnabled() && (bms.state == BQ76922_STATE_WARN)) {
         pattern = STATUS_LED_PATTERN_DOUBLE_PULSE;
     } else if (App_StartupHoldRemainingMs() != 0U) {
         pattern = STATUS_LED_PATTERN_SLOW_BLINK;
@@ -349,8 +349,9 @@ static void App_StatusLedUpdate(void)
                ((uint32_t)(now_ms - ldo.last_tlm_ms) > APP_G0_LINK_STALE_MS)) {
         pattern = STATUS_LED_PATTERN_FAST_BLINK;
     } else if (app.stage_enabled || ldo.output_on ||
-               (bms.state == BQ76922_STATE_CHARGING) ||
-               (bms.state == BQ76922_STATE_DISCHARGING)) {
+               (BQ76922_IsEnabled() &&
+                ((bms.state == BQ76922_STATE_CHARGING) ||
+                 (bms.state == BQ76922_STATE_DISCHARGING)))) {
         pattern = STATUS_LED_PATTERN_SOLID_ON;
     } else {
         pattern = STATUS_LED_PATTERN_SLOW_BLINK;
@@ -1614,11 +1615,15 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  (unsigned int)APP_DEBUG_VERBOSE);
     Debug_Printf("[APP] G0 pre-reg: margin=%ld mV slew +10/-0.3 V/s permit_settle=150ms",
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f));
+#if (BMS_ENABLE != 0U)
     Debug_Printf("[APP] BMS: 5S Li-ion COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
                  (unsigned int)BMS_COV_THRESHOLD_MV,
                  (unsigned int)BMS_CUV_THRESHOLD_MV,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_A,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_B);
+#else
+    Debug_Printf("[APP] BMS: disabled (bring-up, no I2C/fault shutdown)");
+#endif
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
 #endif

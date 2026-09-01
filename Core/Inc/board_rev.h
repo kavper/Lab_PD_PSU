@@ -70,4 +70,12 @@
 #define BOARD_VPRE_MAX_V                     36.0f
 #define BOARD_VPRE_MARGIN_V                  3.0f
 
+/*
+ * Bring-up without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV.
+ * Set to 0 when G0 LDO must control PERMIT exclusively.
+ */
+#ifndef BOARD_BRINGUP_LOCAL_CV
+#define BOARD_BRINGUP_LOCAL_CV               1U
+#endif
+
 #endif /* BOARD_REV_H */

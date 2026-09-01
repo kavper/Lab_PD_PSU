@@ -6,7 +6,13 @@
 /*
  * BQ76922 on shared I2C4 with TPS25751. 5S Li-ion pack on rev2 hardware.
  * U1 protection threshold encoding (TRM): mV = code * 50.6 (approx).
+ *
+ * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
+ * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
  */
+#ifndef BMS_ENABLE
+#define BMS_ENABLE                       0U
+#endif
 
 #define BMS_U1_THRESHOLD_CODE_MV(mv)     ((uint8_t)((((uint32_t)(mv) * 10U) + 253U) / 506U))
 #define BMS_COV_THRESHOLD_CODE           BMS_U1_THRESHOLD_CODE_MV(BMS_COV_THRESHOLD_MV)
