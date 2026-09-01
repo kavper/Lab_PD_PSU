@@ -222,6 +222,15 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
                       s_status.regulation_ok &&
                       (!s_status.permit_override_off);
 
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+        if ((!want_permit) &&
+            (App_GetRequestedMode() == MODE_CV) &&
+            (!s_force_disable) &&
+            (!s_status.permit_override_off)) {
+            want_permit = true;
+        }
+#endif
+
         s_status.dcdc_enable_request = want_enable;
         s_status.permit_granted = want_permit;
     } else {

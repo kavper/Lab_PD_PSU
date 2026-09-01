@@ -1,6 +1,7 @@
 #include "host_link.h"
 
 #include "app.h"
+#include "board_rev.h"
 #include "bq76922.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
@@ -92,7 +93,8 @@ static void HostLink_SendTelemetry(void)
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
-                 "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u\r\n",
+                 "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
+                 "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
@@ -128,7 +130,12 @@ static void HostLink_SendTelemetry(void)
                  (unsigned long)ldo.vout_mv,
                  (long)(prereg.vpre_request_v * 1000.0f),
                  (long)(prereg.vpre_command_v * 1000.0f),
-                 (unsigned int)(prereg.regulation_ok ? 1U : 0U));
+                 (unsigned int)(prereg.regulation_ok ? 1U : 0U),
+                 (unsigned int)App_IsStageEnabled(),
+                 (unsigned int)PowerStage_IsEnabled(),
+                 (unsigned int)PowerStage_IsFaultActive(),
+                 (unsigned long)App_GetStartupHoldRemainingMs(),
+                 (unsigned int)PowerStage_GetLastError());
     if (n > 0) {
         HostLink_Tx(line);
     }
@@ -241,6 +248,16 @@ static void HostLink_HandleLine(char *line)
     arg = HostLink_SkipToken(line);
 
     if (HostLink_EqToken(line, "ON")) {
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+        if (App_IsG0OutputMaster()) {
+            LdoPrereg_SetForceDisable(false);
+            LdoPrereg_SetPermitOverrideOff(false);
+            HostLink_Tx("OK G0\r\n");
+        } else {
+            PSU_Start();
+            HostLink_Tx("OK\r\n");
+        }
+#else
         if (LdoPrereg_IsG0Active()) {
             LdoPrereg_SetForceDisable(false);
             LdoPrereg_SetPermitOverrideOff(false);
@@ -249,6 +266,7 @@ static void HostLink_HandleLine(char *line)
             PSU_Start();
             HostLink_Tx("OK\r\n");
         }
+#endif
         return;
     }
     if (HostLink_EqToken(line, "OFF")) {

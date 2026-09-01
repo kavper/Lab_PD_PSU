@@ -46,5 +46,8 @@ float App_GetCurrentLimit(void);
 float App_GetInputVoltage(void);
 float App_GetOutputVoltage(void);
 float App_GetOutputCurrent(void);
+bool App_IsStageEnabled(void);
+uint32_t App_GetStartupHoldRemainingMs(void);
+bool App_IsG0OutputMaster(void);
 
 #endif

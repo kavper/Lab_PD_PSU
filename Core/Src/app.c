@@ -366,6 +366,18 @@ static bool App_IsDriverAwake(void)
            (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
 }
 
+bool App_IsG0OutputMaster(void)
+{
+    LdoLink_Status_t ldo;
+
+    if (!LdoPrereg_IsG0Active()) {
+        return false;
+    }
+
+    LdoLink_GetStatus(&ldo);
+    return ldo.output_on;
+}
+
 static bool App_IsZeroSetpointTarget(void)
 {
     return app.cv_user_setpoint <= OFF_RAMP_DONE_V;
@@ -1203,6 +1215,10 @@ static bool App_EnableStageSlow(void)
     App_ApplyDuty(region, duty_ff_a, duty_ff_c);
 
     if (!PowerStage_Enable()) {
+        Debug_Printf("[APP] WARN: PowerStage_Enable failed err=%u flt=%u tr_en=%u\r\n",
+                     (unsigned int)PowerStage_GetLastError(),
+                     (unsigned int)PowerStage_IsFaultActive(),
+                     (unsigned int)App_IsDriverAwake());
         app.fault_flags |= FAULT_DRIVER;
         App_FaultShutdown(app.fault_flags);
         return false;
@@ -1240,7 +1256,7 @@ static void App_ControlSlowTask(void)
         return;
     }
 
-    g0_control = LdoPrereg_IsG0Active();
+    g0_control = App_IsG0OutputMaster();
 
     if (g0_control) {
         float prereg_v = LdoPrereg_GetCommandV();
@@ -1748,6 +1764,16 @@ float App_GetOutputVoltage(void)
 float App_GetOutputCurrent(void)
 {
     return app.meas.iout;
+}
+
+bool App_IsStageEnabled(void)
+{
+    return app.stage_enabled;
+}
+
+uint32_t App_GetStartupHoldRemainingMs(void)
+{
+    return App_StartupHoldRemainingMs();
 }
 
 void TIM6_DAC_IRQHandler(void)
