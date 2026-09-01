@@ -89,6 +89,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  BoardMx_EarlyLedPulse(4U);
   MX_DMA_Init();
   MX_I2C4_Init();
   MX_USART1_UART_Init();
@@ -760,6 +761,10 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+  __disable_irq();
+  while (1) {
+    BoardMx_FaultLedTick();
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT

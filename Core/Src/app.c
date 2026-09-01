@@ -352,6 +352,8 @@ static void App_StatusLedUpdate(void)
                (bms.state == BQ76922_STATE_CHARGING) ||
                (bms.state == BQ76922_STATE_DISCHARGING)) {
         pattern = STATUS_LED_PATTERN_SOLID_ON;
+    } else {
+        pattern = STATUS_LED_PATTERN_SLOW_BLINK;
     }
 
     StatusLed_SetPattern(pattern);

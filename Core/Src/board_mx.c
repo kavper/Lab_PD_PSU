@@ -4,6 +4,29 @@
 static volatile uint8_t usbpd_irq_pending;
 static volatile uint8_t bms_alert_pending;
 
+void BoardMx_EarlyLedPulse(uint8_t count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < count; i++) {
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+        HAL_Delay(80U);
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+        HAL_Delay(80U);
+    }
+}
+
+void BoardMx_FaultLedTick(void)
+{
+    static uint32_t last_ms;
+    uint32_t now_ms = HAL_GetTick();
+
+    if ((uint32_t)(now_ms - last_ms) >= 120U) {
+        last_ms = now_ms;
+        HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    }
+}
+
 HAL_StatusTypeDef BoardMx_StartHsiPll(void)
 {
     RCC_OscInitTypeDef osc = {0};

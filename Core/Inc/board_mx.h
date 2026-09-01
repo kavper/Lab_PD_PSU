@@ -17,6 +17,8 @@
 HAL_StatusTypeDef BoardMx_StartHsiPll(void);
 HAL_StatusTypeDef BoardMx_EnsureSysclkPll(void);
 void BoardMx_ApplyHrtimFault(HRTIM_HandleTypeDef *hhrtim);
+void BoardMx_EarlyLedPulse(uint8_t count);
+void BoardMx_FaultLedTick(void);
 
 void BoardMx_GpioExtiCallback(uint16_t gpio_pin);
 bool BoardMx_TakeUsbPdIrq(void);
