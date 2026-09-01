@@ -23,7 +23,9 @@ if [[ ! -f "${BIN}" ]]; then
 fi
 
 echo "Probing ST-Link..."
-if ! st-info --probe | grep -q "stlink"; then
+PROBE_OUT="$(st-info --probe 2>&1)"
+echo "${PROBE_OUT}"
+if echo "${PROBE_OUT}" | grep -qE 'Found 0 stlink'; then
     echo "error: no ST-Link programmer detected" >&2
     exit 1
 fi
