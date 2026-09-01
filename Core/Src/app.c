@@ -378,6 +378,21 @@ bool App_IsG0OutputMaster(void)
     return ldo.output_on;
 }
 
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+static bool App_TryRecoverBringupFault(void)
+{
+    if ((app.fault_flags == FAULT_DRIVER) &&
+        (!PowerStage_IsFaultActive())) {
+        app.latched_fault_flags = FAULT_NONE;
+        app.fault_flags = FAULT_NONE;
+        app.pending_disable_request = false;
+        return true;
+    }
+
+    return false;
+}
+#endif
+
 static bool App_IsZeroSetpointTarget(void)
 {
     return app.cv_user_setpoint <= OFF_RAMP_DONE_V;
@@ -1252,6 +1267,10 @@ static void App_ControlSlowTask(void)
 {
     bool g0_control;
 
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+    (void)App_TryRecoverBringupFault();
+#endif
+
     if (app.fault_flags != FAULT_NONE) {
         return;
     }
@@ -1272,6 +1291,7 @@ static void App_ControlSlowTask(void)
     if (!LdoPrereg_IsG0Active() &&
         (app.requested_mode == MODE_IDLE) &&
         (App_StartupHoldRemainingMs() == 0U)) {
+        App_ClearFaults();
         App_SetRequestedMode(MODE_CV);
     }
 #endif

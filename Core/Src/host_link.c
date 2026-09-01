@@ -276,6 +276,11 @@ static void HostLink_HandleLine(char *line)
         HostLink_Tx("OK\r\n");
         return;
     }
+    if (HostLink_EqToken(line, "CLR") || HostLink_EqToken(line, "CLEAR")) {
+        App_ClearFaults();
+        HostLink_Tx("OK\r\n");
+        return;
+    }
     if (HostLink_EqToken(line, "SET")) {
         if (!HostLink_ParseFloat(arg, &value)) {
             HostLink_Tx("ERR SET\r\n");
