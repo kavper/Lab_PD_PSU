@@ -276,16 +276,33 @@ static void LdoLink_HardKillFromFault(const char *why)
     LdoLink_EnterState(LDO_G0_CTRL_FAULT, HAL_GetTick());
 }
 
+static void LdoLink_FormatSetCmd(char *cmd, size_t cmd_size)
+{
+    uint32_t v_mv;
+    uint32_t i_ma;
+
+    /* nano.specs has no %f — build SET with integer millivolts/milliamps. */
+    v_mv = (uint32_t)((s_g0_volts * 1000.0f) + 0.5f);
+    i_ma = (uint32_t)((s_g0_amps * 1000.0f) + 0.5f);
+    if (v_mv > 27000U) {
+        v_mv = 27000U;
+    }
+    if (i_ma > 5000U) {
+        i_ma = 5000U;
+    }
+
+    (void)snprintf(cmd, cmd_size, "SET V=%lu.%03lu I=%lu.%03lu\r\n",
+                   (unsigned long)(v_mv / 1000U),
+                   (unsigned long)(v_mv % 1000U),
+                   (unsigned long)(i_ma / 1000U),
+                   (unsigned long)(i_ma % 1000U));
+}
+
 static bool LdoLink_SendSet(uint32_t now_ms)
 {
     char cmd[48];
-    int n;
 
-    n = snprintf(cmd, sizeof(cmd), "SET V=%.3f I=%.3f\r\n",
-                 (double)s_g0_volts, (double)s_g0_amps);
-    if ((n <= 0) || ((size_t)n >= sizeof(cmd))) {
-        return false;
-    }
+    LdoLink_FormatSetCmd(cmd, sizeof(cmd));
 
     LdoLink_ClearPendingAcks();
     if (!LdoLink_TxLine(cmd)) {
@@ -322,10 +339,8 @@ static bool LdoLink_SendOutOff(uint32_t now_ms)
 
 static void LdoLink_HandleAckLine(const char *line)
 {
+    /* USART1 is host+debug — forward once via host link only. */
     HostLink_ForwardLine(line);
-    Debug_Write(line);
-    Debug_Write("\r\n");
-
     s_status.ack_ok_count++;
 
     if (strstr(line, "ACK SET") != NULL) {
@@ -351,8 +366,6 @@ static void LdoLink_HandleNackLine(const char *line)
     size_t len;
 
     HostLink_ForwardLine(line);
-    Debug_Write(line);
-    Debug_Write("\r\n");
 
     s_status.nack_count++;
     s_nack_seen = true;
@@ -371,7 +384,6 @@ static void LdoLink_HandleNackLine(const char *line)
     memcpy(s_status.last_nack, line, len);
     s_status.last_nack[len] = '\0';
 
-    /* Unsolicited fault while output was ON: drop PB6 immediately. */
     if (strstr(line, "NACK FAULT=") != NULL) {
         LdoLink_HardKillFromFault(line);
         return;
@@ -379,7 +391,6 @@ static void LdoLink_HandleNackLine(const char *line)
 
     if ((strstr(line, "REASON=POWER_KILL") != NULL) ||
         (strstr(line, "FAULT=POWER_KILL") != NULL)) {
-        /* Re-assert permit and retry; do not leave PB6 low. */
         LdoPrereg_SetPermitOverrideOff(false);
         s_dcdc_permit_request = true;
         LdoLink_SetPermitPin(true);
@@ -442,9 +453,8 @@ static void LdoLink_HandleTlmLine(const char *line)
     }
     LdoLink_ParseFaultToken(line);
 
+    /* Same USART1 as host debug — forward once (no Debug_Write duplicate). */
     HostLink_ForwardLine(line);
-    Debug_Write(line);
-    Debug_Write("\r\n");
 }
 
 static void LdoLink_HandleRxLine(const char *line)
@@ -653,8 +663,9 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
              (s_status.kill_reported == 0U))) {
             s_retry_count = 0U;
             LdoLink_EnterState(LDO_G0_CTRL_RUNNING, now_ms);
-            Debug_Printf("[LDO] G0 OUT ON ok (vset=%.3f iset=%.3f)\r\n",
-                         (double)s_g0_volts, (double)s_g0_amps);
+            Debug_Printf("[LDO] G0 OUT ON ok (vset=%lu mV iset=%lu mA)\r\n",
+                         (unsigned long)((s_g0_volts * 1000.0f) + 0.5f),
+                         (unsigned long)((s_g0_amps * 1000.0f) + 0.5f));
         } else if (s_nack_seen) {
             s_nack_seen = false;
             if (strstr(s_nack_line, "POWER_KILL") != NULL) {
@@ -761,8 +772,11 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 
     LdoLink_ArmRx();
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward + SET/OUT control)\r\n");
-    Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%.3f I=%.3f\r\n",
-                 (double)s_g0_volts, (double)s_g0_amps);
+    Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%lu.%03lu I=%lu.%03lu\r\n",
+                 (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) / 1000U),
+                 (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) % 1000U),
+                 (unsigned long)((uint32_t)((s_g0_amps * 1000.0f) + 0.5f) / 1000U),
+                 (unsigned long)((uint32_t)((s_g0_amps * 1000.0f) + 0.5f) % 1000U));
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
     Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH/ena (clear G0 POWER_KILL)\r\n");
 #endif
@@ -788,8 +802,9 @@ void LdoLink_RequestOutput(bool on)
         if (s_ctrl == LDO_G0_CTRL_FAULT) {
             LdoLink_EnterState(LDO_G0_CTRL_WAIT_LINK, HAL_GetTick());
         }
-        Debug_Printf("[LDO] output WANT ON (V=%.3f I=%.3f)\r\n",
-                     (double)s_g0_volts, (double)s_g0_amps);
+        Debug_Printf("[LDO] output WANT ON (V=%lu mV I=%lu mA)\r\n",
+                     (unsigned long)((s_g0_volts * 1000.0f) + 0.5f),
+                     (unsigned long)((s_g0_amps * 1000.0f) + 0.5f));
     } else {
         Debug_Printf("[LDO] output WANT OFF\r\n");
     }

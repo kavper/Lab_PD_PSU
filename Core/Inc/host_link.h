@@ -22,6 +22,8 @@
  *
  * Commands (host -> G4), case-insensitive, optional argument:
  *
+ *   HELP / H           command list
+ *   STATUS / ST        human summary + hints
  *   ON                 start G4 DCDC + G0 SET/OUT ON sequencer
  *   OFF                G0 OUT OFF + PERMIT kill + DCDC stop
  *   SET <volts>        G0 LDO voltage (also local DCDC if G0 idle)
@@ -30,11 +32,11 @@
  *   PERMIT 0|1         1 = ena (PB6 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB6 LOW) + OUT OFF
  *   REMOTE ON|1        enable remote sense path (PB5 REMOTE_ON high)
  *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
- *   TEL [period_ms]    0 = stop periodic T lines; default 200
+ *   TEL [period_ms]    0 = stop periodic T lines; default 500
  *   ?                  one immediate T line
  *
  * Telemetry also includes rem_sense=, g0_want=, g0_ctrl=, g0_kill=, g0_outoff=.
- * Replies: OK, OK G0, ERR <reason>, or a T line.
+ * Replies: OK..., ERR <reason>, STATUS/HELP text, or a T line.
  */
 
 void HostLink_Init(UART_HandleTypeDef *huart);

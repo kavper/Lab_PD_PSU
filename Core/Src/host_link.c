@@ -15,7 +15,7 @@
 
 #define HOST_LINK_RX_LINE_MAX        96U
 #define HOST_LINK_TX_MAX             768U
-#define HOST_LINK_TEL_DEFAULT_MS     200U
+#define HOST_LINK_TEL_DEFAULT_MS     500U
 
 static UART_HandleTypeDef *s_huart = NULL;
 static uint8_t s_rx_byte;
@@ -265,11 +265,76 @@ static bool HostLink_ParseU32(const char *s, uint32_t *out)
     return true;
 }
 
+static void HostLink_SendHelp(void)
+{
+    HostLink_Tx(
+        "HELP G4 host USART1 115200\r\n"
+        "  ON              start DCDC + G0 LDO (SET/OUT sequencer)\r\n"
+        "  OFF             stop LDO + DCDC (PB6 kill)\r\n"
+        "  SET <V>         G0 voltage e.g. SET 5.0\r\n"
+        "  ILIM <A>        G0 current e.g. ILIM 0.1\r\n"
+        "  PERMIT 0|1      hard kill / allow PB6\r\n"
+        "  REMOTE ON|OFF   sense path\r\n"
+        "  STATUS          human summary\r\n"
+        "  TEL [ms]        periodic T lines (0=off, default 500)\r\n"
+        "  ?               one T line\r\n"
+        "  CLR             clear fault latch\r\n"
+        "Need G0 TLM on USART3 (g0_rx rising). LDO out = G0, not DCDC rail.\r\n");
+}
+
+static void HostLink_SendStatus(void)
+{
+    char line[256];
+    LdoLink_Status_t ldo;
+    LdoPrereg_Status_t prereg;
+    uint32_t v_mv;
+    uint32_t i_ma;
+
+    LdoLink_GetStatus(&ldo);
+    LdoPrereg_GetStatus(&prereg);
+    v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
+    i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
+
+    (void)snprintf(line, sizeof(line),
+                   "STATUS run=%u mode=%s dcdc_mv=%ld g0_link=%u g0_rx=%lu g0_tlm=%lu "
+                   "g0_want=%u g0_ctrl=%u g0_out=%u g0_kill=%u g0_outoff=%u "
+                   "permit=%u set=%lu mV ilim=%lu mA g0_vout=%lu mV\r\n",
+                   (unsigned int)PSU_IsRunning(),
+                   HostLink_ModeName(),
+                   (long)HostLink_Mv(App_GetOutputVoltage()),
+                   (unsigned int)(prereg.g0_active ? 1U : 0U),
+                   (unsigned long)ldo.rx_bytes,
+                   (unsigned long)ldo.tlm_count,
+                   (unsigned int)(LdoLink_IsOutputWanted() ? 1U : 0U),
+                   (unsigned int)LdoLink_GetCtrlState(),
+                   (unsigned int)(ldo.output_on ? 1U : 0U),
+                   (unsigned int)ldo.kill_reported,
+                   (unsigned int)ldo.outoff_reported,
+                   (unsigned int)LdoPrereg_IsPermitGranted(),
+                   (unsigned long)v_mv,
+                   (unsigned long)i_ma,
+                   (unsigned long)ldo.vout_mv);
+    HostLink_Tx(line);
+
+    if (ldo.rx_bytes == 0U) {
+        HostLink_Tx("HINT no G0 UART yet — check isolator PB14/PB15, G0 power, J6 sniffer\r\n");
+    } else if (LdoLink_IsOutputWanted() && (!ldo.output_on)) {
+        HostLink_Tx("HINT G0 sequencer running — wait g0_ctrl=9 and g0_out=1\r\n");
+    } else if (ldo.output_on) {
+        HostLink_Tx("HINT LDO should be live — meter G0 output (not G4 DCDC/PB2)\r\n");
+    } else {
+        HostLink_Tx("HINT send: SET 5.0  then  ILIM 0.1  then  ON\r\n");
+    }
+}
+
 static void HostLink_HandleLine(char *line)
 {
     const char *arg;
     float value;
     uint32_t u32;
+    char reply[80];
+    uint32_t v_mv;
+    uint32_t i_ma;
 
     while ((*line != '\0') && isspace((unsigned char)*line)) {
         line++;
@@ -280,13 +345,28 @@ static void HostLink_HandleLine(char *line)
 
     arg = HostLink_SkipToken(line);
 
+    if (HostLink_EqToken(line, "HELP") || HostLink_EqToken(line, "H")) {
+        HostLink_SendHelp();
+        return;
+    }
+    if (HostLink_EqToken(line, "STATUS") || HostLink_EqToken(line, "ST")) {
+        HostLink_SendStatus();
+        return;
+    }
     if (HostLink_EqToken(line, "ON")) {
         LdoPrereg_SetForceDisable(false);
         LdoPrereg_SetPermitOverrideOff(false);
-        /* Start G4 DCDC pre-reg (VIN) and run G0 SET/OUT ON sequencer. */
         PSU_Start();
         LdoLink_RequestOutput(true);
-        HostLink_Tx("OK G0\r\n");
+        v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
+        i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
+        (void)snprintf(reply, sizeof(reply),
+                       "OK ON set=%lu mV ilim=%lu mA (wait g0_out=1)\r\n",
+                       (unsigned long)v_mv, (unsigned long)i_ma);
+        HostLink_Tx(reply);
+        if (!LdoPrereg_IsG0Active()) {
+            HostLink_Tx("WARN g0_rx=0 — DCDC may start; LDO needs G0 TLM\r\n");
+        }
         return;
     }
     if (HostLink_EqToken(line, "OFF")) {
@@ -294,35 +374,38 @@ static void HostLink_HandleLine(char *line)
         LdoPrereg_SetForceDisable(true);
         LdoPrereg_SetPermitOverrideOff(true);
         PSU_Stop();
-        HostLink_Tx("OK\r\n");
+        HostLink_Tx("OK OFF\r\n");
         return;
     }
     if (HostLink_EqToken(line, "CLR") || HostLink_EqToken(line, "CLEAR")) {
         App_ClearFaults();
-        HostLink_Tx("OK\r\n");
+        HostLink_Tx("OK CLR\r\n");
         return;
     }
     if (HostLink_EqToken(line, "SET")) {
         if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR SET\r\n");
+            HostLink_Tx("ERR SET use: SET 5.0\r\n");
             return;
         }
-        /* User SET is G0 LDO voltage; G4 DCDC tracks vset+margin via TLM. */
         LdoLink_SetG0Voltage(value);
         if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
-            PSU_GuiSetTargetVoltage(value);
+            PSU_GuiSetTargetVoltage(value + 3.0f);
         }
-        HostLink_Tx("OK\r\n");
+        v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
+        (void)snprintf(reply, sizeof(reply), "OK SET %lu mV\r\n", (unsigned long)v_mv);
+        HostLink_Tx(reply);
         return;
     }
     if (HostLink_EqToken(line, "ILIM")) {
         if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR ILIM\r\n");
+            HostLink_Tx("ERR ILIM use: ILIM 0.1\r\n");
             return;
         }
         LdoLink_SetG0Current(value);
         PSU_GuiSetTargetCurrent(value);
-        HostLink_Tx("OK\r\n");
+        i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
+        (void)snprintf(reply, sizeof(reply), "OK ILIM %lu mA\r\n", (unsigned long)i_ma);
+        HostLink_Tx(reply);
         return;
     }
     if (HostLink_EqToken(line, "USB")) {
@@ -336,7 +419,7 @@ static void HostLink_HandleLine(char *line)
             HostLink_Tx("ERR USB\r\n");
             return;
         }
-        HostLink_Tx("OK\r\n");
+        HostLink_Tx("OK USB\r\n");
         return;
     }
     if (HostLink_EqToken(line, "PERMIT")) {
@@ -349,11 +432,12 @@ static void HostLink_HandleLine(char *line)
             LdoPrereg_SetPermitOverrideOff(true);
             LdoPrereg_SetForceDisable(true);
             PSU_Stop();
+            HostLink_Tx("OK PERMIT 0 (LDO zabity)\r\n");
         } else {
             LdoPrereg_SetPermitOverrideOff(false);
             LdoPrereg_SetForceDisable(false);
+            HostLink_Tx("OK PERMIT 1\r\n");
         }
-        HostLink_Tx("OK\r\n");
         return;
     }
     if (HostLink_EqToken(line, "REMOTE")) {
@@ -377,7 +461,9 @@ static void HostLink_HandleLine(char *line)
             HostLink_Tx("ERR TEL\r\n");
             return;
         }
-        HostLink_Tx("OK\r\n");
+        (void)snprintf(reply, sizeof(reply), "OK TEL %lu ms\r\n",
+                       (unsigned long)s_tel_period_ms);
+        HostLink_Tx(reply);
         return;
     }
     if (HostLink_EqToken(line, "?")) {
@@ -385,7 +471,7 @@ static void HostLink_HandleLine(char *line)
         return;
     }
 
-    HostLink_Tx("ERR CMD\r\n");
+    HostLink_Tx("ERR CMD — send HELP\r\n");
 }
 
 void HostLink_Init(UART_HandleTypeDef *huart)
@@ -397,7 +483,8 @@ void HostLink_Init(UART_HandleTypeDef *huart)
     s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
     s_last_tel_ms = HAL_GetTick();
     HostLink_ArmRx();
-    HostLink_Tx("OK HOST 115200 T/cmd USART1\r\n");
+    HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
+    HostLink_SendHelp();
 }
 
 void HostLink_Task(void)
