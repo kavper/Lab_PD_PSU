@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
-#define HOST_LINK_TX_MAX             448U
+#define HOST_LINK_TX_MAX             512U
 #define HOST_LINK_TEL_DEFAULT_MS     200U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -84,9 +84,19 @@ static void HostLink_SendTelemetry(void)
 
     LdoPrereg_Status_t prereg;
     LdoLink_Status_t ldo;
+    PowerManager_Status_t pm;
+    uint32_t now_ms = HAL_GetTick();
+    uint32_t g0_age_ms = 0U;
 
     LdoPrereg_GetStatus(&prereg);
     LdoLink_GetStatus(&ldo);
+    PowerManager_GetStatus(&pm);
+
+    if (ldo.last_rx_ms != 0U) {
+        g0_age_ms = now_ms - ldo.last_rx_ms;
+    } else {
+        g0_age_ms = 0xFFFFFFFFu;
+    }
 
     n = snprintf(line, sizeof(line),
                  "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
@@ -94,7 +104,9 @@ static void HostLink_SendTelemetry(void)
                  "permit=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
                  "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
-                 "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u\r\n",
+                 "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
+                 "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu "
+                 "i2c_tps=%u i2c_bq=%u i2c_bms=%u pm_st=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
@@ -135,7 +147,19 @@ static void HostLink_SendTelemetry(void)
                  (unsigned int)PowerStage_IsEnabled(),
                  (unsigned int)PowerStage_IsFaultActive(),
                  (unsigned long)App_GetStartupHoldRemainingMs(),
-                 (unsigned int)PowerStage_GetLastError());
+                 (unsigned int)PowerStage_GetLastError(),
+                 (unsigned long)ldo.rx_bytes,
+                 (unsigned long)ldo.tlm_count,
+                 (unsigned long)g0_age_ms,
+                 (unsigned long)ldo.rx_errors,
+                 (unsigned int)((pm.state != POWER_MANAGER_INIT) &&
+                                (pm.state != POWER_MANAGER_FAULT) ? 1U : 0U),
+                 (unsigned int)((pm.state == POWER_MANAGER_RUN) ||
+                                (pm.state == POWER_MANAGER_BQ_PROBE) ||
+                                (pm.state == POWER_MANAGER_BQ_ADC_SETUP) ||
+                                (pm.state == POWER_MANAGER_DEGRADED) ? 1U : 0U),
+                 (unsigned int)(BQ76922_IsEnabled() && bms.present ? 1U : 0U),
+                 (unsigned int)pm.state);
     if (n > 0) {
         HostLink_Tx(line);
     }

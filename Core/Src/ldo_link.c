@@ -129,6 +129,7 @@ static void LdoLink_HandleTlmLine(const char *line)
 {
     uint8_t value;
 
+    s_status.rx_lines++;
     if ((line == NULL) || (strncmp(line, "TLM ", 4U) != 0)) {
         return;
     }
@@ -282,6 +283,8 @@ void LdoLink_RxCplt(UART_HandleTypeDef *huart)
     }
 
     ch = s_rx_byte;
+    s_status.rx_bytes++;
+    s_status.last_rx_ms = HAL_GetTick();
     if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
         if (s_rx_len > 0U) {
             s_rx_line[s_rx_len] = '\0';
@@ -303,6 +306,10 @@ void LdoLink_RxCplt(UART_HandleTypeDef *huart)
 void LdoLink_OnUartError(UART_HandleTypeDef *huart)
 {
     if ((huart != NULL) && (huart == s_huart_g0)) {
+        s_status.rx_errors++;
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
         LdoLink_ArmRx();
     }
 }

@@ -26,7 +26,11 @@ typedef struct {
     uint32_t vpre_mv;
     bool vpre_present;
     uint32_t last_tlm_ms;
+    uint32_t last_rx_ms;
     uint32_t tlm_count;
+    uint32_t rx_bytes;
+    uint32_t rx_lines;
+    uint32_t rx_errors;
     char fault[16];
 } LdoLink_Status_t;
 
