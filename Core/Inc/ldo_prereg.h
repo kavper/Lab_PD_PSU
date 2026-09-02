@@ -7,6 +7,8 @@
 /*
  * G4 DCDC pre-regulator policy driven by G0 LDO telemetry.
  * G0 runs final CC/CV; G4 holds Vin_LDO ≈ vpre_request with headroom margin.
+ * While G0 OUT is on, request is floored at max(vset+margin, VIN_FLOOR) so a
+ * CC vout collapse cannot slew the pre-reg into G0 VIN_LOW.
  */
 
 typedef struct {

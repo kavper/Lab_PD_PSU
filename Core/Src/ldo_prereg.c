@@ -42,9 +42,20 @@ static bool Prereg_FaultIsNone(const char *fault)
     return (strcmp(fault, "NONE") == 0);
 }
 
+static float Prereg_CvFloorV(float vset_v)
+{
+    float floor_v = vset_v + BOARD_VPRE_MARGIN_V;
+
+    if (floor_v < BOARD_VPRE_VIN_FLOOR_V) {
+        floor_v = BOARD_VPRE_VIN_FLOOR_V;
+    }
+    return floor_v;
+}
+
 static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
 {
     float request_v;
+    float floor_v;
 
     if (ldo == NULL) {
         return BOARD_VPRE_MIN_V;
@@ -53,17 +64,28 @@ static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
     /* Before G0 OUT ON: pre-position DCDC at G0 setpoint + margin (VIN ready). */
     if (!ldo->output_on) {
         if (LdoLink_IsOutputWanted()) {
-            return Prereg_ClampV(LdoLink_GetG0Voltage() + BOARD_VPRE_MARGIN_V);
+            return Prereg_ClampV(Prereg_CvFloorV(LdoLink_GetG0Voltage()));
         }
         return BOARD_VPRE_MIN_V;
     }
+
+    /*
+     * Floor at vset+margin (and never below G0 VIN_LOW). G0 in CC asks for
+     * vout+margin; when the load collapses vout that request falls toward
+     * VPRE_MIN and used to slew the pre-reg into a VIN_LOW death spiral.
+     */
+    floor_v = Prereg_CvFloorV((float)ldo->vset_mv / 1000.0f);
 
     if (ldo->vpre_present && (ldo->vpre_mv > 0U)) {
         request_v = (float)ldo->vpre_mv / 1000.0f;
     } else if ((ldo->cc_cv != 0U) || (ldo->mode == LDO_G0_MODE_CC)) {
         request_v = ((float)ldo->vout_mv / 1000.0f) + BOARD_VPRE_MARGIN_V;
     } else {
-        request_v = ((float)ldo->vset_mv / 1000.0f) + BOARD_VPRE_MARGIN_V;
+        request_v = floor_v;
+    }
+
+    if (request_v < floor_v) {
+        request_v = floor_v;
     }
 
     return Prereg_ClampV(request_v);

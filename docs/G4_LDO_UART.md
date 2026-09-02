@@ -13,15 +13,15 @@ G4 **does not** run CC/CV on the user output. It regulates **ADC_VOUT (PB2)** = 
 
 ## Pre-regulator policy (`ldo_prereg.c`)
 
-Mirrors G0 `control_update_vpre_request()`:
+Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse cannot starve the LDO:
 
 | G0 state | DCDC target |
 |---|---|
 | `out=0` | disable DCDC, ramp command → 3 V |
-| CV (`cccv=0`) | `vset + 3 V` (or `vpre=` from TLM if present) |
-| CC (`cccv=1`) | `vout + 3 V` (tracks measured LDO output) |
+| CV (`cccv=0`) | `max(vset + 3 V, 6 V)` (or `vpre=` from TLM if present, same floor) |
+| CC (`cccv=1`) | `max(vout + 3 V, vset + 3 V, 6 V)` — do **not** follow collapsed `vout` below the CV floor |
 
-Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 3 V.
+Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 3 V, **VIN floor 6 V** (`BOARD_VPRE_VIN_FLOOR_V` = G0 `CONSOLE_MINIMUM_VIN_MV`).
 
 Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, `fault=NONE`, G0 `out=1`).
 

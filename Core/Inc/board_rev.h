@@ -94,6 +94,12 @@
 #define BOARD_VPRE_MIN_V                     3.0f
 #define BOARD_VPRE_MAX_V                     36.0f
 #define BOARD_VPRE_MARGIN_V                  3.0f
+/*
+ * G0 CONSOLE_MINIMUM_VIN_MV is 6.0 V. While OUT is on, never command the
+ * DCDC below this floor — even if G0 CC collapses vout and asks for
+ * vout+margin (which can drop to VPRE_MIN and starve VIN → VIN_LOW kill).
+ */
+#define BOARD_VPRE_VIN_FLOOR_V               6.0f
 
 /*
  * Bring-up without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV.
