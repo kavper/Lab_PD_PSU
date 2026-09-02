@@ -57,11 +57,13 @@
 #define BOARD_HAS_ENCODER                    0U
 #define BOARD_HAS_FRONT_BUTTONS              0U
 /*
- * Isolated DC-DC gate-driver supplies (BUCK_TR_EN / BOOST_TR_EN + TR_FLT).
- * Set to 0 for bring-up with direct +5V MP1918 drivers (no translator boards).
+ * Isolated UCC33420 gate-driver supplies (BUCK_TR_EN / BOOST_TR_EN + TR_FLT).
+ * Default 1: drive EN with the power stage (rev2 schematic).
+ * Set to 0 only for bring-up with direct +5V MP1918 and unpopulated TR boards
+ * (avoids false FAULT_DRIVER on floating TR_FLT).
  */
 #ifndef BOARD_HAS_ISOLATED_GAN_SUPPLY
-#define BOARD_HAS_ISOLATED_GAN_SUPPLY        0U
+#define BOARD_HAS_ISOLATED_GAN_SUPPLY        1U
 #endif
 
 /* Silk TPS2571D is TPS25751D — keep tps25751.c. */

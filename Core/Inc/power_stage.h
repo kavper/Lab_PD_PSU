@@ -23,8 +23,16 @@
 #define POWER_STAGE_HRTIM_PRESCALER_RATIO          HRTIM_PRESCALERRATIO_MUL32
 #endif
 
+/*
+ * Bootstrap / UCC gate-drive refresh:
+ * MP1918 HS still uses a bootstrap cap even with UCC33420 isolated bias.
+ * Above ~98% HS duty the LS never turns on long enough to recharge it, so
+ * the half-bridge is forced into StaticHigh + short LS refresh pulses
+ * (HRTIM master) instead of continuous 100% PWM. Same path refreshes the
+ * pass-through leg in pure BUCK / BOOST.
+ */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
-#define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       0U
+#define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
 #endif
 
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_BUCK_ENABLE
@@ -32,7 +40,12 @@
 #endif
 
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE
-#define POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE 0U
+#define POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE 1U
+#endif
+
+/* HS duty at/above this (x10000) triggers StaticHigh + bootstrap refresh. */
+#ifndef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
+#define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K   9800U
 #endif
 
 /* Bootstrap refresh frequency is set here; this is not PWM switching frequency. */

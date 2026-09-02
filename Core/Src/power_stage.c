@@ -299,6 +299,18 @@ static bool PowerStage_IsBoostRefreshEnabled(void)
 #endif
 }
 
+/* True when commanded HS duty is so high that LS never refreshes bootstrap. */
+static bool PowerStage_NeedsHsBootstrapRefresh(uint32_t hs_duty_10k)
+{
+#if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE == 0U)
+    (void)hs_duty_10k;
+    return false;
+#else
+    return (PowerStage_Clamp10k(hs_duty_10k) >=
+            POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K);
+#endif
+}
+
 static void PowerStage_DisableHrtimBurst(void)
 {
     if ((ps.hhrtim == NULL) || (ps.hhrtim->Instance == NULL)) {
@@ -883,8 +895,10 @@ void PowerStage_ForceSafeState(void)
 void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
 {
     PowerStage_OutputMode_t desired_mode;
-    bool buck_refresh = false;
-    bool boost_refresh = false;
+    bool refresh_a = false;
+    bool refresh_c = false;
+    bool need_master_refresh = false;
+    uint32_t hs_c_10k;
 
     if ((!ps.initialized) || (ps.hhrtim == NULL) || (ps.hhrtim->Instance == NULL)) {
         return;
@@ -898,7 +912,14 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
     switch (ps.region) {
         case POWER_REGION_BUCK:
             desired_mode = POWER_STAGE_OUTPUT_BUCK;
-            buck_refresh = PowerStage_IsBuckRefreshEnabled();
+            /*
+             * Leg A: PWM, unless HS duty >= 98% — then StaticHigh + refresh
+             * so bootstrap cannot discharge at near-100% duty.
+             * Leg C: pass-through StaticHigh (always needs refresh when enabled).
+             */
+            refresh_a = PowerStage_IsBuckRefreshEnabled() &&
+                        PowerStage_NeedsHsBootstrapRefresh(duty_a_10k);
+            refresh_c = PowerStage_IsBuckRefreshEnabled();
 
             ps.duty_a_10k = duty_a_10k;
             ps.duty_b_10k = 0U;
@@ -910,78 +931,109 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             ps.duty_c = 0.0f;
 
             if ((ps.output_mode != desired_mode) ||
-                (ps.refresh_c_active != buck_refresh) ||
-                ps.refresh_a_active) {
-                PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
-                PowerStage_ConfigHalfBridgeC_StaticHigh(buck_refresh);
-            } else {
+                (ps.refresh_a_active != refresh_a) ||
+                (ps.refresh_c_active != refresh_c)) {
+                if (refresh_a) {
+                    PowerStage_ConfigHalfBridgeA_StaticHigh(true);
+                } else {
+                    PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
+                }
+                PowerStage_ConfigHalfBridgeC_StaticHigh(refresh_c);
+            } else if (!refresh_a) {
                 ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
                     PowerStage_DutyAToCmp(duty_a_10k);
             }
 
-            ps.refresh_a_active = false;
-            ps.refresh_c_active = buck_refresh;
-            PowerStage_RefreshMasterSync(buck_refresh);
+            ps.refresh_a_active = refresh_a;
+            ps.refresh_c_active = refresh_c;
+            need_master_refresh = refresh_a || refresh_c;
+            PowerStage_RefreshMasterSync(need_master_refresh);
             break;
 
         case POWER_REGION_BOOST:
             desired_mode = POWER_STAGE_OUTPUT_BOOST;
-            boost_refresh = PowerStage_IsBoostRefreshEnabled();
+            /* Pure BOOST: A is StaticHigh; C is PWM (LS = duty_b). */
+            refresh_a = PowerStage_IsBoostRefreshEnabled();
+            hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
+                       0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
+            refresh_c = PowerStage_IsBoostRefreshEnabled() &&
+                        PowerStage_NeedsHsBootstrapRefresh(hs_c_10k);
 
             ps.duty_a_10k = POWER_STAGE_DUTY_SCALE;
             ps.duty_b_10k = duty_b_10k;
             ps.duty_c_cmd_10k = duty_b_10k;
             ps.duty_c_phys_10k = duty_b_10k;
-            ps.tc1_expected_10k = POWER_STAGE_DUTY_SCALE - duty_b_10k;
+            ps.tc1_expected_10k = hs_c_10k;
             ps.tc2_expected_10k = duty_b_10k;
             ps.duty_a = 1.0f;
             ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
 
             if ((ps.output_mode != desired_mode) ||
-                (ps.refresh_a_active != boost_refresh) ||
-                ps.refresh_c_active) {
-                /* Pure BOOST is kept only for diagnostics. */
-                PowerStage_ConfigHalfBridgeA_StaticHigh(boost_refresh);
-                PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
-            } else {
+                (ps.refresh_a_active != refresh_a) ||
+                (ps.refresh_c_active != refresh_c)) {
+                PowerStage_ConfigHalfBridgeA_StaticHigh(refresh_a);
+                if (refresh_c) {
+                    /* HS nearly always on → refresh pulses instead of PWM. */
+                    PowerStage_ConfigHalfBridgeC_StaticHigh(true);
+                } else {
+                    PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                }
+            } else if (!refresh_c) {
                 ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
                     PowerStage_DutyBToCmp(duty_b_10k);
             }
 
-            ps.refresh_a_active = boost_refresh;
-            ps.refresh_c_active = false;
-            PowerStage_RefreshMasterSync(boost_refresh);
+            ps.refresh_a_active = refresh_a;
+            ps.refresh_c_active = refresh_c;
+            need_master_refresh = refresh_a || refresh_c;
+            PowerStage_RefreshMasterSync(need_master_refresh);
             break;
 
         case POWER_REGION_BUCK_BOOST:
         default:
             desired_mode = POWER_STAGE_OUTPUT_BUCK_BOOST;
+            hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
+                       0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
+            refresh_a = PowerStage_NeedsHsBootstrapRefresh(duty_a_10k);
+            refresh_c = PowerStage_NeedsHsBootstrapRefresh(hs_c_10k);
 
             ps.duty_a_10k = duty_a_10k;
             ps.duty_b_10k = duty_b_10k;
             ps.duty_c_cmd_10k = duty_b_10k;
             ps.duty_c_phys_10k = duty_b_10k;
-            ps.tc1_expected_10k = POWER_STAGE_DUTY_SCALE - duty_b_10k;
+            ps.tc1_expected_10k = hs_c_10k;
             ps.tc2_expected_10k = duty_b_10k;
             ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
             ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
 
-            /* BUCK_BOOST: klasyczne PWM na obu pol-mostkach, bez global refresh. */
             if ((ps.output_mode != desired_mode) ||
-                ps.refresh_a_active ||
-                ps.refresh_c_active) {
-                PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
-                PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                (ps.refresh_a_active != refresh_a) ||
+                (ps.refresh_c_active != refresh_c)) {
+                if (refresh_a) {
+                    PowerStage_ConfigHalfBridgeA_StaticHigh(true);
+                } else {
+                    PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
+                }
+                if (refresh_c) {
+                    PowerStage_ConfigHalfBridgeC_StaticHigh(true);
+                } else {
+                    PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                }
             } else {
-                ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
-                    PowerStage_DutyAToCmp(duty_a_10k);
-                ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
-                    PowerStage_DutyBToCmp(duty_b_10k);
+                if (!refresh_a) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
+                        PowerStage_DutyAToCmp(duty_a_10k);
+                }
+                if (!refresh_c) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
+                        PowerStage_DutyBToCmp(duty_b_10k);
+                }
             }
 
-            ps.refresh_a_active = false;
-            ps.refresh_c_active = false;
-            PowerStage_RefreshMasterSync(false);
+            ps.refresh_a_active = refresh_a;
+            ps.refresh_c_active = refresh_c;
+            need_master_refresh = refresh_a || refresh_c;
+            PowerStage_RefreshMasterSync(need_master_refresh);
             break;
     }
 
@@ -990,8 +1042,11 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
     (void)HAL_HRTIM_SoftwareUpdate(ps.hhrtim,
                                    HRTIM_TIMERUPDATE_A | HRTIM_TIMERUPDATE_C);
 
-    if ((ps.output_mode == POWER_STAGE_OUTPUT_BOOST) ||
-        (ps.output_mode == POWER_STAGE_OUTPUT_BUCK_BOOST)) {
+    if (ps.refresh_c_active) {
+        /* StaticHigh+refresh: physical LS duty is the short refresh pulse only. */
+        ps.duty_c_phys_10k = 0U;
+    } else if ((ps.output_mode == POWER_STAGE_OUTPUT_BOOST) ||
+               (ps.output_mode == POWER_STAGE_OUTPUT_BUCK_BOOST)) {
         uint32_t cmp_c = ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR;
 
         /* Telemetria: fizyczny duty TC2/LIN_C wyznaczony z CMP1. */

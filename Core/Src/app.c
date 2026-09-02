@@ -44,6 +44,7 @@ BQ76922_Device_t g_bq76922;
 #define DUTY_MAX_ABS                         1.000f
 
 #define DUTY_BUCK_MIN                        0.020f
+/* 1.0 allowed: PowerStage switches to StaticHigh+bootstrap refresh at >=98% HS. */
 #define DUTY_BUCK_MAX                        1.000f
 
 /* BUCK_BOOST mixed-mode duty limits are set here. */
@@ -1712,6 +1713,14 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     Debug_Printf("[APP] GaN: isolated TR supplies enabled (BUCK/BOOST_TR_EN)");
 #else
     Debug_Printf("[APP] GaN: direct +5V drivers (TR_EN/TR_FLT ignored)");
+#endif
+#if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U)
+    Debug_Printf("[APP] GaN: bootstrap refresh ON (HS>=%lu.%02lu%% -> StaticHigh+LS pulse @ %luHz)",
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U),
+                 (unsigned long)POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ);
+#else
+    Debug_Printf("[APP] GaN: bootstrap refresh OFF");
 #endif
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
