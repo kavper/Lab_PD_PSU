@@ -48,4 +48,13 @@ bool LdoLink_IsDcdcPermitRequested(void);
 void LdoLink_GetStatus(LdoLink_Status_t *out);
 bool LdoLink_IsPowerPermitted(void);
 
+/*
+ * Remote sense path (PB5 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).
+ * Host "REMOTE ON" asserts REMOTE_ON so ADC_REMOTE_P/N (PB0/PB1) sense path is
+ * selected in hardware. CV regulation still uses ADC_VOUT (PB2) until remote
+ * channels are added to ADC DMA ranks.
+ */
+void LdoLink_SetRemoteSense(bool enable);
+bool LdoLink_IsRemoteSenseEnabled(void);
+
 #endif /* LDO_LINK_H */

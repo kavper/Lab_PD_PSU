@@ -101,7 +101,7 @@ static void HostLink_SendTelemetry(void)
     n = snprintf(line, sizeof(line),
                  "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
-                 "permit=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
+                 "permit=%u rem_sense=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
                  "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
@@ -121,6 +121,7 @@ static void HostLink_SendTelemetry(void)
                  (long)HostLink_Ma(pd_a),
                  (long)HostLink_Ma(pd_w),
                  (unsigned int)LdoPrereg_IsPermitGranted(),
+                 (unsigned int)(LdoLink_IsRemoteSenseEnabled() ? 1U : 0U),
                  (unsigned int)(BQ76922_IsEnabled() && bms.present ? 1U : 0U),
                  (unsigned int)(BQ76922_IsEnabled() && bms.configured ? 1U : 0U),
                  (unsigned int)(BQ76922_IsEnabled() ? bms.state : 0U),
@@ -352,6 +353,20 @@ static void HostLink_HandleLine(char *line)
             LdoPrereg_SetForceDisable(false);
         }
         HostLink_Tx("OK\r\n");
+        return;
+    }
+    if (HostLink_EqToken(line, "REMOTE")) {
+        if (HostLink_EqToken(arg, "ON") || HostLink_EqToken(arg, "1")) {
+            LdoLink_SetRemoteSense(true);
+            HostLink_Tx("OK REMOTE\r\n");
+            return;
+        }
+        if (HostLink_EqToken(arg, "OFF") || HostLink_EqToken(arg, "0")) {
+            LdoLink_SetRemoteSense(false);
+            HostLink_Tx("OK LOCAL\r\n");
+            return;
+        }
+        HostLink_Tx("ERR REMOTE\r\n");
         return;
     }
     if (HostLink_EqToken(line, "TEL")) {

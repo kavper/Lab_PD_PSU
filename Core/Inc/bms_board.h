@@ -11,7 +11,7 @@
  * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
  */
 #ifndef BMS_ENABLE
-#define BMS_ENABLE                       0U
+#define BMS_ENABLE                       1U
 #endif
 
 #define BMS_U1_THRESHOLD_CODE_MV(mv)     ((uint8_t)((((uint32_t)(mv) * 10U) + 253U) / 506U))

@@ -24,6 +24,7 @@ static volatile bool s_rx_overflow;
 
 static LdoLink_Status_t s_status;
 static bool s_dcdc_permit_request;
+static bool s_remote_sense;
 static uint8_t s_applied_bleed;
 static uint8_t s_applied_fan;
 static bool s_applied_permit;
@@ -274,6 +275,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_line_ready = false;
     s_rx_overflow = false;
     s_dcdc_permit_request = false;
+    s_remote_sense = false;
     s_last_health_ms = 0U;
     s_last_recover_ms = 0U;
 
@@ -285,10 +287,12 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 #else
     LdoLink_SetPermitPin(false);
 #endif
+    /* Default local sense: REMOTE_ON low until host REMOTE ON. */
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
     LdoLink_ArmRx();
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward on USART1)\r\n");
+    Debug_Printf("[LDO] Sense: LOCAL (REMOTE_ON=0); host REMOTE ON for remote path\r\n");
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
     Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH (clear G0 POWER_KILL)\r\n");
 #endif
@@ -302,6 +306,21 @@ void LdoLink_SetDcdcPermitRequest(bool permit)
 bool LdoLink_IsDcdcPermitRequested(void)
 {
     return s_dcdc_permit_request;
+}
+
+void LdoLink_SetRemoteSense(bool enable)
+{
+    s_remote_sense = enable;
+    HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin,
+                       enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    Debug_Printf("[LDO] Sense: %s (REMOTE_ON=%u)\r\n",
+                 enable ? "REMOTE" : "LOCAL",
+                 enable ? 1U : 0U);
+}
+
+bool LdoLink_IsRemoteSenseEnabled(void)
+{
+    return s_remote_sense;
 }
 
 void LdoLink_GetStatus(LdoLink_Status_t *out)

@@ -34,6 +34,35 @@ Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is wi
 | Fan PWM | PA6 TIM16 | `fan_pwm.c` |
 | BLEED_ON | PB4 | `ldo_link.c` |
 | POWER_PERMIT_G4 | PB6 | `ldo_prereg.c` → `ldo_link.c` |
+| Local Vout sense | PB2 `ADC_VOUT` | `measurements.c` (CV) |
+| Remote sense enable | PB5 `REMOTE_ON` | `ldo_link.c` (default LOW) |
+| Remote Kelvin sense | PB0/PB1 `ADC_REMOTE_P/N` | analog inputs (no DMA ranks yet) |
+
+## Local vs remote sense
+
+- **Default at boot:** local only (`REMOTE_ON` = LOW). CV regulation always uses `ADC_VOUT` (PB2).
+- Host `REMOTE ON` / `REMOTE 1` asserts `REMOTE_ON` (PB5) to switch the hardware remote sense path.
+- Host `REMOTE OFF` / `REMOTE 0` returns to local.
+- Telemetry `T` line includes `rem_sense=0|1`.
+- Open-lead / differential remote ADC readback needs PB0/PB1 added to ADC DMA ranks later; until then remote is a GPIO path switch only.
+
+## Host UART commands (USART1)
+
+| Command | Action |
+|---|---|
+| `ON` / `OFF` | Enable / disable DCDC |
+| `CLR` / `CLEAR` | Clear sticky fault latch |
+| `SET <v>` | Set voltage |
+| `ILIM <a>` | Set current limit |
+| `USB …` | USB PD mode |
+| `PERMIT 0\|1` | Force G0 kill assert / clear |
+| `REMOTE 0\|OFF` | Local sense (default) |
+| `REMOTE 1\|ON` | Enable remote sense path |
+| `TEL` / `?` | Status dump |
+
+## BMS (5S bring-up)
+
+With `BMS_ENABLE=1` and `BMS_CELL_COUNT=5`, equal **5×68 Ω** ladder on a bench supply: pack ≈ 14–21 V keeps cells between CUV (2.8 V) and COV (4.25 V). `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off (`BOARD_HAS_FRONT_BUTTONS=0`); ON/OFF is USART1.
 
 ## Bring-up sequence
 

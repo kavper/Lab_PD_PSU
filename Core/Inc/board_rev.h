@@ -89,7 +89,8 @@
  * Disable before shipping with G0 LDO.
  */
 #ifndef BOARD_BRINGUP_AUTO_ON
-#define BOARD_BRINGUP_AUTO_ON                1U
+/* 0: wait for host ON (USART1) so BMS can come up before rail enable. */
+#define BOARD_BRINGUP_AUTO_ON                0U
 #endif
 
 /*

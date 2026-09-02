@@ -28,9 +28,12 @@
  *   ILIM <amps>        e.g. ILIM 3
  *   USB AUTO|SINK|SOURCE
  *   PERMIT 0|1         1 = allow power-stage LDO, 0 = kill LDO (safe)
+ *   REMOTE ON|1        enable remote sense path (PB5 REMOTE_ON high)
+ *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
  *   TEL [period_ms]    0 = stop periodic T lines; default 200
  *   ?                  one immediate T line
  *
+ * Telemetry also includes rem_sense=0|1 after permit=.
  * Replies: OK, ERR <reason>, or a T line.
  */
 
