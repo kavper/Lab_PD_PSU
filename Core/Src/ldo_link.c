@@ -12,6 +12,8 @@
 #define LDO_RX_LINE_MAX              192U
 #define LDO_TLM_STALE_MS             500U
 #define LDO_FAN_FAILSAFE_PERCENT     40U
+#define LDO_LINK_HEALTH_MS           2000U
+#define LDO_RX_RECOVER_MS            1000U
 
 static UART_HandleTypeDef *s_huart_g0 = NULL;
 static uint8_t s_rx_byte;
@@ -25,12 +27,60 @@ static bool s_dcdc_permit_request;
 static uint8_t s_applied_bleed;
 static uint8_t s_applied_fan;
 static bool s_applied_permit;
+static uint32_t s_last_health_ms;
+static uint32_t s_last_recover_ms;
 
 static void LdoLink_ArmRx(void)
 {
     if (s_huart_g0 != NULL) {
         (void)HAL_UART_Receive_IT(s_huart_g0, &s_rx_byte, 1U);
     }
+}
+
+static void LdoLink_DumpFirstRx(void)
+{
+    char hex[64];
+    size_t n = 0U;
+    uint8_t i;
+
+    if (s_status.first_rx_dumped || (s_status.first_rx_len == 0U)) {
+        return;
+    }
+
+    for (i = 0U; (i < s_status.first_rx_len) && (n + 4U < sizeof(hex)); i++) {
+        int wrote = snprintf(&hex[n], sizeof(hex) - n, "%02X ",
+                             (unsigned int)s_status.first_rx[i]);
+        if (wrote <= 0) {
+            break;
+        }
+        n += (size_t)wrote;
+    }
+    if ((n > 0U) && (hex[n - 1U] == ' ')) {
+        hex[n - 1U] = '\0';
+    }
+    Debug_Printf("[LDO] G0 first RX (%u B): %s\r\n",
+                 (unsigned int)s_status.first_rx_len, hex);
+    s_status.first_rx_dumped = true;
+}
+
+static void LdoLink_RecoverRx(uint32_t now_ms)
+{
+    if (s_huart_g0 == NULL) {
+        return;
+    }
+    if ((uint32_t)(now_ms - s_last_recover_ms) < LDO_RX_RECOVER_MS) {
+        return;
+    }
+    s_last_recover_ms = now_ms;
+
+    (void)HAL_UART_AbortReceive(s_huart_g0);
+    __HAL_UART_CLEAR_OREFLAG(s_huart_g0);
+    __HAL_UART_CLEAR_NEFLAG(s_huart_g0);
+    __HAL_UART_CLEAR_FEFLAG(s_huart_g0);
+    __HAL_UART_CLEAR_PEFLAG(s_huart_g0);
+    s_rx_len = 0U;
+    s_line_ready = false;
+    LdoLink_ArmRx();
 }
 
 static void LdoLink_SetBleed(bool on)
@@ -224,6 +274,8 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_line_ready = false;
     s_rx_overflow = false;
     s_dcdc_permit_request = false;
+    s_last_health_ms = 0U;
+    s_last_recover_ms = 0U;
 
     FanPwm_Init();
     LdoLink_SetBleed(false);
@@ -263,6 +315,7 @@ void LdoLink_Task(void)
 {
     char line[LDO_RX_LINE_MAX];
     uint32_t now_ms = HAL_GetTick();
+    uint32_t age_ms;
 
     if (s_line_ready) {
         uint32_t primask = __get_PRIMASK();
@@ -273,10 +326,38 @@ void LdoLink_Task(void)
         if (primask == 0U) {
             __enable_irq();
         }
+        LdoLink_DumpFirstRx();
         LdoLink_HandleTlmLine(line);
     } else if (s_rx_overflow) {
         s_rx_overflow = false;
         Debug_Printf("[LDO] WARN: G0 RX line overflow\r\n");
+    }
+
+    if (s_status.last_rx_ms != 0U) {
+        age_ms = now_ms - s_status.last_rx_ms;
+    } else {
+        age_ms = 0xFFFFFFFFu;
+    }
+
+    /* No TLM stream: periodically report + re-arm RX after noise/silence. */
+    if (!s_status.telemetry_valid ||
+        ((s_status.last_tlm_ms != 0U) &&
+         ((uint32_t)(now_ms - s_status.last_tlm_ms) > LDO_TLM_STALE_MS))) {
+        if ((age_ms > LDO_RX_RECOVER_MS) || (s_status.rx_errors > 0U)) {
+            LdoLink_RecoverRx(now_ms);
+        }
+        if ((uint32_t)(now_ms - s_last_health_ms) >= LDO_LINK_HEALTH_MS) {
+            s_last_health_ms = now_ms;
+            LdoLink_DumpFirstRx();
+            Debug_Printf("[LDO] G0 link weak: rx=%lu lines=%lu tlm=%lu err=%lu "
+                         "age_ms=%lu last_err=0x%lX (need ASCII TLM @115200 on PB15)\r\n",
+                         (unsigned long)s_status.rx_bytes,
+                         (unsigned long)s_status.rx_lines,
+                         (unsigned long)s_status.tlm_count,
+                         (unsigned long)s_status.rx_errors,
+                         (unsigned long)age_ms,
+                         (unsigned long)s_status.last_error_code);
+        }
     }
 
     LdoLink_ApplyActuators(now_ms);
@@ -293,6 +374,9 @@ void LdoLink_RxCplt(UART_HandleTypeDef *huart)
     ch = s_rx_byte;
     s_status.rx_bytes++;
     s_status.last_rx_ms = HAL_GetTick();
+    if (s_status.first_rx_len < sizeof(s_status.first_rx)) {
+        s_status.first_rx[s_status.first_rx_len++] = ch;
+    }
     if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
         if (s_rx_len > 0U) {
             s_rx_line[s_rx_len] = '\0';
@@ -315,9 +399,14 @@ void LdoLink_OnUartError(UART_HandleTypeDef *huart)
 {
     if ((huart != NULL) && (huart == s_huart_g0)) {
         s_status.rx_errors++;
+        s_status.last_error_code |= huart->ErrorCode;
         __HAL_UART_CLEAR_OREFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
         __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        huart->ErrorCode = HAL_UART_ERROR_NONE;
+        /* Abort sticky RX state then re-arm — framing noise otherwise stalls IT. */
+        (void)HAL_UART_AbortReceive(huart);
         LdoLink_ArmRx();
     }
 }

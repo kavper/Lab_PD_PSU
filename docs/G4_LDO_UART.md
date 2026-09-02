@@ -38,8 +38,21 @@ Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is wi
 ## Bring-up sequence
 
 1. Flash G0 + G4. Connect isolator UART (115200).
-2. On G0: `OUT ON`, `SET V=… I=…`.
+2. On G0: `OUT ON`, `SET V=… I=…` (or G0 `BOARD_BRINGUP_AUTO_OUT=1`).
 3. G4 parses `TLM` @ 5 Hz → enables DCDC → ramps to `vpre` → asserts PERMIT.
 4. PC on USART1: forwarded `TLM` lines + `T … vpre_req_mv= … permit= …` from G4.
 
+With `BOARD_BRINGUP_LOCAL_CV` / `BOARD_BRINGUP_AUTO_ON`, G4 can run DCDC CV without G0 TLM (pre-reg rail only). **User LDO output still requires a live G0.**
+
 Host **OFF** / **PERMIT 0** = emergency: force DCDC off and PERMIT low (even if G0 still reports on). Clears when G0 `out=0` or host **ON** + **PERMIT 1**.
+
+## G0 link triage (`g0_*` on host `T` line)
+
+| Symptom | Meaning |
+|---|---|
+| `vout_mv≈8000`, `mode=CV`, `g0_tlm=0` | DCDC OK; final LDO not talking / not ON |
+| `g0_rx` stuck at 1, `g0_age_ms` climbing | One noise byte then silence — isolator / TX-RX / G0 not streaming |
+| `g0_err>0`, `g0_uart=0x…` | Framing/noise (`0x4` FE, `0x8` NE, `0x1` ORE) |
+| `g0_tlm` rising, forwarded `TLM …` lines | Link OK — check G0 LED / `kill=` / `pgood=` / `out=` |
+
+Hardware checks: G4 **PB14↔G0 RX**, **PB15↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).

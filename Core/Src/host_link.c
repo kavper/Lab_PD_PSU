@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
-#define HOST_LINK_TX_MAX             512U
+#define HOST_LINK_TX_MAX             768U
 #define HOST_LINK_TEL_DEFAULT_MS     200U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -105,7 +105,7 @@ static void HostLink_SendTelemetry(void)
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
                  "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
-                 "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu "
+                 "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
                  "i2c_tps=%u i2c_bq=%u i2c_bms=%u pm_st=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
@@ -152,6 +152,7 @@ static void HostLink_SendTelemetry(void)
                  (unsigned long)ldo.tlm_count,
                  (unsigned long)g0_age_ms,
                  (unsigned long)ldo.rx_errors,
+                 (unsigned long)ldo.last_error_code,
                  (unsigned int)((pm.state != POWER_MANAGER_INIT) &&
                                 (pm.state != POWER_MANAGER_FAULT) ? 1U : 0U),
                  (unsigned int)((pm.state == POWER_MANAGER_RUN) ||

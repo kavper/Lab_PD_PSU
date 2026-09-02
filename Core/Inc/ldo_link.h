@@ -31,6 +31,10 @@ typedef struct {
     uint32_t rx_bytes;
     uint32_t rx_lines;
     uint32_t rx_errors;
+    uint32_t last_error_code; /* HAL_UART_ERROR_* latch */
+    uint8_t first_rx[16];
+    uint8_t first_rx_len;
+    bool first_rx_dumped;
     char fault[16];
 } LdoLink_Status_t;
 
