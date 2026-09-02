@@ -370,8 +370,10 @@ static void App_StatusLedUpdate(void)
 static bool App_IsDriverAwake(void)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    return (HAL_GPIO_ReadPin(BUCK_TR_EN_GPIO_Port, BUCK_TR_EN_Pin) == GPIO_PIN_SET) &&
-           (HAL_GPIO_ReadPin(BOOST_TR_EN_GPIO_Port, BOOST_TR_EN_Pin) == GPIO_PIN_SET);
+    /* Awake if stage is up; UCC EN may be asserted on only the high-HS leg. */
+    return PowerStage_IsEnabled() ||
+           PowerStage_IsBuckTrEnActive() ||
+           PowerStage_IsBoostTrEnActive();
 #else
     return PowerStage_IsEnabled();
 #endif
@@ -1365,6 +1367,10 @@ static void App_DebugTask(void)
     uint32_t uart_dropped;
     bool stage_enabled;
     bool refresh_active;
+    bool refresh_a;
+    bool refresh_c;
+    bool tr_en_a;
+    bool tr_en_c;
     App_Mode_t active_mode;
     App_Mode_t requested_mode;
     PowerStage_Region_t active_region;
@@ -1429,6 +1435,10 @@ static void App_DebugTask(void)
     fsw_hz = PowerStage_GetFswHz();
     hrtim_period = PowerStage_GetPeriodTicks();
     refresh_active = PowerStage_IsBootstrapRefreshActive();
+    refresh_a = PowerStage_IsBootstrapRefreshAActive();
+    refresh_c = PowerStage_IsBootstrapRefreshCActive();
+    tr_en_a = PowerStage_IsBuckTrEnActive();
+    tr_en_c = PowerStage_IsBoostTrEnActive();
     refresh_hz = PowerStage_GetBootstrapRefreshHz();
     refresh_period = PowerStage_GetBootstrapRefreshPeriodTicks();
     refresh_pulse = PowerStage_GetBootstrapRefreshPulseTicks();
@@ -1508,11 +1518,15 @@ static void App_DebugTask(void)
                  App_FracPart(pi_x1000, 1000),
                  (unsigned long)pwm_update_cnt);
 
-    Debug_Printf("[PWM] fsw=%luHz per=%lu refresh=%luHz ref_act=%u ref_per=%lu ref_pulse=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
+    Debug_Printf("[PWM] fsw=%luHz per=%lu refresh=%luHz ref_act=%u ref_a=%u ref_c=%u tr_en_a=%u tr_en_c=%u ref_per=%lu ref_pulse=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
                  (unsigned long)fsw_hz,
                  (unsigned long)hrtim_period,
                  (unsigned long)refresh_hz,
                  refresh_active ? 1U : 0U,
+                 refresh_a ? 1U : 0U,
+                 refresh_c ? 1U : 0U,
+                 tr_en_a ? 1U : 0U,
+                 tr_en_c ? 1U : 0U,
                  (unsigned long)refresh_period,
                  (unsigned long)refresh_pulse,
                  App_IntPart(duty_a_hw_x10, 10),
@@ -1710,15 +1724,16 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     }
 #endif
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    Debug_Printf("[APP] GaN: isolated TR supplies enabled (BUCK/BOOST_TR_EN)");
+    Debug_Printf("[APP] GaN: UCC TR_EN selective (HS>=%lu.%02lu%% per leg, TR_FLT feedback)",
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U));
 #else
     Debug_Printf("[APP] GaN: direct +5V drivers (TR_EN/TR_FLT ignored)");
 #endif
 #if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U)
-    Debug_Printf("[APP] GaN: bootstrap refresh ON (HS>=%lu.%02lu%% -> StaticHigh+LS pulse @ %luHz)",
+    Debug_Printf("[APP] GaN: bootstrap support ON (only HS>=%lu.%02lu%% leg; ref_act / TR_EN feedback)",
                  (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U),
-                 (unsigned long)POWER_STAGE_BOOTSTRAP_REFRESH_PERIOD_HZ);
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U));
 #else
     Debug_Printf("[APP] GaN: bootstrap refresh OFF");
 #endif

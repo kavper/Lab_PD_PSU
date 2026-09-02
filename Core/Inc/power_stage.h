@@ -24,12 +24,11 @@
 #endif
 
 /*
- * Bootstrap / UCC gate-drive refresh:
- * MP1918 HS still uses a bootstrap cap even with UCC33420 isolated bias.
- * Above ~98% HS duty the LS never turns on long enough to recharge it, so
- * the half-bridge is forced into StaticHigh + short LS refresh pulses
- * (HRTIM master) instead of continuous 100% PWM. Same path refreshes the
- * pass-through leg in pure BUCK / BOOST.
+ * Bootstrap / UCC high-side support (selective per leg):
+ * When upper-FET (HS) duty reaches ~98%, that leg alone gets help — never
+ * blanket both converters. With UCC33420 boards: assert only that leg's
+ * BUCK_TR_EN / BOOST_TR_EN and honor its TR_FLT feedback. Without UCC:
+ * StaticHigh + short LS refresh pulses on that leg (HRTIM master, ref_act).
  */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
@@ -43,7 +42,7 @@
 #define POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE 1U
 #endif
 
-/* HS duty at/above this (x10000) triggers StaticHigh + bootstrap refresh. */
+/* HS duty at/above this (x10000) enables that leg's UCC EN and/or refresh. */
 #ifndef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
 #define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K   9800U
 #endif
@@ -90,6 +89,10 @@ uint32_t PowerStage_GetConfiguredAdcTriggerTicks(void);
 uint32_t PowerStage_GetSafeInitCompareTicks(void);
 uint32_t PowerStage_GetFswHz(void);
 bool PowerStage_IsBootstrapRefreshActive(void);
+bool PowerStage_IsBootstrapRefreshAActive(void);
+bool PowerStage_IsBootstrapRefreshCActive(void);
+bool PowerStage_IsBuckTrEnActive(void);
+bool PowerStage_IsBoostTrEnActive(void);
 uint32_t PowerStage_GetBootstrapRefreshHz(void);
 uint32_t PowerStage_GetBootstrapRefreshPeriodTicks(void);
 uint32_t PowerStage_GetBootstrapRefreshPulseTicks(void);
