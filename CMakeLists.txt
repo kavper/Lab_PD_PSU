@@ -88,6 +88,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 # Build-and-flash target for VS Code / STM32Cube extension without starting a debug session.
+# G474RCTx linker assumes single-bank (DBANK=0). Factory dual-bank rejects images
+# past 0x08020000 with "Operation exceeds memory limits". Prefer .bin over .elf.
 set(STM32_PROGRAMMER_CLI_DEFAULT
     "/Users/kacpergawel/Library/Application Support/stm32cube/bundles/programmer/2.21.0/bin/STM32_Programmer_CLI")
 set(STM32_PROGRAMMER_CLI "${STM32_PROGRAMMER_CLI_DEFAULT}"
@@ -97,15 +99,30 @@ if(NOT STM32_PROGRAMMER_CLI)
         CACHE FILEPATH "Path to STM32_Programmer_CLI" FORCE)
 endif()
 
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin
+    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+    COMMENT "Generate .bin/.hex and print size"
+)
+
 add_custom_target(flash
     COMMAND "${STM32_PROGRAMMER_CLI}"
             -c port=SWD mode=UR reset=HWrst
-            -w "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>"
+            -ob DBANK=0
+    COMMAND "${STM32_PROGRAMMER_CLI}"
+            -c port=SWD mode=UR reset=HWrst
+            -e all
+    COMMAND "${STM32_PROGRAMMER_CLI}"
+            -c port=SWD mode=UR reset=HWrst
+            -w "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin" 0x08000000
             -v
             -rst
     DEPENDS ${CMAKE_PROJECT_NAME}
     USES_TERMINAL
-    COMMENT "Build and flash ${CMAKE_PROJECT_NAME}"
+    COMMENT "DBANK=0 + mass-erase + flash ${CMAKE_PROJECT_NAME}.bin"
 )
 
 # VS Code can keep an old selected target in its internal state.

@@ -9,6 +9,15 @@
 **  Abstract    : Linker script for STM32G474RCTx series
 **                256Kbytes FLASH and 128Kbytes RAM
 **
+**  IMPORTANT (STM32G474 256KB flash banking):
+**  This MEMORY map is contiguous 256KB at 0x08000000 and is ONLY valid
+**  when option byte DBANK=0 (single-bank mode). Factory default is
+**  DBANK=1 (dual-bank): Bank1=0x08000000..0x0801FFFF (128KB),
+**  Bank2=0x08040000..0x0805FFFF (128KB) with a gap in between.
+**  Images (or ELF LOAD MemSiz ranges) past 0x08020000 will make
+**  CubeProgrammer report "Operation exceeds memory limits" while DBANK=1.
+**  Flash path: scripts/flash_g4.sh clears DBANK before programming.
+**
 **                Set heap size, stack size and stack location according
 **                to application requirements.
 **
@@ -59,6 +68,17 @@ RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
 FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 256K
 }
 
+/*
+ * Explicit PHDRS: only flash image + .data init image get PT_LOAD.
+ * Do NOT put .bss/heap in a PT_LOAD — GNU ld would give them a flash LMA and
+ * CubeProgrammer would try to erase MemSiz at that address (bank-limit fail).
+ */
+PHDRS
+{
+  flash    PT_LOAD;
+  ram_init PT_LOAD;
+}
+
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM) + LENGTH(RAM);    /* end of RAM */
 _sstack = _estack - _Min_Stack_Size;
@@ -75,7 +95,7 @@ SECTIONS
     . = ALIGN(4);
     KEEP(*(.isr_vector)) /* Startup code */
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   /* The program code and other data goes into FLASH */
   .text :
@@ -92,7 +112,7 @@ SECTIONS
 
     . = ALIGN(4);
     _etext = .;        /* define a global symbols at end of code */
-  } >FLASH
+  } >FLASH :flash
 
   /* Constant data goes into FLASH */
   .rodata :
@@ -101,14 +121,14 @@ SECTIONS
     *(.rodata)         /* .rodata sections (constants, strings, etc.) */
     *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   .ARM.extab (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
     . = ALIGN(4);
     *(.ARM.extab* .gnu.linkonce.armextab.*)
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   .ARM (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
@@ -117,7 +137,7 @@ SECTIONS
     *(.ARM.exidx*)
     __exidx_end = .;
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   .preinit_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
@@ -126,7 +146,7 @@ SECTIONS
     KEEP (*(.preinit_array*))
     PROVIDE_HIDDEN (__preinit_array_end = .);
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   .init_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
@@ -136,7 +156,7 @@ SECTIONS
     KEEP (*(.init_array*))
     PROVIDE_HIDDEN (__init_array_end = .);
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   .fini_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
@@ -146,7 +166,7 @@ SECTIONS
     KEEP (*(.fini_array*))
     PROVIDE_HIDDEN (__fini_array_end = .);
     . = ALIGN(4);
-  } >FLASH
+  } >FLASH :flash
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -162,7 +182,7 @@ SECTIONS
     *(.RamFunc*)       /* .RamFunc* sections */
 
     . = ALIGN(4);
-  } >RAM AT> FLASH
+  } >RAM AT> FLASH :ram_init
 
  /* Initialized TLS data section */
   .tdata : ALIGN(4)
@@ -172,7 +192,7 @@ SECTIONS
     _edata = .;        /* define a global symbol at data end */
     PROVIDE(__data_end = .);
     PROVIDE(__tdata_end = .);
-  } >RAM AT> FLASH
+  } >RAM AT> FLASH :ram_init
 
   PROVIDE( __tdata_start = ADDR(.tdata) );
   PROVIDE( __tdata_size = __tdata_end - __tdata_start );
@@ -187,7 +207,8 @@ SECTIONS
   PROVIDE( __data_source = LOADADDR(.data) );
   PROVIDE( __data_source_end = __tdata_source_end );
   PROVIDE( __data_source_size = __data_source_end - __data_source );
-  /* Uninitialized data section */
+  /* Uninitialized data stays out of PT_LOAD (no :phdr) so programmers
+   * never treat BSS MemSiz as flash. VMA is RAM; LMA is irrelevant. */
   .tbss (NOLOAD) : ALIGN(4)
   {
      /* This is used by the startup in order to initialize the .bss secion */
