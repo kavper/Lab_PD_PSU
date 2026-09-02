@@ -1,0 +1,146 @@
+From e85d2a23fea2b26f08f55ff775616df1098ffcf7 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Wed, 2 Sep 2026 16:37:30 +0000
+Subject: [PATCH] Bring-up: auto SET 5.000V / 0.100A and OUT ON when rails OK
+
+After 2.5 s hold, enable LDO if PGOOD=1 and POWER_KILL=0.
+Print WAIT with PGOOD/KILL bits while blocked by G4 PERMIT.
+---
+ Core/Inc/app_config.h   | 17 +++++++++
+ Core/Src/uart_console.c | 80 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 97 insertions(+)
+
+diff --git a/Core/Inc/app_config.h b/Core/Inc/app_config.h
+index d70feb6..fe7d84c 100644
+--- a/Core/Inc/app_config.h
++++ b/Core/Inc/app_config.h
+@@ -174,4 +174,21 @@
+ #define STAGE5_MINIMUM_VIN_MV                  6000U
+ #define STAGE5_MAXIMUM_TEMPERATURE_CENTI_C     6000L
+ 
++/*
++ * Stage-6 bring-up: after boot, auto SET + OUT ON when rails allow.
++ * Target matches validated stage-5 first power (5 V / 100 mA).
++ */
++#ifndef BOARD_BRINGUP_AUTO_OUT
++#define BOARD_BRINGUP_AUTO_OUT                 1U
++#endif
++#ifndef BOARD_BRINGUP_AUTO_VOUT_MV
++#define BOARD_BRINGUP_AUTO_VOUT_MV             5000U
++#endif
++#ifndef BOARD_BRINGUP_AUTO_IOUT_MA
++#define BOARD_BRINGUP_AUTO_IOUT_MA              100U
++#endif
++#ifndef BOARD_BRINGUP_AUTO_HOLD_MS
++#define BOARD_BRINGUP_AUTO_HOLD_MS             2500U
++#endif
++
+ #endif /* APP_CONFIG_H */
+diff --git a/Core/Src/uart_console.c b/Core/Src/uart_console.c
+index 1c9eb91..f464bae 100644
+--- a/Core/Src/uart_console.c
++++ b/Core/Src/uart_console.c
+@@ -22,6 +22,11 @@ static const char *s_fault;
+ static uint32_t s_dac_settle_until;
+ static const char *s_fault_candidate;
+ static uint32_t s_fault_candidate_since;
++#if (BOARD_BRINGUP_AUTO_OUT != 0U)
++static uint32_t s_auto_out_boot_ms;
++static bool s_auto_out_done;
++static uint32_t s_auto_out_last_wait_ms;
++#endif
+ 
+ static uint32_t console_abs_difference(uint32_t first, uint32_t second)
+ {
+@@ -668,6 +673,24 @@ void UART_Console_Init(bool mcp_ok, bool dac_ok)
+   s_dac_settle_until = 0U;
+   s_fault_candidate = NULL;
+   s_fault_candidate_since = 0U;
++#if (BOARD_BRINGUP_AUTO_OUT != 0U)
++  s_auto_out_boot_ms = HAL_GetTick();
++  s_auto_out_done = false;
++  s_auto_out_last_wait_ms = 0U;
++  {
++    char banner[120];
++    (void)snprintf(
++        banner, sizeof(banner),
++        "\r\n[G0] Bring-up AUTO: SET %lu.%03luV / %lu.%03luA after %lu ms "
++        "(need PGOOD=1 KILL=0)\r\n",
++        (unsigned long)(BOARD_BRINGUP_AUTO_VOUT_MV / 1000U),
++        (unsigned long)(BOARD_BRINGUP_AUTO_VOUT_MV % 1000U),
++        (unsigned long)(BOARD_BRINGUP_AUTO_IOUT_MA / 1000U),
++        (unsigned long)(BOARD_BRINGUP_AUTO_IOUT_MA % 1000U),
++        (unsigned long)BOARD_BRINGUP_AUTO_HOLD_MS);
++    (void)UART_Protocol_QueueText(banner);
++  }
++#endif
+   console_queue_help();
+ }
+ 
+@@ -681,6 +704,63 @@ void UART_Console_Task(uint32_t now)
+     console_handle_line(line, now);
+   }
+ 
++#if (BOARD_BRINGUP_AUTO_OUT != 0U)
++  if (!s_auto_out_done)
++  {
++    bool pgood_ok =
++        (HAL_GPIO_ReadPin(PGOOD_5V_IN_GPIO_Port, PGOOD_5V_IN_Pin)
++         == PGOOD_ASSERTED_LEVEL);
++    bool kill_asserted =
++        (HAL_GPIO_ReadPin(POWER_KILL_GPIO_Port, POWER_KILL_Pin)
++         == POWER_KILL_ASSERTED_LEVEL);
++
++    if ((uint32_t)(now - s_auto_out_boot_ms) < BOARD_BRINGUP_AUTO_HOLD_MS)
++    {
++      /* wait */
++    }
++    else if ((!pgood_ok) || kill_asserted)
++    {
++      if ((uint32_t)(now - s_auto_out_last_wait_ms) >= 1000U)
++      {
++        char wait_msg[96];
++        s_auto_out_last_wait_ms = now;
++        (void)snprintf(wait_msg, sizeof(wait_msg),
++                       "[G0] WAIT AUTO OUT: PGOOD=%u KILL=%u "
++                       "(G4 POWER_PERMIT must clear KILL)\r\n",
++                       pgood_ok ? 1U : 0U,
++                       kill_asserted ? 1U : 0U);
++        (void)UART_Protocol_QueueText(wait_msg);
++      }
++    }
++    else
++    {
++      fault = console_preflight_fault();
++      if (fault == NULL)
++      {
++        Control_SetVoltageTarget(BOARD_BRINGUP_AUTO_VOUT_MV);
++        Control_SetCurrentTarget(BOARD_BRINGUP_AUTO_IOUT_MA);
++        s_dac_settle_until = now + CONSOLE_DAC_SETTLE_MS;
++        s_fault = "NONE";
++        s_fault_candidate = NULL;
++        Control_SetOutputEnabled(true);
++        s_auto_out_done = true;
++        (void)UART_Protocol_QueueText(
++            "[G0] AUTO OUT ON 5.000V / 0.100A\r\n");
++        console_ack_set(BOARD_BRINGUP_AUTO_VOUT_MV, BOARD_BRINGUP_AUTO_IOUT_MA);
++        (void)UART_Protocol_QueueText("ACK OUT ON\r\n");
++      }
++      else if ((uint32_t)(now - s_auto_out_last_wait_ms) >= 1000U)
++      {
++        char wait_msg[96];
++        s_auto_out_last_wait_ms = now;
++        (void)snprintf(wait_msg, sizeof(wait_msg),
++                       "[G0] WAIT AUTO OUT: preflight=%s\r\n", fault);
++        (void)UART_Protocol_QueueText(wait_msg);
++      }
++    }
++  }
++#endif
++
+   if (!Control_GetStatus()->output_enabled)
+   {
+     return;
+-- 
+2.43.0
+
