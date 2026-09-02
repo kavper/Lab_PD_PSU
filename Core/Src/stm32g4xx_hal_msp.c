@@ -509,38 +509,46 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     /* USER CODE END USART1_MspInit 1 */
   }
-  else if(huart->Instance==USART3)
+  else if(huart->Instance==USART2)
   {
-    /* USER CODE BEGIN USART3_MspInit 0 */
+    /* USER CODE BEGIN USART2_MspInit 0 */
 
-    /* USER CODE END USART3_MspInit 0 */
+    /* USER CODE END USART2_MspInit 0 */
 
-    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART3;
-    PeriphClkInit.Usart3ClockSelection = RCC_USART3CLKSOURCE_PCLK1;
+    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART2;
+    PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
     {
       Error_Handler();
     }
 
-    __HAL_RCC_USART3_CLK_ENABLE();
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
-    /**USART3 GPIO Configuration (rev2 rework — valid G474 data AF)
-    PB9      ------> USART3_TX (net USART2_TX_G0)
-    PB8      ------> USART3_RX (net USART2_RX_G0)
+    /**USART2 GPIO Configuration (rev2 flywire)
+    PA2     ------> USART2_TX (net USART2_TX_G0)
+    PB4     ------> USART2_RX (net USART2_RX_G0)
     */
-    GPIO_InitStruct.Pin = USART2_TX_G0_Pin | USART2_RX_G0_Pin;
+    GPIO_InitStruct.Pin = USART2_TX_G0_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(USART2_TX_G0_GPIO_Port, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(USART3_IRQn);
+    GPIO_InitStruct.Pin = USART2_RX_G0_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(USART2_RX_G0_GPIO_Port, &GPIO_InitStruct);
 
-    /* USER CODE BEGIN USART3_MspInit 1 */
+    HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
 
-    /* USER CODE END USART3_MspInit 1 */
+    /* USER CODE BEGIN USART2_MspInit 1 */
+
+    /* USER CODE END USART2_MspInit 1 */
   }
 
 }
@@ -565,17 +573,18 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
 
     /* USER CODE END USART1_MspDeInit 1 */
   }
-  else if(huart->Instance==USART3)
+  else if(huart->Instance==USART2)
   {
-    /* USER CODE BEGIN USART3_MspDeInit 0 */
+    /* USER CODE BEGIN USART2_MspDeInit 0 */
 
-    /* USER CODE END USART3_MspDeInit 0 */
-    __HAL_RCC_USART3_CLK_DISABLE();
-    HAL_GPIO_DeInit(GPIOB, USART2_TX_G0_Pin | USART2_RX_G0_Pin);
-    HAL_NVIC_DisableIRQ(USART3_IRQn);
-    /* USER CODE BEGIN USART3_MspDeInit 1 */
+    /* USER CODE END USART2_MspDeInit 0 */
+    __HAL_RCC_USART2_CLK_DISABLE();
+    HAL_GPIO_DeInit(USART2_TX_G0_GPIO_Port, USART2_TX_G0_Pin);
+    HAL_GPIO_DeInit(USART2_RX_G0_GPIO_Port, USART2_RX_G0_Pin);
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
+    /* USER CODE BEGIN USART2_MspDeInit 1 */
 
-    /* USER CODE END USART3_MspDeInit 1 */
+    /* USER CODE END USART2_MspDeInit 1 */
   }
 
 }

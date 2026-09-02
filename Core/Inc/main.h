@@ -87,10 +87,10 @@ void Error_Handler(void);
 #define HRTIM_FLT_GPIO_Port GPIOB
 #define I_L_MEAS_Pin GPIO_PIN_11
 #define I_L_MEAS_GPIO_Port GPIOB
-/* G0 isolator UART: real USART3 data AF (rev2 rework — not PB14/PB15). */
-#define USART2_TX_G0_Pin GPIO_PIN_9
-#define USART2_TX_G0_GPIO_Port GPIOB
-#define USART2_RX_G0_Pin GPIO_PIN_8
+/* G0 isolator UART: USART2 PA2 TX / PB4 RX (rev2 flywire — not silk PB14/PB15). */
+#define USART2_TX_G0_Pin GPIO_PIN_2
+#define USART2_TX_G0_GPIO_Port GPIOA
+#define USART2_RX_G0_Pin GPIO_PIN_4
 #define USART2_RX_G0_GPIO_Port GPIOB
 #define BMS_ALERT_Pin GPIO_PIN_10
 #define BMS_ALERT_GPIO_Port GPIOA
@@ -108,14 +108,14 @@ void Error_Handler(void);
 #define UART_H7_RX_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_2
 #define LED_GPIO_Port GPIOD
-#define BLEED_ON_Pin GPIO_PIN_4
+/* Was PB4; moved so PB4 can be USART2_RX. */
+#define BLEED_ON_Pin GPIO_PIN_3
 #define BLEED_ON_GPIO_Port GPIOB
 #define REMOTE_ON_Pin GPIO_PIN_5
 #define REMOTE_ON_GPIO_Port GPIOB
 #define POWER_PERMIT_G4_Pin GPIO_PIN_6
 #define POWER_PERMIT_G4_GPIO_Port GPIOB
-/* Was PB9; moved so PB9 can be USART3_TX. */
-#define I2C_USBPD_IRQ_Pin GPIO_PIN_3
+#define I2C_USBPD_IRQ_Pin GPIO_PIN_9
 #define I2C_USBPD_IRQ_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */

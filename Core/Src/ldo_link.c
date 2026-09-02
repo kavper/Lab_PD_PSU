@@ -834,11 +834,11 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
     LdoLink_ArmRx();
-    Debug_Printf("[LDO] USART3 G0 link ready (TLM forward + SET/OUT control)\r\n");
-#if (BOARD_USART3_G0_PIN_SWAP != 0U)
-    Debug_Printf("[LDO] USART3 TX/RX SWAP=1 at boot (G0SWAP 0|1 to change)\r\n");
+    Debug_Printf("[LDO] USART2 G0 link ready (TLM forward + SET/OUT control)\r\n");
+#if (BOARD_USART2_G0_PIN_SWAP != 0U)
+    Debug_Printf("[LDO] USART2 TX/RX SWAP=1 at boot (G0SWAP 0|1 to change)\r\n");
 #else
-    Debug_Printf("[LDO] USART3 TX/RX SWAP=0 at boot (G0SWAP 0|1 to change)\r\n");
+    Debug_Printf("[LDO] USART2 TX/RX SWAP=0 at boot (G0SWAP 0|1 to change)\r\n");
 #endif
     Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%lu.%03lu I=%lu.%03lu\r\n",
                  (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) / 1000U),
@@ -928,7 +928,6 @@ void LdoLink_DumpDiag(void)
     uint32_t isr = 0U;
     uint32_t cr1 = 0U;
     uint32_t cr2 = 0U;
-    uint32_t idr = 0U;
     uint32_t swap = 0U;
 
     if (s_huart_g0 == NULL) {
@@ -939,18 +938,17 @@ void LdoLink_DumpDiag(void)
     isr = s_huart_g0->Instance->ISR;
     cr1 = s_huart_g0->Instance->CR1;
     cr2 = s_huart_g0->Instance->CR2;
-    idr = GPIOB->IDR;
     swap = (cr2 & USART_CR2_SWAP) ? 1U : 0U;
 
     Debug_Printf("[LDO] DIAG swap=%lu RxSt=%u err=0x%lX ISR=0x%08lX CR1=0x%08lX "
-                 "PB9=%u PB8=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
+                 "PA2=%u PB4=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
                  (unsigned long)swap,
                  (unsigned int)s_huart_g0->RxState,
                  (unsigned long)s_status.last_error_code,
                  (unsigned long)isr,
                  (unsigned long)cr1,
-                 (idr & GPIO_PIN_9) ? 1U : 0U,
-                 (idr & GPIO_PIN_8) ? 1U : 0U,
+                 (GPIOA->IDR & GPIO_PIN_2) ? 1U : 0U,
+                 (GPIOB->IDR & GPIO_PIN_4) ? 1U : 0U,
                  (unsigned long)s_status.rx_bytes,
                  (unsigned long)s_status.tlm_count,
                  (cr1 & USART_CR1_RE) ? 1U : 0U,
@@ -981,7 +979,7 @@ void LdoLink_SetUartPinSwap(bool enable)
     (void)HAL_UART_AbortReceive(s_huart_g0);
     LdoLink_ArmRx();
 
-    Debug_Printf("[LDO] USART3 SWAP now %u\r\n", enable ? 1U : 0U);
+    Debug_Printf("[LDO] USART2 SWAP now %u\r\n", enable ? 1U : 0U);
 }
 
 bool LdoLink_IsUartPinSwapEnabled(void)

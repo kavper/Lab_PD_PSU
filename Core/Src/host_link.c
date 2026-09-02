@@ -276,12 +276,12 @@ static void HostLink_SendHelp(void)
         "  PERMIT 0|1      hard kill / allow PB6\r\n"
         "  REMOTE ON|OFF   sense path\r\n"
         "  STATUS          human summary\r\n"
-        "  G0DIAG          USART3 ISR/GPIO dump (PB9 TX / PB8 RX)\r\n"
+        "  G0DIAG          USART2 ISR/GPIO dump (PA2 TX / PB4 RX)\r\n"
         "  G0SWAP 0|1      runtime TX/RX swap if flywires crossed\r\n"
         "  TEL [ms]        periodic T lines (0=off, default 500)\r\n"
         "  ?               one T line\r\n"
         "  CLR             clear fault latch\r\n"
-        "Need G0 TLM on USART3 (g0_rx rising). LDO out = G0, not DCDC rail.\r\n");
+        "Need G0 TLM on USART2 (g0_rx rising). LDO out = G0, not DCDC rail.\r\n");
 }
 
 static void HostLink_SendStatus(void)
@@ -320,7 +320,7 @@ static void HostLink_SendStatus(void)
 
     if (ldo.rx_bytes == 0U) {
         HostLink_Tx("HINT no G0 UART into MCU — J6 TLM can be G0-side of isolator.\r\n"
-                    "HINT probe PB8 RX (or PB9 if swapped). Rework: not PB14/15.\r\n");
+                    "HINT probe PB4 RX (or PA2 if swapped). Flywire: not PB14/15.\r\n");
     } else if (LdoLink_IsOutputWanted() && (!ldo.output_on)) {
         HostLink_Tx("HINT G0 sequencer running — wait g0_ctrl=9 and g0_out=1\r\n");
     } else if (ldo.output_on) {

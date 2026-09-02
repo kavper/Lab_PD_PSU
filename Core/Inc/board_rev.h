@@ -10,7 +10,7 @@
  *
  * PL:
  * 1. Lab_PD_PSU.ioc jest jedynym źródłem prawdy dla pinów, zegara, ADC, HRTIM,
- *    I2C4, USART1/3, DMA i NVIC. To, co ma być widoczne w CubeMX, musi być w IOC.
+ *    I2C4, USART1/2, DMA i NVIC. To, co ma być widoczne w CubeMX, musi być w IOC.
  *    Nie chowaj konfiguracji MX tylko w plikach .c.
  * 2. Project Manager: Keep User Code = ON (KeepUserCode=true w .ioc).
  *    Generate Code NIE może kasować firmware w USER CODE ani plików, których
@@ -76,13 +76,17 @@
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
 /*
- * G0 isolator UART = hardware USART3 on PB9 (TX) / PB8 (RX).
- * G474 cannot put USART3_TX/RX on PB14/PB15 (PB14=RTS only) — rework nets
- * off the silk PB14/15 pads. I2C_USBPD_IRQ moved PB9→PB3 to free TX.
- * PIN_SWAP only if flywires are crossed vs silk; default 0.
+ * G0 isolator UART = hardware USART2 on PA2 (TX) / PB4 (RX).
+ * G474 cannot put USART data AF on silk PB14/PB15 — flywire isolator to PA2/PB4.
+ * BLEED_ON moved PB4→PB3 to free RX. I2C_USBPD_IRQ stays PB9 (silk).
+ * PIN_SWAP only if flywires are crossed; default 0.
  */
+#ifndef BOARD_USART2_G0_PIN_SWAP
+#define BOARD_USART2_G0_PIN_SWAP             0U
+#endif
+/* Legacy alias — prefer BOARD_USART2_G0_PIN_SWAP. */
 #ifndef BOARD_USART3_G0_PIN_SWAP
-#define BOARD_USART3_G0_PIN_SWAP             0U
+#define BOARD_USART3_G0_PIN_SWAP             BOARD_USART2_G0_PIN_SWAP
 #endif
 
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
@@ -99,7 +103,7 @@
 #endif
 
 /*
- * No G0 on USART3: auto-enter CV after startup hold (2 s) without host ON.
+ * No G0 on USART2: auto-enter CV after startup hold (2 s) without host ON.
  * Disable before shipping with G0 LDO.
  */
 #ifndef BOARD_BRINGUP_AUTO_ON

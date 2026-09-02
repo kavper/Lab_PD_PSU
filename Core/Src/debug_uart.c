@@ -12,7 +12,7 @@
 #define DEBUG_UART_DMA_CHUNK_SIZE      128U
 
 static UART_HandleTypeDef *debug_uart = NULL;
-static DMA_HandleTypeDef debug_uart_tx_dma;
+static DMA_HandleTypeDef debug_uart_tx_dma __attribute__((unused));
 
 static uint8_t debug_tx_ring[DEBUG_UART_TX_RING_SIZE];
 static uint8_t debug_tx_dma_buffer[DEBUG_UART_DMA_CHUNK_SIZE];
@@ -38,53 +38,10 @@ static void Debug_RestoreIrq(uint32_t primask)
 
 static bool Debug_UartDmaInit(UART_HandleTypeDef *huart)
 {
-    if ((huart == NULL) || (huart->Instance == NULL)) {
-        return false;
-    }
-
-#if defined(USART2) && defined(DMA_REQUEST_USART2_TX)
-    if (huart->Instance != USART2) {
-        return false;
-    }
-
-    if ((huart->hdmatx != NULL) && (huart->hdmatx->Instance != NULL)) {
-        HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 6, 0);
-        HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
-        HAL_NVIC_SetPriority(USART2_IRQn, 6, 0);
-        HAL_NVIC_EnableIRQ(USART2_IRQn);
-        return true;
-    }
-
-    __HAL_RCC_DMAMUX1_CLK_ENABLE();
-    __HAL_RCC_DMA1_CLK_ENABLE();
-
-    memset(&debug_uart_tx_dma, 0, sizeof(debug_uart_tx_dma));
-    debug_uart_tx_dma.Instance = DMA1_Channel3;
-    debug_uart_tx_dma.Init.Request = DMA_REQUEST_USART2_TX;
-    debug_uart_tx_dma.Init.Direction = DMA_MEMORY_TO_PERIPH;
-    debug_uart_tx_dma.Init.PeriphInc = DMA_PINC_DISABLE;
-    debug_uart_tx_dma.Init.MemInc = DMA_MINC_ENABLE;
-    debug_uart_tx_dma.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    debug_uart_tx_dma.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    debug_uart_tx_dma.Init.Mode = DMA_NORMAL;
-    debug_uart_tx_dma.Init.Priority = DMA_PRIORITY_LOW;
-
-    if (HAL_DMA_Init(&debug_uart_tx_dma) != HAL_OK) {
-        return false;
-    }
-
-    __HAL_LINKDMA(huart, hdmatx, debug_uart_tx_dma);
-
-    HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 6, 0);
-    HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
-    HAL_NVIC_SetPriority(USART2_IRQn, 6, 0);
-    HAL_NVIC_EnableIRQ(USART2_IRQn);
-
-    return true;
-#else
+    /* USART2 is the G0 isolator link; host debug stays on USART1 blocking TX.
+     * DMA TX for debug is intentionally disabled here. */
     (void)huart;
     return false;
-#endif
 }
 
 static bool Debug_PrepareNextChunk(uint16_t *length)

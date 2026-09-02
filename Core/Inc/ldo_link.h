@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /*
- * G0 LDO link on USART3 PB9/PB8 (115200 8N1). Net names still USART2_*_G0.
+ * G0 LDO link on USART2 PA2 TX / PB4 RX (115200 8N1).
  * Protocol: docs/G4_LDO_UART.md + LDO_controller docs/G4_G0_UART_PROTOCOL.md
  */
 
@@ -91,7 +91,7 @@ LdoLink_CtrlState_t LdoLink_GetCtrlState(void);
 void LdoLink_SetRemoteSense(bool enable);
 bool LdoLink_IsRemoteSenseEnabled(void);
 
-/* Bench: dump USART3 ISR/GPIO/SWAP; optional runtime TX/RX SWAP. */
+/* Bench: dump USART2 ISR/GPIO/SWAP; optional runtime TX/RX SWAP. */
 void LdoLink_DumpDiag(void);
 void LdoLink_SetUartPinSwap(bool enable);
 bool LdoLink_IsUartPinSwapEnabled(void);
