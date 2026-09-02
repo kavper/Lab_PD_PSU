@@ -7,7 +7,8 @@
 #define FAN_PWM_TIMER_HZ           25000U
 #define FAN_PWM_PERCENT_MAX        100U
 
-static TIM_HandleTypeDef s_htim16;
+/* Schematic FAN_PWM = PA7 → TIM17_CH1 (AF1). TIM16_CH1 is PA6 only (NC). */
+static TIM_HandleTypeDef s_htim17;
 static uint8_t s_ready;
 
 static uint32_t FanPwm_TimerClockHz(void)
@@ -21,10 +22,10 @@ void FanPwm_Init(void)
     uint32_t tim_clk;
     uint32_t period;
 
-    memset(&s_htim16, 0, sizeof(s_htim16));
+    memset(&s_htim17, 0, sizeof(s_htim17));
     s_ready = 0U;
 
-    __HAL_RCC_TIM16_CLK_ENABLE();
+    __HAL_RCC_TIM17_CLK_ENABLE();
 
     tim_clk = FanPwm_TimerClockHz();
     if (tim_clk == 0U) {
@@ -39,14 +40,14 @@ void FanPwm_Init(void)
         period = 0xFFFFU;
     }
 
-    s_htim16.Instance = TIM16;
-    s_htim16.Init.Prescaler = 0U;
-    s_htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-    s_htim16.Init.Period = (uint16_t)(period - 1U);
-    s_htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    s_htim16.Init.RepetitionCounter = 0U;
-    s_htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-    if (HAL_TIM_PWM_Init(&s_htim16) != HAL_OK) {
+    s_htim17.Instance = TIM17;
+    s_htim17.Init.Prescaler = 0U;
+    s_htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
+    s_htim17.Init.Period = (uint16_t)(period - 1U);
+    s_htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    s_htim17.Init.RepetitionCounter = 0U;
+    s_htim17.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_PWM_Init(&s_htim17) != HAL_OK) {
         return;
     }
 
@@ -57,11 +58,11 @@ void FanPwm_Init(void)
     oc.OCFastMode = TIM_OCFAST_DISABLE;
     oc.OCIdleState = TIM_OCIDLESTATE_RESET;
     oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-    if (HAL_TIM_PWM_ConfigChannel(&s_htim16, &oc, TIM_CHANNEL_1) != HAL_OK) {
+    if (HAL_TIM_PWM_ConfigChannel(&s_htim17, &oc, TIM_CHANNEL_1) != HAL_OK) {
         return;
     }
 
-    if (HAL_TIM_PWM_Start(&s_htim16, TIM_CHANNEL_1) != HAL_OK) {
+    if (HAL_TIM_PWM_Start(&s_htim17, TIM_CHANNEL_1) != HAL_OK) {
         return;
     }
 
@@ -78,23 +79,23 @@ void FanPwm_SetPercent(uint8_t percent)
         percent = FAN_PWM_PERCENT_MAX;
     }
 
-    if ((s_ready == 0U) || (s_htim16.Instance == NULL)) {
+    if ((s_ready == 0U) || (s_htim17.Instance == NULL)) {
         HAL_GPIO_WritePin(FAN_PWM_GPIO_Port, FAN_PWM_Pin,
                           percent ? GPIO_PIN_SET : GPIO_PIN_RESET);
         return;
     }
 
-    period = (uint32_t)__HAL_TIM_GET_AUTORELOAD(&s_htim16) + 1U;
+    period = (uint32_t)__HAL_TIM_GET_AUTORELOAD(&s_htim17) + 1U;
     pulse = ((period * (uint32_t)percent) + (FAN_PWM_PERCENT_MAX / 2U)) /
             FAN_PWM_PERCENT_MAX;
-    __HAL_TIM_SET_COMPARE(&s_htim16, TIM_CHANNEL_1, pulse);
+    __HAL_TIM_SET_COMPARE(&s_htim17, TIM_CHANNEL_1, pulse);
 }
 
 void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
 {
     GPIO_InitTypeDef gpio = {0};
 
-    if ((htim == NULL) || (htim->Instance != TIM16)) {
+    if ((htim == NULL) || (htim->Instance != TIM17)) {
         return;
     }
 
@@ -103,16 +104,16 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
     gpio.Mode = GPIO_MODE_AF_PP;
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
-    gpio.Alternate = GPIO_AF1_TIM16;
+    gpio.Alternate = GPIO_AF1_TIM17;
     HAL_GPIO_Init(FAN_PWM_GPIO_Port, &gpio);
 }
 
 void HAL_TIM_PWM_MspDeInit(TIM_HandleTypeDef *htim)
 {
-    if ((htim == NULL) || (htim->Instance != TIM16)) {
+    if ((htim == NULL) || (htim->Instance != TIM17)) {
         return;
     }
 
     HAL_GPIO_DeInit(FAN_PWM_GPIO_Port, FAN_PWM_Pin);
-    __HAL_RCC_TIM16_CLK_DISABLE();
+    __HAL_RCC_TIM17_CLK_DISABLE();
 }

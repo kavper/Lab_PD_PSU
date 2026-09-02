@@ -29,8 +29,8 @@
  *   SET <volts>        G0 LDO voltage (also local DCDC if G0 idle)
  *   ILIM <amps>        G0 current limit
  *   USB AUTO|SINK|SOURCE
- *   PERMIT 0|1         1 = ena (PB6 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB6 LOW) + OUT OFF
- *   REMOTE ON|1        enable remote sense path (PB5 REMOTE_ON high)
+ *   PERMIT 0|1         1 = ena (PB7 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB7 LOW) + OUT OFF
+ *   REMOTE ON|1        enable remote sense path (PB6 REMOTE_ON high)
  *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
  *   TEL [period_ms]    0 = stop periodic T lines; default 500
  *   ?                  one immediate T line

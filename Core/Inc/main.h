@@ -75,7 +75,8 @@ void Error_Handler(void);
 #define STM_OTG_EN_GPIO_Port GPIOA
 #define FAN_TACH_Pin GPIO_PIN_5
 #define FAN_TACH_GPIO_Port GPIOA
-#define FAN_PWM_Pin GPIO_PIN_6
+/* Schematic FAN_PWM = PA7 (TIM17_CH1 AF1). PA6 is NC. */
+#define FAN_PWM_Pin GPIO_PIN_7
 #define FAN_PWM_GPIO_Port GPIOA
 #define ADC_REMOTE_P_Pin GPIO_PIN_0
 #define ADC_REMOTE_P_GPIO_Port GPIOB
@@ -87,14 +88,13 @@ void Error_Handler(void);
 #define HRTIM_FLT_GPIO_Port GPIOB
 #define I_L_MEAS_Pin GPIO_PIN_11
 #define I_L_MEAS_GPIO_Port GPIOB
-/* Silk USART2_*_G0 pads — leave Hi-Z (not driven). Real link is PA2/PB4. */
-#define USART2_TX_G0_SILK_Pin GPIO_PIN_14
-#define USART2_TX_G0_SILK_GPIO_Port GPIOB
-#define USART2_RX_G0_SILK_Pin GPIO_PIN_15
-#define USART2_RX_G0_SILK_GPIO_Port GPIOB
-/* G0 isolator UART: USART2 PA2 TX / PB4 RX (rev2 flywire — not silk PB14/PB15). */
-#define USART2_TX_G0_Pin GPIO_PIN_2
-#define USART2_TX_G0_GPIO_Port GPIOA
+#define ADC_LOCAL_VOUT_Pin GPIO_PIN_14
+#define ADC_LOCAL_VOUT_GPIO_Port GPIOB
+#define I_L_ZERO_Pin GPIO_PIN_15
+#define I_L_ZERO_GPIO_Port GPIOB
+/* G0 isolator UART: USART2 PB3 TX / PB4 RX (schematic U7). */
+#define USART2_TX_G0_Pin GPIO_PIN_3
+#define USART2_TX_G0_GPIO_Port GPIOB
 #define USART2_RX_G0_Pin GPIO_PIN_4
 #define USART2_RX_G0_GPIO_Port GPIOB
 #define BMS_ALERT_Pin GPIO_PIN_10
@@ -113,12 +113,11 @@ void Error_Handler(void);
 #define UART_H7_RX_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_2
 #define LED_GPIO_Port GPIOD
-/* Was PB4; moved so PB4 can be USART2_RX. */
-#define BLEED_ON_Pin GPIO_PIN_3
+#define BLEED_ON_Pin GPIO_PIN_5
 #define BLEED_ON_GPIO_Port GPIOB
-#define REMOTE_ON_Pin GPIO_PIN_5
+#define REMOTE_ON_Pin GPIO_PIN_6
 #define REMOTE_ON_GPIO_Port GPIOB
-#define POWER_PERMIT_G4_Pin GPIO_PIN_6
+#define POWER_PERMIT_G4_Pin GPIO_PIN_7
 #define POWER_PERMIT_G4_GPIO_Port GPIOB
 #define I2C_USBPD_IRQ_Pin GPIO_PIN_9
 #define I2C_USBPD_IRQ_GPIO_Port GPIOB

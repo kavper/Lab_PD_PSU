@@ -328,7 +328,7 @@ static void LdoLink_EnterState(LdoLink_CtrlState_t next, uint32_t now_ms)
 
 static void LdoLink_HardKillFromFault(const char *why)
 {
-    Debug_Printf("[LDO] HARD KILL PB6 (%s)\r\n", (why != NULL) ? why : "?");
+    Debug_Printf("[LDO] HARD KILL PB7 (%s)\r\n", (why != NULL) ? why : "?");
     LdoLink_SetPermitPin(false);
     s_dcdc_permit_request = false;
     s_output_wanted = false;
@@ -941,13 +941,13 @@ void LdoLink_DumpDiag(void)
     swap = (cr2 & USART_CR2_SWAP) ? 1U : 0U;
 
     Debug_Printf("[LDO] DIAG swap=%lu RxSt=%u err=0x%lX ISR=0x%08lX CR1=0x%08lX "
-                 "PA2=%u PB4=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
+                 "PB3=%u PB4=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
                  (unsigned long)swap,
                  (unsigned int)s_huart_g0->RxState,
                  (unsigned long)s_status.last_error_code,
                  (unsigned long)isr,
                  (unsigned long)cr1,
-                 (GPIOA->IDR & GPIO_PIN_2) ? 1U : 0U,
+                 (GPIOB->IDR & GPIO_PIN_3) ? 1U : 0U,
                  (GPIOB->IDR & GPIO_PIN_4) ? 1U : 0U,
                  (unsigned long)s_status.rx_bytes,
                  (unsigned long)s_status.tlm_count,

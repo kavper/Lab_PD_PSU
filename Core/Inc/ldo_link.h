@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /*
- * G0 LDO link on USART2 PA2 TX / PB4 RX (115200 8N1).
+ * G0 LDO link on USART2 PB3 TX / PB4 RX (115200 8N1).
  * Protocol: docs/G4_LDO_UART.md + LDO_controller docs/G4_G0_UART_PROTOCOL.md
  */
 
@@ -83,7 +83,7 @@ float LdoLink_GetG0Current(void);
 LdoLink_CtrlState_t LdoLink_GetCtrlState(void);
 
 /*
- * Remote sense path (PB5 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).
+ * Remote sense path (PB6 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).
  * Host "REMOTE ON" asserts REMOTE_ON so ADC_REMOTE_P/N (PB0/PB1) sense path is
  * selected in hardware. CV regulation still uses ADC_VOUT (PB2) until remote
  * channels are added to ADC DMA ranks.

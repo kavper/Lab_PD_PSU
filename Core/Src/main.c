@@ -532,7 +532,7 @@ static void MX_I2C4_Init(void)
 
 
 /**
-  * @brief USART2 Initialization Function (G0 isolated link, PA2 TX / PB4 RX)
+  * @brief USART2 Initialization Function (G0 isolated link, PB3 TX / PB4 RX)
   * @param None
   * @retval None
   */
@@ -555,7 +555,7 @@ static void MX_USART2_UART_Init(void)
   huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
 #if (BOARD_USART2_G0_PIN_SWAP != 0U)
-  /* SWAP exchanges USART data path on PA2/PB4 pads. */
+  /* SWAP exchanges USART data path on PB3/PB4 pads. */
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
   huart2.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
 #else
@@ -737,13 +737,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(I_IN_BUCK_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = ADC_REMOTE_P_Pin|ADC_REMOTE_N_Pin|I_L_MEAS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* Silk PB14/PB15 (old USART2_*_G0): analog Hi-Z, never GPIO out / pull. */
-  GPIO_InitStruct.Pin = USART2_TX_G0_SILK_Pin|USART2_RX_G0_SILK_Pin;
+  GPIO_InitStruct.Pin = ADC_REMOTE_P_Pin|ADC_REMOTE_N_Pin|I_L_MEAS_Pin|
+                        ADC_LOCAL_VOUT_Pin|I_L_ZERO_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -753,7 +748,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ADC_VBUS_GPIO_Port, &GPIO_InitStruct);
 
-  /* I2C_USBPD_IRQ on PB9 (silk); BLEED_ON on PB3 frees PB4 for USART2_RX. */
+  /* I2C_USBPD_IRQ PB9; USART2 G0 on PB3/PB4; PERMIT PB7. */
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
