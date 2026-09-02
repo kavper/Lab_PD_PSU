@@ -29,7 +29,7 @@ Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is wi
 
 | Interface | Pins | Module |
 |---|---|---|
-| G0 isolated UART | USART3 PB14/PB15 | `ldo_link.c` |
+| G0 isolated UART | USART3 PB14/PB15 | `ldo_link.c` (`BOARD_USART3_G0_PIN_SWAP=1` if J6 has TLM but `g0_rx=0`) |
 | H7 / PC host | USART1 PC4/PC5 | `host_link.c` |
 | Fan PWM | PA6 TIM16 | `fan_pwm.c` |
 | BLEED_ON | PB4 | `ldo_link.c` |

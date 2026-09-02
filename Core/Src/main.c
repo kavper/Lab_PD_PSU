@@ -7,6 +7,7 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "board_mx.h"
+#include "board_rev.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "host_link.h"
@@ -553,7 +554,13 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
   huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+#if (BOARD_USART3_G0_PIN_SWAP != 0U)
+  /* PB14/PB15 AF stay TX/RX pads; SWAP exchanges USART data path. */
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
+  huart3.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
+#else
   huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+#endif
   if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     Error_Handler();

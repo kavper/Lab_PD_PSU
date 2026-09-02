@@ -772,6 +772,9 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 
     LdoLink_ArmRx();
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward + SET/OUT control)\r\n");
+#if (BOARD_USART3_G0_PIN_SWAP != 0U)
+    Debug_Printf("[LDO] USART3 TX/RX SWAP enabled (bench: J6 TLM, MCU g0_rx was 0)\r\n");
+#endif
     Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%lu.%03lu I=%lu.%03lu\r\n",
                  (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) / 1000U),
                  (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) % 1000U),

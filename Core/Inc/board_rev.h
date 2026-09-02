@@ -75,6 +75,16 @@
  */
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
+/*
+ * USART3 PB14/PB15 ↔ ISO6721: schematic labels say PB14=TX / PB15=RX.
+ * Bench: J6 shows G0 TLM, but G4 g0_rx=0 until USART TX/RX SWAP is on —
+ * PCB/net routing appears swapped vs AF mapping. Set 0 if a later PCB fix
+ * restores the silk/doc orientation.
+ */
+#ifndef BOARD_USART3_G0_PIN_SWAP
+#define BOARD_USART3_G0_PIN_SWAP             1U
+#endif
+
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
 #define BOARD_VPRE_MIN_V                     3.0f
 #define BOARD_VPRE_MAX_V                     36.0f
