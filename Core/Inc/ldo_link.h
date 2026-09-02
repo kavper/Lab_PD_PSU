@@ -93,7 +93,7 @@ bool LdoLink_IsRemoteSenseEnabled(void);
 
 /* Bench: dump USART3 ISR/GPIO/SWAP; optional runtime TX/RX SWAP. */
 void LdoLink_DumpDiag(void);
-void LdoLink_SetUsartPinSwap(bool enable);
+void LdoLink_SetUartPinSwap(bool enable);
 bool LdoLink_IsUartPinSwapEnabled(void);
 
 #endif /* LDO_LINK_H */
