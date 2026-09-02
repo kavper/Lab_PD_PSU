@@ -92,6 +92,19 @@
 #define BOARD_BRINGUP_AUTO_ON                1U
 #endif
 
+/*
+ * First LDO bring-up target on G4 DCDC (pre-reg): 5 V LDO + 3 V margin = 8 V.
+ * G0 auto-enables 5.000 V / 0.100 A when PGOOD and POWER_KILL clear.
+ */
+#ifndef BOARD_BRINGUP_LDO_VPRE_V
+#define BOARD_BRINGUP_LDO_VPRE_V             8.0f
+#endif
+
+/* Assert POWER_PERMIT from boot so G0 opto clears POWER_KILL early. */
+#ifndef BOARD_BRINGUP_PERMIT_EARLY
+#define BOARD_BRINGUP_PERMIT_EARLY           1U
+#endif
+
 /* Wait after POWER_PERMIT before enabling isolated GaN supplies (no G0). */
 #ifndef BOARD_PERMIT_HW_SETTLE_MS
 #define BOARD_PERMIT_HW_SETTLE_MS            250U

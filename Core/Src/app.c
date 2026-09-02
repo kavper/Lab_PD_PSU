@@ -30,7 +30,11 @@ BQ76922_Device_t g_bq76922;
 #define APP_STARTUP_HOLD_MS                  2000U
 #define APP_G0_LINK_STALE_MS                 500U
 
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+#define VOUT_SETPOINT_DEFAULT_V              BOARD_BRINGUP_LDO_VPRE_V
+#else
 #define VOUT_SETPOINT_DEFAULT_V              10.00f
+#endif
 #define VOUT_OVP_LIMIT                       35.00f
 #define IOUT_OCP_LIMIT                       4.00f
 #define IOUT_LIMIT_MAX                       5.80f
@@ -1693,6 +1697,14 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 #if (BOARD_BRINGUP_AUTO_ON != 0U)
     Debug_Printf("[APP] Bring-up: no G0 -> auto CV after %lu ms hold (send OFF to stop)",
                  (unsigned long)APP_STARTUP_HOLD_MS);
+#endif
+#if (BOARD_BRINGUP_LOCAL_CV != 0U)
+    {
+        int32_t bringup_x100 = (int32_t)(VOUT_SETPOINT_DEFAULT_V * 100.0f + 0.5f);
+        Debug_Printf("[APP] Bring-up LDO: DCDC SET=%ld.%02ldV (expect G0 5.00V / 0.10A)",
+                     App_IntPart(bringup_x100, 100),
+                     App_FracPart(bringup_x100, 100));
+    }
 #endif
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     Debug_Printf("[APP] GaN: isolated TR supplies enabled (BUCK/BOOST_TR_EN)");

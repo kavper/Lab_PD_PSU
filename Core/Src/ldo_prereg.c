@@ -244,6 +244,11 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
             (!s_force_disable) &&
             (!s_status.permit_override_off)) {
             s_status.permit_granted = true;
+        } else if ((BOARD_BRINGUP_PERMIT_EARLY != 0U) &&
+                   (!s_force_disable) &&
+                   (!s_status.permit_override_off)) {
+            /* Clear G0 POWER_KILL via opto before DCDC CV starts. */
+            s_status.permit_granted = true;
         } else {
             s_status.permit_granted = false;
         }

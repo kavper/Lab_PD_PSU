@@ -227,11 +227,19 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 
     FanPwm_Init();
     LdoLink_SetBleed(false);
+#if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
+    LdoLink_SetPermitPin(true);
+    s_dcdc_permit_request = true;
+#else
     LdoLink_SetPermitPin(false);
+#endif
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
     LdoLink_ArmRx();
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward on USART1)\r\n");
+#if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
+    Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH (clear G0 POWER_KILL)\r\n");
+#endif
 }
 
 void LdoLink_SetDcdcPermitRequest(bool permit)
