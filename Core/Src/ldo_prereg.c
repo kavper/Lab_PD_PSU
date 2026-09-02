@@ -129,7 +129,13 @@ void LdoPrereg_Init(void)
     s_last_permit_granted = false;
     s_force_disable = false;
     s_status.force_disable = false;
+#if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
+    /* Keep early opto ena; do not clobber LdoLink_Init permit request. */
+    LdoLink_SetDcdcPermitRequest(true);
+    s_status.permit_granted = true;
+#else
     LdoLink_SetDcdcPermitRequest(false);
+#endif
 }
 
 void LdoPrereg_SetPermitOverrideOff(bool force_off)
@@ -225,6 +231,14 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
 #if (BOARD_BRINGUP_LOCAL_CV != 0U)
         if ((!want_permit) &&
             (App_GetRequestedMode() == MODE_CV) &&
+            (!s_force_disable) &&
+            (!s_status.permit_override_off)) {
+            want_permit = true;
+        }
+#endif
+#if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
+        /* Clear POWER_KILL via opto even while G0 still reports kill/out=0. */
+        if ((!want_permit) &&
             (!s_force_disable) &&
             (!s_status.permit_override_off)) {
             want_permit = true;

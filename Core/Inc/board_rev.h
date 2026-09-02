@@ -68,7 +68,11 @@
 #define BOARD_USBPD_IS_TPS25751              1U
 /* BQ25731 CELL_BATPRESZ 4-cell strap is intentional (sheet title still says 5S). */
 #define BOARD_CHARGER_CELL_COUNT             4U
-/* POWER_PERMIT_G4 PB6: HIGH enables power-stage LDO, LOW kills it. */
+/*
+ * POWER_PERMIT_G4 PB6 → G0 opto → POWER_KILL (active-high kill on G0).
+ * Inverted vs POWER_KILL: G4 HIGH = ena (opto on, kill cleared).
+ * GPIO Low / CubeMX reset = LDO zabity.
+ */
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */

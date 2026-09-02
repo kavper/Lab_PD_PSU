@@ -27,7 +27,7 @@
  *   SET <volts>        e.g. SET 12.5
  *   ILIM <amps>        e.g. ILIM 3
  *   USB AUTO|SINK|SOURCE
- *   PERMIT 0|1         1 = allow power-stage LDO, 0 = kill LDO (safe)
+ *   PERMIT 0|1         1 = ena (PB6 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB6 LOW)
  *   REMOTE ON|1        enable remote sense path (PB5 REMOTE_ON high)
  *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
  *   TEL [period_ms]    0 = stop periodic T lines; default 200

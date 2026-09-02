@@ -254,15 +254,9 @@ static void LdoLink_ApplyActuators(uint32_t now_ms)
     s_applied_fan = fan;
 
     permit = s_dcdc_permit_request;
-#if (BOARD_POWER_PERMIT_ACTIVE_HIGH != 0U)
     if (s_applied_permit != permit) {
         LdoLink_SetPermitPin(permit);
     }
-#else
-    if (s_applied_permit != permit) {
-        LdoLink_SetPermitPin(permit);
-    }
-#endif
 }
 
 void LdoLink_Init(UART_HandleTypeDef *huart_g0)
@@ -294,7 +288,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward on USART1)\r\n");
     Debug_Printf("[LDO] Sense: LOCAL (REMOTE_ON=0); host REMOTE ON for remote path\r\n");
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
-    Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH (clear G0 POWER_KILL)\r\n");
+    Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH/ena (clear G0 POWER_KILL)\r\n");
 #endif
 }
 

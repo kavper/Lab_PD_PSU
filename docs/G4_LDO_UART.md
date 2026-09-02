@@ -33,7 +33,7 @@ Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is wi
 | H7 / PC host | USART1 PC4/PC5 | `host_link.c` |
 | Fan PWM | PA6 TIM16 | `fan_pwm.c` |
 | BLEED_ON | PB4 | `ldo_link.c` |
-| POWER_PERMIT_G4 | PB6 | `ldo_prereg.c` → `ldo_link.c` |
+| POWER_PERMIT_G4 | PB6 | `ldo_prereg.c` → `ldo_link.c` (HIGH=ena, Low/reset=LDO zabity) |
 | Local Vout sense | PB2 `ADC_VOUT` | `measurements.c` (CV) |
 | Remote sense enable | PB5 `REMOTE_ON` | `ldo_link.c` (default LOW) |
 | Remote Kelvin sense | PB0/PB1 `ADC_REMOTE_P/N` | analog inputs (no DMA ranks yet) |
@@ -73,7 +73,7 @@ With `BMS_ENABLE=1` and `BMS_CELL_COUNT=5`, equal **5×68 Ω** ladder on a bench
 
 With `BOARD_BRINGUP_LOCAL_CV` / `BOARD_BRINGUP_AUTO_ON`, G4 can run DCDC CV without G0 TLM (pre-reg rail only). **User LDO output still requires a live G0.**
 
-Host **OFF** / **PERMIT 0** = emergency: force DCDC off and PERMIT low (even if G0 still reports on). Clears when G0 `out=0` or host **ON** + **PERMIT 1**.
+Host **OFF** / **PERMIT 0** = emergency: force DCDC off and PERMIT low / LDO zabity (even if G0 still reports on). Clears when G0 `out=0` or host **ON** + **PERMIT 1** (PERMIT high = ena, clears G0 `POWER_KILL`).
 
 ## G0 link triage (`g0_*` on host `T` line)
 
