@@ -42,6 +42,21 @@ static bool Prereg_FaultIsNone(const char *fault)
     return (strcmp(fault, "NONE") == 0);
 }
 
+/*
+ * VIN_LOW means G0 is starved by the pre-reg. Keep DCDC alive so we can
+ * restore headroom; other faults still force DCDC off.
+ */
+static bool Prereg_FaultBlocksDcdc(const char *fault)
+{
+    if (Prereg_FaultIsNone(fault)) {
+        return false;
+    }
+    if (strcmp(fault, "VIN_LOW") == 0) {
+        return false;
+    }
+    return true;
+}
+
 static float Prereg_CvFloorV(float vset_v)
 {
     float floor_v = vset_v + BOARD_VPRE_MARGIN_V;
@@ -52,30 +67,56 @@ static float Prereg_CvFloorV(float vset_v)
     return floor_v;
 }
 
+/* Host setpoint and TLM vset — whichever is higher — drive the VIN floor. */
+static float Prereg_ActiveFloorV(const LdoLink_Status_t *ldo)
+{
+    float vset_v = LdoLink_GetG0Voltage();
+
+    if ((ldo != NULL) && (ldo->vset_mv > 0U)) {
+        float tlm_vset_v = (float)ldo->vset_mv / 1000.0f;
+        if (tlm_vset_v > vset_v) {
+            vset_v = tlm_vset_v;
+        }
+    }
+
+    return Prereg_CvFloorV(vset_v);
+}
+
+static bool Prereg_NeedVinFloor(const LdoLink_Status_t *ldo)
+{
+    if (LdoLink_IsOutputWanted()) {
+        return true;
+    }
+    return (ldo != NULL) && ldo->output_on;
+}
+
 static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
 {
     float request_v;
     float floor_v;
 
     if (ldo == NULL) {
-        return BOARD_VPRE_MIN_V;
-    }
-
-    /* Before G0 OUT ON: pre-position DCDC at G0 setpoint + margin (VIN ready). */
-    if (!ldo->output_on) {
         if (LdoLink_IsOutputWanted()) {
             return Prereg_ClampV(Prereg_CvFloorV(LdoLink_GetG0Voltage()));
         }
         return BOARD_VPRE_MIN_V;
     }
 
-    /*
-     * Floor at vset+margin (and never below G0 VIN_LOW). G0 in CC asks for
-     * vout+margin; when the load collapses vout that request falls toward
-     * VPRE_MIN and used to slew the pre-reg into a VIN_LOW death spiral.
-     */
-    floor_v = Prereg_CvFloorV((float)ldo->vset_mv / 1000.0f);
+    floor_v = Prereg_ActiveFloorV(ldo);
 
+    /* OUT off but host still wants output: hold CV floor (never dive to 3 V). */
+    if (!ldo->output_on) {
+        if (LdoLink_IsOutputWanted()) {
+            return Prereg_ClampV(floor_v);
+        }
+        return BOARD_VPRE_MIN_V;
+    }
+
+    /*
+     * Floor at max(vset+margin, VIN_FLOOR). G0 in CC asks for vout+margin;
+     * when the load collapses vout that request falls toward VPRE_MIN and
+     * used to slew the pre-reg into a VIN_LOW death spiral.
+     */
     if (ldo->vpre_present && (ldo->vpre_mv > 0U)) {
         request_v = (float)ldo->vpre_mv / 1000.0f;
     } else if ((ldo->cc_cv != 0U) || (ldo->mode == LDO_G0_MODE_CC)) {
@@ -91,7 +132,7 @@ static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
     return Prereg_ClampV(request_v);
 }
 
-static void Prereg_UpdateSlew(float request_v, float dt_s)
+static void Prereg_UpdateSlew(float request_v, float dt_s, bool hold_vin_floor)
 {
     float delta;
     float max_up;
@@ -112,6 +153,11 @@ static void Prereg_UpdateSlew(float request_v, float dt_s)
     }
 
     s_command_v = Prereg_ClampV(s_command_v + delta);
+
+    /* Hard stop: never command below G0 VIN_LOW while output is wanted/on. */
+    if (hold_vin_floor && (s_command_v < BOARD_VPRE_VIN_FLOOR_V)) {
+        s_command_v = BOARD_VPRE_VIN_FLOOR_V;
+    }
 }
 
 static bool Prereg_UpdateRegulation(float measured_v, bool dcdc_enabled, uint32_t now_ms)
@@ -242,12 +288,16 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
                              ((float)ldo.vpre_mv / 1000.0f) : 0.0f;
         s_status.vpre_request_v = request_v;
 
+        /*
+         * Do not drop DCDC on VIN_LOW — that fault is caused by a low
+         * pre-reg rail; disabling DCDC makes the death spiral worse.
+         */
         want_enable = (ldo.output_on || LdoLink_IsOutputWanted()) &&
-                      Prereg_FaultIsNone(ldo.fault) &&
+                      (!Prereg_FaultBlocksDcdc(ldo.fault)) &&
                       (ldo.pgood != 0U) &&
                       (!s_force_disable);
 
-        Prereg_UpdateSlew(request_v, dt_s);
+        Prereg_UpdateSlew(request_v, dt_s, Prereg_NeedVinFloor(&ldo));
         s_status.vpre_command_v = s_command_v;
 
         s_status.regulation_ok =
@@ -277,6 +327,30 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
 
         s_status.dcdc_enable_request = want_enable;
         s_status.permit_granted = want_permit;
+    } else if (LdoLink_IsOutputWanted() && (!s_force_disable)) {
+        /*
+         * Stale G0 TLM while host still wants output: hold CV/VIN floor.
+         * Diving to VPRE_MIN here used to starve VIN during link glitches.
+         */
+        request_v = Prereg_ClampV(Prereg_CvFloorV(LdoLink_GetG0Voltage()));
+        s_status.vpre_request_v = request_v;
+        s_status.vpre_g0_v = 0.0f;
+        want_enable = true;
+        Prereg_UpdateSlew(request_v, dt_s, true);
+        s_status.vpre_command_v = s_command_v;
+        s_status.regulation_ok =
+            Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
+        want_permit = want_enable &&
+                      dcdc_enabled &&
+                      s_status.regulation_ok &&
+                      (!s_status.permit_override_off);
+#if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
+        if ((!want_permit) && (!s_status.permit_override_off)) {
+            want_permit = true;
+        }
+#endif
+        s_status.dcdc_enable_request = want_enable;
+        s_status.permit_granted = want_permit;
     } else {
         s_status.vpre_request_v = BOARD_VPRE_MIN_V;
         s_status.vpre_g0_v = 0.0f;
@@ -304,7 +378,7 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_out_of_reg_since_ms = 0U;
 
         if (s_command_v > BOARD_VPRE_MIN_V) {
-            Prereg_UpdateSlew(BOARD_VPRE_MIN_V, dt_s);
+            Prereg_UpdateSlew(BOARD_VPRE_MIN_V, dt_s, false);
         } else {
             s_command_v = BOARD_VPRE_MIN_V;
         }

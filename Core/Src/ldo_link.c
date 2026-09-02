@@ -448,6 +448,26 @@ static void LdoLink_HandleNackLine(const char *line)
     s_status.last_nack[len] = '\0';
 
     if (strstr(line, "NACK FAULT=") != NULL) {
+        /*
+         * VIN_LOW is usually caused by the pre-reg diving (CC tracking /
+         * OUT-off → 3 V). Hard-killing PB7 and clearing g0_want makes that
+         * permanent. Soft-recover: keep want, raise/hold VIN floor, retry.
+         */
+        if (strstr(line, "VIN_LOW") != NULL) {
+            Debug_Printf("[LDO] VIN_LOW — hold pre-reg floor, retry WAIT_VIN\r\n");
+            LdoPrereg_SetForceDisable(false);
+            LdoPrereg_SetPermitOverrideOff(false);
+            s_dcdc_permit_request = true;
+            LdoLink_SetPermitPin(true);
+            s_retry_count = 0U;
+            LdoLink_ClearPendingAcks();
+            if (s_output_wanted) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, HAL_GetTick());
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_FAULT, HAL_GetTick());
+            }
+            return;
+        }
         LdoLink_HardKillFromFault(line);
         return;
     }

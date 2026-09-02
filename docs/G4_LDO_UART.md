@@ -13,17 +13,21 @@ G4 **does not** run CC/CV on the user output. It regulates **ADC_VOUT (PB2)** = 
 
 ## Pre-regulator policy (`ldo_prereg.c`)
 
-Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse cannot starve the LDO:
+Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse / OUT-off / stale TLM cannot starve the LDO:
 
 | G0 state | DCDC target |
 |---|---|
-| `out=0` | disable DCDC, ramp command → 3 V |
-| CV (`cccv=0`) | `max(vset + 3 V, 6 V)` (or `vpre=` from TLM if present, same floor) |
-| CC (`cccv=1`) | `max(vout + 3 V, vset + 3 V, 6 V)` — do **not** follow collapsed `vout` below the CV floor |
+| `out=0`, host idle (`g0_want=0`) | disable DCDC, ramp command → 3 V |
+| `out=0`, host wants ON | `max(host_vset, tlm_vset) + 3 V`, floored at **6 V** |
+| CV (`cccv=0`) | same floor (or `vpre=` from TLM if present) |
+| CC (`cccv=1`) | `max(vout + 3 V, vset + 3 V, 6 V)` — do **not** follow collapsed `vout` |
+| Stale TLM while `g0_want=1` | **hold** CV/VIN floor (do not dive to 3 V) |
+
+`fault=VIN_LOW` does **not** disable the pre-reg DCDC (that fault is caused by a low rail; killing DCDC worsens the spiral). Other faults still drop enable.
 
 Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 3 V, **VIN floor 6 V** (`BOARD_VPRE_VIN_FLOOR_V` = G0 `CONSOLE_MINIMUM_VIN_MV`).
 
-Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, `fault=NONE`, G0 `out=1`).
+Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, non-blocking fault, G0 `out=1` or want).
 
 ## Pin / module map (schematic U7)
 
