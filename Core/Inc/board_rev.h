@@ -76,13 +76,13 @@
 #define BOARD_POWER_PERMIT_ACTIVE_HIGH       1U
 
 /*
- * USART3 PB14/PB15 ↔ ISO6721: schematic labels say PB14=TX / PB15=RX.
- * Bench: J6 shows G0 TLM, but G4 g0_rx=0 until USART TX/RX SWAP is on —
- * PCB/net routing appears swapped vs AF mapping. Set 0 if a later PCB fix
- * restores the silk/doc orientation.
+ * G0 isolator UART = hardware USART3 on PB9 (TX) / PB8 (RX).
+ * G474 cannot put USART3_TX/RX on PB14/PB15 (PB14=RTS only) — rework nets
+ * off the silk PB14/15 pads. I2C_USBPD_IRQ moved PB9→PB3 to free TX.
+ * PIN_SWAP only if flywires are crossed vs silk; default 0.
  */
 #ifndef BOARD_USART3_G0_PIN_SWAP
-#define BOARD_USART3_G0_PIN_SWAP             1U
+#define BOARD_USART3_G0_PIN_SWAP             0U
 #endif
 
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */

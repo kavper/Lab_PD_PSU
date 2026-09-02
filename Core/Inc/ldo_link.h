@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /*
- * G0 LDO link on USART3 PB14/PB15 (115200 8N1).
+ * G0 LDO link on USART3 PB9/PB8 (115200 8N1). Net names still USART2_*_G0.
  * Protocol: docs/G4_LDO_UART.md + LDO_controller docs/G4_G0_UART_PROTOCOL.md
  */
 

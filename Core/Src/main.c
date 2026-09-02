@@ -532,7 +532,7 @@ static void MX_I2C4_Init(void)
 
 
 /**
-  * @brief USART3 Initialization Function (G0 isolated link, PB14/PB15)
+  * @brief USART3 Initialization Function (G0 isolated link, PB9 TX / PB8 RX)
   * @param None
   * @retval None
   */
@@ -555,7 +555,7 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
 #if (BOARD_USART3_G0_PIN_SWAP != 0U)
-  /* PB14/PB15 AF stay TX/RX pads; SWAP exchanges USART data path. */
+  /* SWAP exchanges USART data path on PB9/PB8 pads. */
   huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
   huart3.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
 #else
@@ -747,8 +747,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ADC_VBUS_GPIO_Port, &GPIO_InitStruct);
 
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+  /* I2C_USBPD_IRQ on PB3 (moved off PB9 for USART3_TX). */
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 

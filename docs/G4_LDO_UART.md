@@ -29,7 +29,7 @@ Slew: up 10 V/s, down 0.3 V/s. **POWER_PERMIT_G4** asserts only after DCDC is wi
 
 | Interface | Pins | Module |
 |---|---|---|
-| G0 isolated UART | USART3 PB14/PB15 | `ldo_link.c` (`BOARD_USART3_G0_PIN_SWAP=1` if J6 has TLM but `g0_rx=0`) |
+| G0 isolated UART | USART3 **PB9 TX / PB8 RX** | `ldo_link.c` — **not** silk PB14/PB15 (invalid AF on G474) |
 | H7 / PC host | USART1 PC4/PC5 | `host_link.c` |
 | Fan PWM | PA6 TIM16 | `fan_pwm.c` |
 | BLEED_ON | PB4 | `ldo_link.c` |
@@ -84,4 +84,16 @@ Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=
 | `g0_err>0`, `g0_uart=0x…` | Framing/noise (`0x4` FE, `0x8` NE, `0x1` ORE) |
 | `g0_tlm` rising, forwarded `TLM …` lines | Link OK — check G0 LED / `kill=` / `pgood=` / `out=` |
 
-Hardware checks: G4 **PB14↔G0 RX**, **PB15↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
+Hardware checks: G4 **PB9↔G0 RX**, **PB8↔G0 TX** via ISO6721 (rev2 flywire / next PCB); J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
+
+## Rev2 UART pin rework (required)
+
+STM32G474 **cannot** map USART3_TX/RX onto PB14/PB15 (PB14 is USART3_RTS only; PB15 has no USART3 data AF). Silk/nets `USART2_*_G0` on those pads were a layout mistake.
+
+| Net | Old pad | New pad | AF |
+|---|---|---|---|
+| `USART2_TX_G0` (G4→G0) | PB14 | **PB9** | USART3_TX |
+| `USART2_RX_G0` (G0→G4) | PB15 | **PB8** | USART3_RX |
+| `I2C_USBPD_IRQ` | PB9 | **PB3** | EXTI3 |
+
+Bench flywire: lift isolator MCU-side from PB14/15 → PB9/PB8; move USB-PD IRQ wire PB9→PB3. Leave PB14/PB15 NC.

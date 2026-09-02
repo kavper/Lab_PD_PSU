@@ -943,14 +943,14 @@ void LdoLink_DumpDiag(void)
     swap = (cr2 & USART_CR2_SWAP) ? 1U : 0U;
 
     Debug_Printf("[LDO] DIAG swap=%lu RxSt=%u err=0x%lX ISR=0x%08lX CR1=0x%08lX "
-                 "PB14=%u PB15=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
+                 "PB9=%u PB8=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
                  (unsigned long)swap,
                  (unsigned int)s_huart_g0->RxState,
                  (unsigned long)s_status.last_error_code,
                  (unsigned long)isr,
                  (unsigned long)cr1,
-                 (idr & GPIO_PIN_14) ? 1U : 0U,
-                 (idr & GPIO_PIN_15) ? 1U : 0U,
+                 (idr & GPIO_PIN_9) ? 1U : 0U,
+                 (idr & GPIO_PIN_8) ? 1U : 0U,
                  (unsigned long)s_status.rx_bytes,
                  (unsigned long)s_status.tlm_count,
                  (cr1 & USART_CR1_RE) ? 1U : 0U,

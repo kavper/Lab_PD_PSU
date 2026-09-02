@@ -524,15 +524,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     __HAL_RCC_USART3_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
-    /**USART3 GPIO Configuration
-    PB14     ------> USART3_TX (net USART2_TX_G0)
-    PB15     ------> USART3_RX (net USART2_RX_G0)
+    /**USART3 GPIO Configuration (rev2 rework — valid G474 data AF)
+    PB9      ------> USART3_TX (net USART2_TX_G0)
+    PB8      ------> USART3_RX (net USART2_RX_G0)
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
+    GPIO_InitStruct.Pin = USART2_TX_G0_Pin | USART2_RX_G0_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    /* Pull-up on both pads: idle UART high; helps when SWAP reassigns RX. */
     GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -572,7 +571,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
 
     /* USER CODE END USART3_MspDeInit 0 */
     __HAL_RCC_USART3_CLK_DISABLE();
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_14|GPIO_PIN_15);
+    HAL_GPIO_DeInit(GPIOB, USART2_TX_G0_Pin | USART2_RX_G0_Pin);
     HAL_NVIC_DisableIRQ(USART3_IRQn);
     /* USER CODE BEGIN USART3_MspDeInit 1 */
 

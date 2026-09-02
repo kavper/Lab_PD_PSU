@@ -87,9 +87,10 @@ void Error_Handler(void);
 #define HRTIM_FLT_GPIO_Port GPIOB
 #define I_L_MEAS_Pin GPIO_PIN_11
 #define I_L_MEAS_GPIO_Port GPIOB
-#define USART2_TX_G0_Pin GPIO_PIN_14
+/* G0 isolator UART: real USART3 data AF (rev2 rework — not PB14/PB15). */
+#define USART2_TX_G0_Pin GPIO_PIN_9
 #define USART2_TX_G0_GPIO_Port GPIOB
-#define USART2_RX_G0_Pin GPIO_PIN_15
+#define USART2_RX_G0_Pin GPIO_PIN_8
 #define USART2_RX_G0_GPIO_Port GPIOB
 #define BMS_ALERT_Pin GPIO_PIN_10
 #define BMS_ALERT_GPIO_Port GPIOA
@@ -113,7 +114,8 @@ void Error_Handler(void);
 #define REMOTE_ON_GPIO_Port GPIOB
 #define POWER_PERMIT_G4_Pin GPIO_PIN_6
 #define POWER_PERMIT_G4_GPIO_Port GPIOB
-#define I2C_USBPD_IRQ_Pin GPIO_PIN_9
+/* Was PB9; moved so PB9 can be USART3_TX. */
+#define I2C_USBPD_IRQ_Pin GPIO_PIN_3
 #define I2C_USBPD_IRQ_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */

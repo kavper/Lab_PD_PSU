@@ -306,17 +306,17 @@ void I2C4_ER_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles EXTI line[9:5] interrupts. PB9 I2C_USBPD_IRQ.
+  * @brief This function handles EXTI line3 interrupt. PB3 I2C_USBPD_IRQ.
   */
-void EXTI9_5_IRQHandler(void)
+void EXTI3_IRQHandler(void)
 {
-  /* USER CODE BEGIN EXTI9_5_IRQn 0 */
+  /* USER CODE BEGIN EXTI3_IRQn 0 */
 
-  /* USER CODE END EXTI9_5_IRQn 0 */
+  /* USER CODE END EXTI3_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(I2C_USBPD_IRQ_Pin);
-  /* USER CODE BEGIN EXTI9_5_IRQn 1 */
+  /* USER CODE BEGIN EXTI3_IRQn 1 */
 
-  /* USER CODE END EXTI9_5_IRQn 1 */
+  /* USER CODE END EXTI3_IRQn 1 */
 }
 
 /**
