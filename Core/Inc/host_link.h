@@ -22,19 +22,19 @@
  *
  * Commands (host -> G4), case-insensitive, optional argument:
  *
- *   ON                 start CV (same as old GUI PSU_Start)
- *   OFF                stop / idle
- *   SET <volts>        e.g. SET 12.5
- *   ILIM <amps>        e.g. ILIM 3
+ *   ON                 start G4 DCDC + G0 SET/OUT ON sequencer
+ *   OFF                G0 OUT OFF + PERMIT kill + DCDC stop
+ *   SET <volts>        G0 LDO voltage (also local DCDC if G0 idle)
+ *   ILIM <amps>        G0 current limit
  *   USB AUTO|SINK|SOURCE
- *   PERMIT 0|1         1 = ena (PB6 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB6 LOW)
+ *   PERMIT 0|1         1 = ena (PB6 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB6 LOW) + OUT OFF
  *   REMOTE ON|1        enable remote sense path (PB5 REMOTE_ON high)
  *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
  *   TEL [period_ms]    0 = stop periodic T lines; default 200
  *   ?                  one immediate T line
  *
- * Telemetry also includes rem_sense=0|1 after permit=.
- * Replies: OK, ERR <reason>, or a T line.
+ * Telemetry also includes rem_sense=, g0_want=, g0_ctrl=, g0_kill=, g0_outoff=.
+ * Replies: OK, OK G0, ERR <reason>, or a T line.
  */
 
 void HostLink_Init(UART_HandleTypeDef *huart);

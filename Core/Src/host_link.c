@@ -103,15 +103,18 @@ static void HostLink_SendTelemetry(void)
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
-                 "i_cc2_ma=%d g0=%u g0_out=%u g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
+                 "i_cc2_ma=%d g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
+                 "g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
                  "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
                  "i2c_tps=%u i2c_bq=%u i2c_bms=%u pm_st=%u\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
-                 (long)HostLink_Mv(App_GetCvSetpoint()),
-                 (long)HostLink_Ma(App_GetCurrentLimit()),
+                 (long)HostLink_Mv(LdoLink_IsOutputWanted() || LdoPrereg_IsG0Active()
+                                   ? LdoLink_GetG0Voltage()
+                                   : App_GetCvSetpoint()),
+                 (long)HostLink_Ma(LdoLink_GetG0Current()),
                  (unsigned long)(PowerStage_GetDutyA() * 1000000.0f + 0.5f),
                  (unsigned int)PSU_IsRunning(),
                  HostLink_ModeName(),
@@ -140,6 +143,10 @@ static void HostLink_SendTelemetry(void)
                  (int)bms.cc2_ma,
                  (unsigned int)(prereg.g0_active ? 1U : 0U),
                  (unsigned int)(ldo.output_on ? 1U : 0U),
+                 (unsigned int)(LdoLink_IsOutputWanted() ? 1U : 0U),
+                 (unsigned int)LdoLink_GetCtrlState(),
+                 (unsigned int)ldo.kill_reported,
+                 (unsigned int)ldo.outoff_reported,
                  (unsigned long)ldo.vout_mv,
                  (long)(prereg.vpre_request_v * 1000.0f),
                  (long)(prereg.vpre_command_v * 1000.0f),
@@ -274,28 +281,16 @@ static void HostLink_HandleLine(char *line)
     arg = HostLink_SkipToken(line);
 
     if (HostLink_EqToken(line, "ON")) {
-#if (BOARD_BRINGUP_LOCAL_CV != 0U)
-        if (App_IsG0OutputMaster()) {
-            LdoPrereg_SetForceDisable(false);
-            LdoPrereg_SetPermitOverrideOff(false);
-            HostLink_Tx("OK G0\r\n");
-        } else {
-            PSU_Start();
-            HostLink_Tx("OK\r\n");
-        }
-#else
-        if (LdoPrereg_IsG0Active()) {
-            LdoPrereg_SetForceDisable(false);
-            LdoPrereg_SetPermitOverrideOff(false);
-            HostLink_Tx("OK G0\r\n");
-        } else {
-            PSU_Start();
-            HostLink_Tx("OK\r\n");
-        }
-#endif
+        LdoPrereg_SetForceDisable(false);
+        LdoPrereg_SetPermitOverrideOff(false);
+        /* Start G4 DCDC pre-reg (VIN) and run G0 SET/OUT ON sequencer. */
+        PSU_Start();
+        LdoLink_RequestOutput(true);
+        HostLink_Tx("OK G0\r\n");
         return;
     }
     if (HostLink_EqToken(line, "OFF")) {
+        LdoLink_RequestOutput(false);
         LdoPrereg_SetForceDisable(true);
         LdoPrereg_SetPermitOverrideOff(true);
         PSU_Stop();
@@ -312,7 +307,11 @@ static void HostLink_HandleLine(char *line)
             HostLink_Tx("ERR SET\r\n");
             return;
         }
-        PSU_GuiSetTargetVoltage(value);
+        /* User SET is G0 LDO voltage; G4 DCDC tracks vset+margin via TLM. */
+        LdoLink_SetG0Voltage(value);
+        if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
+            PSU_GuiSetTargetVoltage(value);
+        }
         HostLink_Tx("OK\r\n");
         return;
     }
@@ -321,6 +320,7 @@ static void HostLink_HandleLine(char *line)
             HostLink_Tx("ERR ILIM\r\n");
             return;
         }
+        LdoLink_SetG0Current(value);
         PSU_GuiSetTargetCurrent(value);
         HostLink_Tx("OK\r\n");
         return;
@@ -345,6 +345,7 @@ static void HostLink_HandleLine(char *line)
             return;
         }
         if (u32 == 0U) {
+            LdoLink_RequestOutput(false);
             LdoPrereg_SetPermitOverrideOff(true);
             LdoPrereg_SetForceDisable(true);
             PSU_Stop();

@@ -67,13 +67,13 @@ With `BMS_ENABLE=1` and `BMS_CELL_COUNT=5`, equal **5×68 Ω** ladder on a bench
 ## Bring-up sequence
 
 1. Flash G0 + G4. Connect isolator UART (115200).
-2. On G0: `OUT ON`, `SET V=… I=…` (or G0 `BOARD_BRINGUP_AUTO_OUT=1`).
-3. G4 parses `TLM` @ 5 Hz → enables DCDC → ramps to `vpre` → asserts PERMIT.
-4. PC on USART1: forwarded `TLM` lines + `T … vpre_req_mv= … permit= …` from G4.
+2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
+3. G4 asserts `POWER_PERMIT` (PB6 HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends `SET V=… I=…` → `OUT ON` to G0.
+4. Watch forwarded `TLM` (`out=1 kill=0 outoff=0`) and host `T` (`g0_want=1 g0_ctrl=… g0_out=1`).
 
-With `BOARD_BRINGUP_LOCAL_CV` / `BOARD_BRINGUP_AUTO_ON`, G4 can run DCDC CV without G0 TLM (pre-reg rail only). **User LDO output still requires a live G0.**
+Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=5.000 I=0.100` until `SET`/`ILIM`). Host **`OFF`** / **`PERMIT 0`** sends `OUT OFF`, forces PB6 low (LDO zabity), and stops DCDC.
 
-Host **OFF** / **PERMIT 0** = emergency: force DCDC off and PERMIT low / LDO zabity (even if G0 still reports on). Clears when G0 `out=0` or host **ON** + **PERMIT 1** (PERMIT high = ena, clears G0 `POWER_KILL`).
+`g0_ctrl` states: 0 idle, 1 wait link, 2 wait permit, 3 wait VIN, 4–8 SET/OUT handshake, 9 running, 10–11 OFF, 12 fault.
 
 ## G0 link triage (`g0_*` on host `T` line)
 

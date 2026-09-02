@@ -4,21 +4,39 @@
 #include "debug_uart.h"
 #include "fan_pwm.h"
 #include "host_link.h"
+#include "ldo_prereg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define LDO_RX_LINE_MAX              192U
+#define LDO_RX_LINE_MAX              256U
 #define LDO_TLM_STALE_MS             500U
 #define LDO_FAN_FAILSAFE_PERCENT     40U
 #define LDO_LINK_HEALTH_MS           2000U
 #define LDO_RX_RECOVER_MS            1000U
+#define LDO_CMD_TIMEOUT_MS           400U
+#define LDO_CMD_RETRY_MAX            8U
+#define LDO_VIN_MIN_MV               4500U
+#define LDO_VOUT_ZERO_MV             250U
+#define LDO_V_MIN                    0.0f
+#define LDO_V_MAX                    27.0f
+#define LDO_I_MIN                    0.0f
+#define LDO_I_MAX                    5.0f
+#define LDO_DEFAULT_V                5.0f
+#define LDO_DEFAULT_I                0.1f
+
+typedef enum {
+    LDO_PENDING_NONE = 0,
+    LDO_PENDING_SET,
+    LDO_PENDING_OUT_ON,
+    LDO_PENDING_OUT_OFF
+} LdoPendingCmd_t;
 
 static UART_HandleTypeDef *s_huart_g0 = NULL;
 static uint8_t s_rx_byte;
 static char s_rx_line[LDO_RX_LINE_MAX];
-static volatile uint8_t s_rx_len;
+static volatile uint16_t s_rx_len;
 static volatile bool s_line_ready;
 static volatile bool s_rx_overflow;
 
@@ -30,6 +48,32 @@ static uint8_t s_applied_fan;
 static bool s_applied_permit;
 static uint32_t s_last_health_ms;
 static uint32_t s_last_recover_ms;
+
+static bool s_output_wanted;
+static float s_g0_volts = LDO_DEFAULT_V;
+static float s_g0_amps = LDO_DEFAULT_I;
+static bool s_setpoint_dirty;
+static LdoLink_CtrlState_t s_ctrl;
+static LdoPendingCmd_t s_pending;
+static uint32_t s_pending_since_ms;
+static uint8_t s_retry_count;
+static uint32_t s_state_since_ms;
+static bool s_ack_set_ok;
+static bool s_ack_out_on_ok;
+static bool s_ack_out_off_ok;
+static bool s_nack_seen;
+static char s_nack_line[48];
+
+static float LdoLink_Clampf(float value, float min_v, float max_v)
+{
+    if (value < min_v) {
+        return min_v;
+    }
+    if (value > max_v) {
+        return max_v;
+    }
+    return value;
+}
 
 static void LdoLink_ArmRx(void)
 {
@@ -176,11 +220,176 @@ static void LdoLink_ParseFaultToken(const char *line)
     memcpy(s_status.fault, p, len);
 }
 
+static bool LdoLink_TxLine(const char *line)
+{
+    size_t len;
+
+    if ((s_huart_g0 == NULL) || (line == NULL)) {
+        return false;
+    }
+
+    len = strlen(line);
+    if (len == 0U) {
+        return false;
+    }
+
+    if (HAL_UART_Transmit(s_huart_g0, (uint8_t *)line, (uint16_t)len, 20U) != HAL_OK) {
+        Debug_Printf("[LDO] TX fail: %s", line);
+        return false;
+    }
+
+    Debug_Printf("[LDO] TX %s", line);
+    return true;
+}
+
+static void LdoLink_ClearPendingAcks(void)
+{
+    s_ack_set_ok = false;
+    s_ack_out_on_ok = false;
+    s_ack_out_off_ok = false;
+    s_nack_seen = false;
+    s_nack_line[0] = '\0';
+    s_pending = LDO_PENDING_NONE;
+}
+
+static void LdoLink_EnterState(LdoLink_CtrlState_t next, uint32_t now_ms)
+{
+    if (s_ctrl != next) {
+        Debug_Printf("[LDO] ctrl %u -> %u\r\n",
+                     (unsigned int)s_ctrl, (unsigned int)next);
+        s_ctrl = next;
+        s_state_since_ms = now_ms;
+        s_status.ctrl_state = next;
+    }
+}
+
+static void LdoLink_HardKillFromFault(const char *why)
+{
+    Debug_Printf("[LDO] HARD KILL PB6 (%s)\r\n", (why != NULL) ? why : "?");
+    LdoLink_SetPermitPin(false);
+    s_dcdc_permit_request = false;
+    s_output_wanted = false;
+    s_status.output_wanted = false;
+    LdoPrereg_SetPermitOverrideOff(true);
+    LdoPrereg_SetForceDisable(true);
+    LdoLink_ClearPendingAcks();
+    LdoLink_EnterState(LDO_G0_CTRL_FAULT, HAL_GetTick());
+}
+
+static bool LdoLink_SendSet(uint32_t now_ms)
+{
+    char cmd[48];
+    int n;
+
+    n = snprintf(cmd, sizeof(cmd), "SET V=%.3f I=%.3f\r\n",
+                 (double)s_g0_volts, (double)s_g0_amps);
+    if ((n <= 0) || ((size_t)n >= sizeof(cmd))) {
+        return false;
+    }
+
+    LdoLink_ClearPendingAcks();
+    if (!LdoLink_TxLine(cmd)) {
+        return false;
+    }
+
+    s_pending = LDO_PENDING_SET;
+    s_pending_since_ms = now_ms;
+    s_setpoint_dirty = false;
+    return true;
+}
+
+static bool LdoLink_SendOutOn(uint32_t now_ms)
+{
+    LdoLink_ClearPendingAcks();
+    if (!LdoLink_TxLine("OUT ON\r\n")) {
+        return false;
+    }
+    s_pending = LDO_PENDING_OUT_ON;
+    s_pending_since_ms = now_ms;
+    return true;
+}
+
+static bool LdoLink_SendOutOff(uint32_t now_ms)
+{
+    LdoLink_ClearPendingAcks();
+    if (!LdoLink_TxLine("OUT OFF\r\n")) {
+        return false;
+    }
+    s_pending = LDO_PENDING_OUT_OFF;
+    s_pending_since_ms = now_ms;
+    return true;
+}
+
+static void LdoLink_HandleAckLine(const char *line)
+{
+    HostLink_ForwardLine(line);
+    Debug_Write(line);
+    Debug_Write("\r\n");
+
+    s_status.ack_ok_count++;
+
+    if (strstr(line, "ACK SET") != NULL) {
+        s_ack_set_ok = true;
+        if (s_pending == LDO_PENDING_SET) {
+            s_pending = LDO_PENDING_NONE;
+        }
+    } else if (strstr(line, "ACK OUT ON") != NULL) {
+        s_ack_out_on_ok = true;
+        if (s_pending == LDO_PENDING_OUT_ON) {
+            s_pending = LDO_PENDING_NONE;
+        }
+    } else if (strstr(line, "ACK OUT OFF") != NULL) {
+        s_ack_out_off_ok = true;
+        if (s_pending == LDO_PENDING_OUT_OFF) {
+            s_pending = LDO_PENDING_NONE;
+        }
+    }
+}
+
+static void LdoLink_HandleNackLine(const char *line)
+{
+    size_t len;
+
+    HostLink_ForwardLine(line);
+    Debug_Write(line);
+    Debug_Write("\r\n");
+
+    s_status.nack_count++;
+    s_nack_seen = true;
+
+    len = strlen(line);
+    if (len >= sizeof(s_nack_line)) {
+        len = sizeof(s_nack_line) - 1U;
+    }
+    memcpy(s_nack_line, line, len);
+    s_nack_line[len] = '\0';
+
+    len = strlen(line);
+    if (len >= sizeof(s_status.last_nack)) {
+        len = sizeof(s_status.last_nack) - 1U;
+    }
+    memcpy(s_status.last_nack, line, len);
+    s_status.last_nack[len] = '\0';
+
+    /* Unsolicited fault while output was ON: drop PB6 immediately. */
+    if (strstr(line, "NACK FAULT=") != NULL) {
+        LdoLink_HardKillFromFault(line);
+        return;
+    }
+
+    if ((strstr(line, "REASON=POWER_KILL") != NULL) ||
+        (strstr(line, "FAULT=POWER_KILL") != NULL)) {
+        /* Re-assert permit and retry; do not leave PB6 low. */
+        LdoPrereg_SetPermitOverrideOff(false);
+        s_dcdc_permit_request = true;
+        LdoLink_SetPermitPin(true);
+    }
+}
+
 static void LdoLink_HandleTlmLine(const char *line)
 {
     uint8_t value;
 
-    s_status.rx_lines++;
     if ((line == NULL) || (strncmp(line, "TLM ", 4U) != 0)) {
         return;
     }
@@ -206,6 +415,9 @@ static void LdoLink_HandleTlmLine(const char *line)
     }
     if (LdoLink_ParseU8Token(line, "kill=", &value)) {
         s_status.kill_reported = (value != 0U) ? 1U : 0U;
+    }
+    if (LdoLink_ParseU8Token(line, "outoff=", &value)) {
+        s_status.outoff_reported = (value != 0U) ? 1U : 0U;
     }
     if (LdoLink_ParseU8Token(line, "cccv=", &value)) {
         s_status.cc_cv = (value != 0U) ? 1U : 0U;
@@ -235,6 +447,21 @@ static void LdoLink_HandleTlmLine(const char *line)
     Debug_Write("\r\n");
 }
 
+static void LdoLink_HandleRxLine(const char *line)
+{
+    s_status.rx_lines++;
+
+    if (strncmp(line, "TLM ", 4U) == 0) {
+        LdoLink_HandleTlmLine(line);
+    } else if (strncmp(line, "ACK ", 4U) == 0) {
+        LdoLink_HandleAckLine(line);
+    } else if (strncmp(line, "NACK ", 5U) == 0) {
+        LdoLink_HandleNackLine(line);
+    } else {
+        Debug_Printf("[LDO] G0 ignore: %s\r\n", line);
+    }
+}
+
 static void LdoLink_ApplyActuators(uint32_t now_ms)
 {
     uint8_t fan = s_status.fan_percent;
@@ -259,6 +486,247 @@ static void LdoLink_ApplyActuators(uint32_t now_ms)
     }
 }
 
+static bool LdoLink_TlmFresh(uint32_t now_ms)
+{
+    return s_status.telemetry_valid &&
+           ((uint32_t)(now_ms - s_status.last_tlm_ms) <= LDO_TLM_STALE_MS);
+}
+
+static bool LdoLink_PendingTimedOut(uint32_t now_ms)
+{
+    return (s_pending != LDO_PENDING_NONE) &&
+           ((uint32_t)(now_ms - s_pending_since_ms) >= LDO_CMD_TIMEOUT_MS);
+}
+
+static void LdoLink_CtrlTask(uint32_t now_ms)
+{
+    s_status.output_wanted = s_output_wanted;
+    s_status.ctrl_state = s_ctrl;
+
+    if (!s_output_wanted) {
+        if ((s_ctrl != LDO_G0_CTRL_IDLE) &&
+            (s_ctrl != LDO_G0_CTRL_SEND_OUT_OFF) &&
+            (s_ctrl != LDO_G0_CTRL_WAIT_OUT_OFF_ACK) &&
+            (s_ctrl != LDO_G0_CTRL_FAULT)) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_OFF, now_ms);
+        }
+    }
+
+    switch (s_ctrl) {
+    case LDO_G0_CTRL_IDLE:
+        if (s_output_wanted) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_LINK, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_LINK:
+        if (!s_output_wanted) {
+            LdoLink_EnterState(LDO_G0_CTRL_IDLE, now_ms);
+            break;
+        }
+        if (LdoLink_TlmFresh(now_ms)) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_PERMIT, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_PERMIT:
+        if (!s_output_wanted) {
+            break;
+        }
+        /* Ensure opto permit while waiting for kill=0. */
+        LdoPrereg_SetPermitOverrideOff(false);
+        s_dcdc_permit_request = true;
+        if (!s_applied_permit) {
+            LdoLink_SetPermitPin(true);
+        }
+
+        if (LdoLink_TlmFresh(now_ms) &&
+            (s_status.kill_reported == 0U) &&
+            LdoLink_IsPowerPermitted()) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, now_ms);
+        } else if ((uint32_t)(now_ms - s_state_since_ms) > 2000U) {
+            Debug_Printf("[LDO] wait permit: kill=%u pb6=%u pgood=%u\r\n",
+                         (unsigned int)s_status.kill_reported,
+                         LdoLink_IsPowerPermitted() ? 1U : 0U,
+                         (unsigned int)s_status.pgood);
+            s_state_since_ms = now_ms;
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_VIN:
+        if (!s_output_wanted) {
+            break;
+        }
+        if (LdoLink_TlmFresh(now_ms) &&
+            (s_status.pgood != 0U) &&
+            (s_status.vin_mv >= LDO_VIN_MIN_MV) &&
+            (s_status.kill_reported == 0U)) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_SEND_SET, now_ms);
+        } else if ((uint32_t)(now_ms - s_state_since_ms) > 2000U) {
+            Debug_Printf("[LDO] wait VIN: pgood=%u vin=%lu kill=%u\r\n",
+                         (unsigned int)s_status.pgood,
+                         (unsigned long)s_status.vin_mv,
+                         (unsigned int)s_status.kill_reported);
+            s_state_since_ms = now_ms;
+            if (s_status.kill_reported != 0U) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_PERMIT, now_ms);
+            }
+        }
+        break;
+
+    case LDO_G0_CTRL_SEND_SET:
+        if (!s_output_wanted) {
+            break;
+        }
+        if (LdoLink_SendSet(now_ms)) {
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_SET_ACK, now_ms);
+        } else if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+            LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_SET_ACK:
+        if (s_ack_set_ok) {
+            s_retry_count = 0U;
+            if (s_status.vout_mv > LDO_VOUT_ZERO_MV) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_VOUT_ZERO, now_ms);
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
+            }
+        } else if (s_nack_seen) {
+            s_nack_seen = false;
+            if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+                LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_SEND_SET, now_ms);
+            }
+        } else if (LdoLink_PendingTimedOut(now_ms)) {
+            s_status.cmd_timeout_count++;
+            if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+                LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_SEND_SET, now_ms);
+            }
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_VOUT_ZERO:
+        if (!s_output_wanted) {
+            break;
+        }
+        if (!LdoLink_TlmFresh(now_ms)) {
+            break;
+        }
+        if (s_status.vout_mv <= LDO_VOUT_ZERO_MV) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
+        } else if ((uint32_t)(now_ms - s_state_since_ms) > 3000U) {
+            /* Ask G0 to discharge, then retry zero wait. */
+            (void)LdoLink_SendOutOff(now_ms);
+            s_state_since_ms = now_ms;
+        }
+        break;
+
+    case LDO_G0_CTRL_SEND_OUT_ON:
+        if (!s_output_wanted) {
+            break;
+        }
+        if (s_status.kill_reported != 0U) {
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_PERMIT, now_ms);
+            break;
+        }
+        if (LdoLink_SendOutOn(now_ms)) {
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_OUT_ON_ACK, now_ms);
+        } else if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+            LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_OUT_ON_ACK:
+        if (s_ack_out_on_ok ||
+            (LdoLink_TlmFresh(now_ms) && s_status.output_on &&
+             (s_status.kill_reported == 0U))) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_RUNNING, now_ms);
+            Debug_Printf("[LDO] G0 OUT ON ok (vset=%.3f iset=%.3f)\r\n",
+                         (double)s_g0_volts, (double)s_g0_amps);
+        } else if (s_nack_seen) {
+            s_nack_seen = false;
+            if (strstr(s_nack_line, "POWER_KILL") != NULL) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_PERMIT, now_ms);
+            } else if (strstr(s_nack_line, "VIN_LOW") != NULL) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, now_ms);
+            } else if (strstr(s_nack_line, "VOUT_NOT_ZERO") != NULL) {
+                LdoLink_EnterState(LDO_G0_CTRL_WAIT_VOUT_ZERO, now_ms);
+            } else if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+                LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
+            }
+        } else if (LdoLink_PendingTimedOut(now_ms)) {
+            s_status.cmd_timeout_count++;
+            if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+                LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
+            } else {
+                LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
+            }
+        }
+        break;
+
+    case LDO_G0_CTRL_RUNNING:
+        if (!s_output_wanted) {
+            break;
+        }
+        if (LdoLink_TlmFresh(now_ms) && (s_status.kill_reported != 0U)) {
+            Debug_Printf("[LDO] kill asserted while running — hard kill\r\n");
+            LdoLink_HardKillFromFault("TLM kill=1");
+            break;
+        }
+        if (s_setpoint_dirty) {
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_SEND_SET, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_SEND_OUT_OFF:
+        if (LdoLink_SendOutOff(now_ms)) {
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_OUT_OFF_ACK, now_ms);
+        } else {
+            LdoLink_EnterState(LDO_G0_CTRL_IDLE, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_WAIT_OUT_OFF_ACK:
+        if (s_ack_out_off_ok ||
+            (LdoLink_TlmFresh(now_ms) && (!s_status.output_on)) ||
+            LdoLink_PendingTimedOut(now_ms)) {
+            LdoLink_ClearPendingAcks();
+            LdoLink_EnterState(LDO_G0_CTRL_IDLE, now_ms);
+        }
+        break;
+
+    case LDO_G0_CTRL_FAULT:
+        if (s_output_wanted) {
+            /* Host cleared force-disable / re-requested ON. */
+            if (!LdoPrereg_IsPermitGranted() && s_dcdc_permit_request) {
+                /* wait */
+            }
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_LINK, now_ms);
+        }
+        break;
+
+    default:
+        LdoLink_EnterState(LDO_G0_CTRL_IDLE, now_ms);
+        break;
+    }
+}
+
 void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 {
     memset(&s_status, 0, sizeof(s_status));
@@ -272,6 +740,14 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_remote_sense = false;
     s_last_health_ms = 0U;
     s_last_recover_ms = 0U;
+    s_output_wanted = false;
+    s_g0_volts = LDO_DEFAULT_V;
+    s_g0_amps = LDO_DEFAULT_I;
+    s_setpoint_dirty = false;
+    s_ctrl = LDO_G0_CTRL_IDLE;
+    s_retry_count = 0U;
+    s_state_since_ms = HAL_GetTick();
+    LdoLink_ClearPendingAcks();
 
     FanPwm_Init();
     LdoLink_SetBleed(false);
@@ -281,12 +757,12 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 #else
     LdoLink_SetPermitPin(false);
 #endif
-    /* Default local sense: REMOTE_ON low until host REMOTE ON. */
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
     LdoLink_ArmRx();
-    Debug_Printf("[LDO] USART3 G0 link ready (TLM forward on USART1)\r\n");
-    Debug_Printf("[LDO] Sense: LOCAL (REMOTE_ON=0); host REMOTE ON for remote path\r\n");
+    Debug_Printf("[LDO] USART3 G0 link ready (TLM forward + SET/OUT control)\r\n");
+    Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%.3f I=%.3f\r\n",
+                 (double)s_g0_volts, (double)s_g0_amps);
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
     Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH/ena (clear G0 POWER_KILL)\r\n");
 #endif
@@ -300,6 +776,67 @@ void LdoLink_SetDcdcPermitRequest(bool permit)
 bool LdoLink_IsDcdcPermitRequested(void)
 {
     return s_dcdc_permit_request;
+}
+
+void LdoLink_RequestOutput(bool on)
+{
+    s_output_wanted = on;
+    s_status.output_wanted = on;
+    if (on) {
+        LdoPrereg_SetForceDisable(false);
+        LdoPrereg_SetPermitOverrideOff(false);
+        if (s_ctrl == LDO_G0_CTRL_FAULT) {
+            LdoLink_EnterState(LDO_G0_CTRL_WAIT_LINK, HAL_GetTick());
+        }
+        Debug_Printf("[LDO] output WANT ON (V=%.3f I=%.3f)\r\n",
+                     (double)s_g0_volts, (double)s_g0_amps);
+    } else {
+        Debug_Printf("[LDO] output WANT OFF\r\n");
+    }
+}
+
+bool LdoLink_IsOutputWanted(void)
+{
+    return s_output_wanted;
+}
+
+void LdoLink_SetG0Setpoint(float volts, float amps)
+{
+    LdoLink_SetG0Voltage(volts);
+    LdoLink_SetG0Current(amps);
+}
+
+void LdoLink_SetG0Voltage(float volts)
+{
+    float v = LdoLink_Clampf(volts, LDO_V_MIN, LDO_V_MAX);
+    if (v != s_g0_volts) {
+        s_g0_volts = v;
+        s_setpoint_dirty = true;
+    }
+}
+
+void LdoLink_SetG0Current(float amps)
+{
+    float a = LdoLink_Clampf(amps, LDO_I_MIN, LDO_I_MAX);
+    if (a != s_g0_amps) {
+        s_g0_amps = a;
+        s_setpoint_dirty = true;
+    }
+}
+
+float LdoLink_GetG0Voltage(void)
+{
+    return s_g0_volts;
+}
+
+float LdoLink_GetG0Current(void)
+{
+    return s_g0_amps;
+}
+
+LdoLink_CtrlState_t LdoLink_GetCtrlState(void)
+{
+    return s_ctrl;
 }
 
 void LdoLink_SetRemoteSense(bool enable)
@@ -321,6 +858,8 @@ void LdoLink_GetStatus(LdoLink_Status_t *out)
 {
     if (out != NULL) {
         *out = s_status;
+        out->output_wanted = s_output_wanted;
+        out->ctrl_state = s_ctrl;
     }
 }
 
@@ -340,7 +879,7 @@ void LdoLink_Task(void)
             __enable_irq();
         }
         LdoLink_DumpFirstRx();
-        LdoLink_HandleTlmLine(line);
+        LdoLink_HandleRxLine(line);
     } else if (s_rx_overflow) {
         s_rx_overflow = false;
         Debug_Printf("[LDO] WARN: G0 RX line overflow\r\n");
@@ -352,7 +891,6 @@ void LdoLink_Task(void)
         age_ms = 0xFFFFFFFFu;
     }
 
-    /* No TLM stream: periodically report + re-arm RX after noise/silence. */
     if (!s_status.telemetry_valid ||
         ((s_status.last_tlm_ms != 0U) &&
          ((uint32_t)(now_ms - s_status.last_tlm_ms) > LDO_TLM_STALE_MS))) {
@@ -363,16 +901,18 @@ void LdoLink_Task(void)
             s_last_health_ms = now_ms;
             LdoLink_DumpFirstRx();
             Debug_Printf("[LDO] G0 link weak: rx=%lu lines=%lu tlm=%lu err=%lu "
-                         "age_ms=%lu last_err=0x%lX (need ASCII TLM @115200 on PB15)\r\n",
+                         "age_ms=%lu ctrl=%u want=%u\r\n",
                          (unsigned long)s_status.rx_bytes,
                          (unsigned long)s_status.rx_lines,
                          (unsigned long)s_status.tlm_count,
                          (unsigned long)s_status.rx_errors,
                          (unsigned long)age_ms,
-                         (unsigned long)s_status.last_error_code);
+                         (unsigned int)s_ctrl,
+                         s_output_wanted ? 1U : 0U);
         }
     }
 
+    LdoLink_CtrlTask(now_ms);
     LdoLink_ApplyActuators(now_ms);
 }
 
@@ -418,7 +958,6 @@ void LdoLink_OnUartError(UART_HandleTypeDef *huart)
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_PEFLAG(huart);
         huart->ErrorCode = HAL_UART_ERROR_NONE;
-        /* Abort sticky RX state then re-arm — framing noise otherwise stalls IT. */
         (void)HAL_UART_AbortReceive(huart);
         LdoLink_ArmRx();
     }

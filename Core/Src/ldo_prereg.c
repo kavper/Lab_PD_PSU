@@ -46,7 +46,15 @@ static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
 {
     float request_v;
 
-    if ((ldo == NULL) || (!ldo->output_on)) {
+    if (ldo == NULL) {
+        return BOARD_VPRE_MIN_V;
+    }
+
+    /* Before G0 OUT ON: pre-position DCDC at G0 setpoint + margin (VIN ready). */
+    if (!ldo->output_on) {
+        if (LdoLink_IsOutputWanted()) {
+            return Prereg_ClampV(LdoLink_GetG0Voltage() + BOARD_VPRE_MARGIN_V);
+        }
         return BOARD_VPRE_MIN_V;
     }
 
@@ -212,7 +220,7 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
                              ((float)ldo.vpre_mv / 1000.0f) : 0.0f;
         s_status.vpre_request_v = request_v;
 
-        want_enable = ldo.output_on &&
+        want_enable = (ldo.output_on || LdoLink_IsOutputWanted()) &&
                       Prereg_FaultIsNone(ldo.fault) &&
                       (ldo.pgood != 0U) &&
                       (!s_force_disable);

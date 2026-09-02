@@ -385,7 +385,8 @@ bool App_IsG0OutputMaster(void)
     }
 
     LdoLink_GetStatus(&ldo);
-    return ldo.output_on;
+    /* While G0 sequencer is bringing the rail up, DCDC follows prereg headroom. */
+    return ldo.output_on || LdoLink_IsOutputWanted();
 }
 
 #if (BOARD_BRINGUP_LOCAL_CV != 0U)
