@@ -91,4 +91,9 @@ LdoLink_CtrlState_t LdoLink_GetCtrlState(void);
 void LdoLink_SetRemoteSense(bool enable);
 bool LdoLink_IsRemoteSenseEnabled(void);
 
+/* Bench: dump USART3 ISR/GPIO/SWAP; optional runtime TX/RX SWAP. */
+void LdoLink_DumpDiag(void);
+void LdoLink_SetUsartPinSwap(bool enable);
+bool LdoLink_IsUartPinSwapEnabled(void);
+
 #endif /* LDO_LINK_H */

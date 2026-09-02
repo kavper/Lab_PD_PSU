@@ -77,8 +77,71 @@ static float LdoLink_Clampf(float value, float min_v, float max_v)
 
 static void LdoLink_ArmRx(void)
 {
-    if (s_huart_g0 != NULL) {
-        (void)HAL_UART_Receive_IT(s_huart_g0, &s_rx_byte, 1U);
+    HAL_StatusTypeDef st;
+
+    if (s_huart_g0 == NULL) {
+        return;
+    }
+    st = HAL_UART_Receive_IT(s_huart_g0, &s_rx_byte, 1U);
+    if ((st != HAL_OK) && (st != HAL_BUSY)) {
+        Debug_Printf("[LDO] ArmRx fail st=%d err=0x%lX state=%u\r\n",
+                     (int)st,
+                     (unsigned long)s_huart_g0->ErrorCode,
+                     (unsigned int)s_huart_g0->RxState);
+    }
+}
+
+static void LdoLink_FeedRxByte(uint8_t ch)
+{
+    s_status.rx_bytes++;
+    s_status.last_rx_ms = HAL_GetTick();
+    if (s_status.first_rx_len < sizeof(s_status.first_rx)) {
+        s_status.first_rx[s_status.first_rx_len++] = ch;
+    }
+    if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
+        if (s_rx_len > 0U) {
+            s_rx_line[s_rx_len] = '\0';
+            s_line_ready = true;
+            s_rx_len = 0U;
+        }
+    } else if (!s_line_ready) {
+        if (s_rx_len < (LDO_RX_LINE_MAX - 1U)) {
+            s_rx_line[s_rx_len++] = (char)ch;
+        } else {
+            s_rx_overflow = true;
+            s_rx_len = 0U;
+        }
+    }
+}
+
+/* Polling fallback: if NVIC/IT path is dead, still assemble lines. */
+static void LdoLink_PollRx(void)
+{
+    uint32_t guard = 0U;
+
+    if (s_huart_g0 == NULL) {
+        return;
+    }
+
+    while (__HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_RXNE) && (guard < 64U)) {
+        uint8_t ch = (uint8_t)(s_huart_g0->Instance->RDR & 0xFFU);
+        LdoLink_FeedRxByte(ch);
+        guard++;
+    }
+
+    if (__HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_ORE) ||
+        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_FE) ||
+        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_NE) ||
+        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_PE)) {
+        s_status.rx_errors++;
+        s_status.last_error_code |= s_huart_g0->ErrorCode;
+        if (s_status.last_error_code == 0U) {
+            s_status.last_error_code = 1U;
+        }
+        __HAL_UART_CLEAR_OREFLAG(s_huart_g0);
+        __HAL_UART_CLEAR_NEFLAG(s_huart_g0);
+        __HAL_UART_CLEAR_FEFLAG(s_huart_g0);
+        __HAL_UART_CLEAR_PEFLAG(s_huart_g0);
     }
 }
 
@@ -773,7 +836,9 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     LdoLink_ArmRx();
     Debug_Printf("[LDO] USART3 G0 link ready (TLM forward + SET/OUT control)\r\n");
 #if (BOARD_USART3_G0_PIN_SWAP != 0U)
-    Debug_Printf("[LDO] USART3 TX/RX SWAP enabled (bench: J6 TLM, MCU g0_rx was 0)\r\n");
+    Debug_Printf("[LDO] USART3 TX/RX SWAP=1 at boot (G0SWAP 0|1 to change)\r\n");
+#else
+    Debug_Printf("[LDO] USART3 TX/RX SWAP=0 at boot (G0SWAP 0|1 to change)\r\n");
 #endif
     Debug_Printf("[LDO] Sense: LOCAL; default G0 SET V=%lu.%03lu I=%lu.%03lu\r\n",
                  (unsigned long)((uint32_t)((s_g0_volts * 1000.0f) + 0.5f) / 1000U),
@@ -783,6 +848,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
     Debug_Printf("[LDO] Bring-up: POWER_PERMIT early HIGH/ena (clear G0 POWER_KILL)\r\n");
 #endif
+    LdoLink_DumpDiag();
 }
 
 void LdoLink_SetDcdcPermitRequest(bool permit)
@@ -857,6 +923,75 @@ LdoLink_CtrlState_t LdoLink_GetCtrlState(void)
     return s_ctrl;
 }
 
+void LdoLink_DumpDiag(void)
+{
+    uint32_t isr = 0U;
+    uint32_t cr1 = 0U;
+    uint32_t cr2 = 0U;
+    uint32_t idr = 0U;
+    uint32_t swap = 0U;
+
+    if (s_huart_g0 == NULL) {
+        Debug_Printf("[LDO] DIAG no huart\r\n");
+        return;
+    }
+
+    isr = s_huart_g0->Instance->ISR;
+    cr1 = s_huart_g0->Instance->CR1;
+    cr2 = s_huart_g0->Instance->CR2;
+    idr = GPIOB->IDR;
+    swap = (cr2 & USART_CR2_SWAP) ? 1U : 0U;
+
+    Debug_Printf("[LDO] DIAG swap=%lu RxSt=%u err=0x%lX ISR=0x%08lX CR1=0x%08lX "
+                 "PB14=%u PB15=%u rx=%lu tlm=%lu RE=%u UE=%u RXNE=%u ORE=%u FE=%u\r\n",
+                 (unsigned long)swap,
+                 (unsigned int)s_huart_g0->RxState,
+                 (unsigned long)s_status.last_error_code,
+                 (unsigned long)isr,
+                 (unsigned long)cr1,
+                 (idr & GPIO_PIN_14) ? 1U : 0U,
+                 (idr & GPIO_PIN_15) ? 1U : 0U,
+                 (unsigned long)s_status.rx_bytes,
+                 (unsigned long)s_status.tlm_count,
+                 (cr1 & USART_CR1_RE) ? 1U : 0U,
+                 (cr1 & USART_CR1_UE) ? 1U : 0U,
+                 (isr & USART_ISR_RXNE_RXFNE) ? 1U : 0U,
+                 (isr & USART_ISR_ORE) ? 1U : 0U,
+                 (isr & USART_ISR_FE) ? 1U : 0U);
+}
+
+void LdoLink_SetUartPinSwap(bool enable)
+{
+    if (s_huart_g0 == NULL) {
+        return;
+    }
+
+    CLEAR_BIT(s_huart_g0->Instance->CR1, USART_CR1_UE);
+    if (enable) {
+        SET_BIT(s_huart_g0->Instance->CR2, USART_CR2_SWAP);
+    } else {
+        CLEAR_BIT(s_huart_g0->Instance->CR2, USART_CR2_SWAP);
+    }
+    SET_BIT(s_huart_g0->Instance->CR1, USART_CR1_UE);
+
+    s_status.first_rx_len = 0U;
+    s_status.first_rx_dumped = false;
+    s_rx_len = 0U;
+    s_line_ready = false;
+    (void)HAL_UART_AbortReceive(s_huart_g0);
+    LdoLink_ArmRx();
+
+    Debug_Printf("[LDO] USART3 SWAP now %u\r\n", enable ? 1U : 0U);
+}
+
+bool LdoLink_IsUartPinSwapEnabled(void)
+{
+    if (s_huart_g0 == NULL) {
+        return false;
+    }
+    return (s_huart_g0->Instance->CR2 & USART_CR2_SWAP) != 0U;
+}
+
 void LdoLink_SetRemoteSense(bool enable)
 {
     s_remote_sense = enable;
@@ -886,6 +1021,9 @@ void LdoLink_Task(void)
     char line[LDO_RX_LINE_MAX];
     uint32_t now_ms = HAL_GetTick();
     uint32_t age_ms;
+
+    /* Always poll RXNE — recovers if IT/NVIC path is stuck. */
+    LdoLink_PollRx();
 
     if (s_line_ready) {
         uint32_t primask = __get_PRIMASK();
@@ -919,14 +1057,16 @@ void LdoLink_Task(void)
             s_last_health_ms = now_ms;
             LdoLink_DumpFirstRx();
             Debug_Printf("[LDO] G0 link weak: rx=%lu lines=%lu tlm=%lu err=%lu "
-                         "age_ms=%lu ctrl=%u want=%u\r\n",
+                         "age_ms=%lu ctrl=%u want=%u swap=%u\r\n",
                          (unsigned long)s_status.rx_bytes,
                          (unsigned long)s_status.rx_lines,
                          (unsigned long)s_status.tlm_count,
                          (unsigned long)s_status.rx_errors,
                          (unsigned long)age_ms,
                          (unsigned int)s_ctrl,
-                         s_output_wanted ? 1U : 0U);
+                         s_output_wanted ? 1U : 0U,
+                         LdoLink_IsUartPinSwapEnabled() ? 1U : 0U);
+            LdoLink_DumpDiag();
         }
     }
 
@@ -936,33 +1076,11 @@ void LdoLink_Task(void)
 
 void LdoLink_RxCplt(UART_HandleTypeDef *huart)
 {
-    uint8_t ch;
-
     if ((huart == NULL) || (huart != s_huart_g0)) {
         return;
     }
 
-    ch = s_rx_byte;
-    s_status.rx_bytes++;
-    s_status.last_rx_ms = HAL_GetTick();
-    if (s_status.first_rx_len < sizeof(s_status.first_rx)) {
-        s_status.first_rx[s_status.first_rx_len++] = ch;
-    }
-    if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
-        if (s_rx_len > 0U) {
-            s_rx_line[s_rx_len] = '\0';
-            s_line_ready = true;
-            s_rx_len = 0U;
-        }
-    } else if (!s_line_ready) {
-        if (s_rx_len < (LDO_RX_LINE_MAX - 1U)) {
-            s_rx_line[s_rx_len++] = (char)ch;
-        } else {
-            s_rx_overflow = true;
-            s_rx_len = 0U;
-        }
-    }
-
+    LdoLink_FeedRxByte(s_rx_byte);
     LdoLink_ArmRx();
 }
 
