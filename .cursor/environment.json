@@ -1,0 +1,5 @@
+{
+    "name": "Lab_PD_PSU (STM32G474 firmware)",
+    "user": "ubuntu",
+    "install": "./scripts/cloud-agent-install.sh"
+}
