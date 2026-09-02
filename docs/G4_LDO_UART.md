@@ -97,4 +97,4 @@ STM32G474 **cannot** map USART data TX/RX onto silk PB14/PB15. Use **USART2** on
 | `BLEED_ON` | PB4 | **PB3** | GPIO out |
 | `I2C_USBPD_IRQ` | PB9 | **PB9** | EXTI9 (unchanged silk) |
 
-Bench flywire: lift isolator MCU-side from PB14/15 → **PA2/PB4**; move BLEED wire PB4→PB3. Leave PB14/PB15 NC.
+Bench flywire: isolator MCU-side → **PA2/PB4**; BLEED wire PB4→PB3. Silk **PB14/PB15** stay on the PCB but firmware leaves them **analog Hi-Z** (no GPIO out, no pull) — do not drive those pads.
