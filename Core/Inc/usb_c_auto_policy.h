@@ -32,8 +32,34 @@ static inline bool UsbC_AutoRejectsIncomingSwapToSink(uint8_t port_control_byte0
     return (port_control_byte0 & USB_C_PC_PROCESS_TO_SINK) == 0U;
 }
 
-/* Desired sink only when we are already sink AND partner advertises >5 V.
- * If we are already source, stay source (stale Source PDOs must not SWSk). */
+typedef enum {
+    USB_C_AUTO_HOLD_SINK = 0,
+    USB_C_AUTO_HOLD_SOURCE,
+    USB_C_AUTO_SWAP_TO_SOURCE
+} UsbC_AutoAction_t;
+
+/* Single AUTO role action. Never SWSk.
+ * Source: hold (charge the gadget). Sink + >5 V: hold (take power).
+ * Sink + 5 V Source PDOs: SWSr, capped. Sink + no PDOs: hold (5 V supply). */
+static inline UsbC_AutoAction_t UsbC_AutoAction(
+    bool we_are_source,
+    bool partner_source_caps_current,
+    uint32_t partner_source_max_mv,
+    uint8_t swap_attempts,
+    uint8_t max_attempts)
+{
+    if (we_are_source) {
+        return USB_C_AUTO_HOLD_SOURCE;
+    }
+    if (UsbC_AutoShouldSink(partner_source_max_mv)) {
+        return USB_C_AUTO_HOLD_SINK;
+    }
+    if (partner_source_caps_current && (swap_attempts < max_attempts)) {
+        return USB_C_AUTO_SWAP_TO_SOURCE;
+    }
+    return USB_C_AUTO_HOLD_SINK;
+}
+
 static inline bool UsbC_AutoDesiredSink(bool we_are_source,
                                         uint32_t partner_source_max_mv)
 {
@@ -43,39 +69,32 @@ static inline bool UsbC_AutoDesiredSink(bool we_are_source,
     return UsbC_AutoShouldSink(partner_source_max_mv);
 }
 
-/* Stay sink when the partner is a >5 V PD source, a dedicated 5 V supply
- * (no Source PDOs), or caps have not arrived yet. Never SWSk. */
 static inline bool UsbC_AutoStaySink(bool we_are_source,
                                      bool partner_source_caps_current,
                                      uint32_t partner_source_max_mv)
 {
-    if (we_are_source) {
-        return false;
-    }
-    if (UsbC_AutoShouldSink(partner_source_max_mv)) {
-        return true;
-    }
-    return !partner_source_caps_current;
+    return UsbC_AutoAction(we_are_source, partner_source_caps_current,
+                           partner_source_max_mv, 0U, 1U) ==
+           USB_C_AUTO_HOLD_SINK;
 }
 
-/* Sink on a partner that advertised 5 V-only Source PDOs: SWSr, capped.
- * Unknown/missing PDOs are not treated as a gadget (that would SWSr a
- * 5 V wall wart). Never SWSk. */
 static inline bool UsbC_AutoNeedSwapToSource(bool we_are_source,
                                              bool partner_source_caps_current,
                                              uint32_t partner_source_max_mv,
                                              uint8_t swap_attempts,
                                              uint8_t max_attempts)
 {
-    if (UsbC_AutoStaySink(we_are_source,
-                          partner_source_caps_current,
-                          partner_source_max_mv)) {
-        return false;
-    }
-    if (we_are_source) {
-        return false;
-    }
-    return swap_attempts < max_attempts;
+    return UsbC_AutoAction(we_are_source, partner_source_caps_current,
+                           partner_source_max_mv, swap_attempts,
+                           max_attempts) == USB_C_AUTO_SWAP_TO_SOURCE;
+}
+
+/* RX_SOURCE_CAPS is only trustworthy while we are sink. Keep the interrupt
+ * pending until STATUS catches up; never read it while sourcing. */
+static inline bool UsbC_AutoShouldReadSourceCaps(bool pending,
+                                                 bool we_are_sink)
+{
+    return pending && we_are_sink;
 }
 
 /* Clear both Initiate bits. Keep TypeC Current in the low nibble. */

@@ -131,5 +131,32 @@ int main(void)
         return 1;
     }
 
+    if (UsbC_AutoAction(true, true, 20000U, 0U, 2U) !=
+            USB_C_AUTO_HOLD_SOURCE ||
+        UsbC_AutoAction(false, true, 20000U, 0U, 2U) !=
+            USB_C_AUTO_HOLD_SINK ||
+        UsbC_AutoAction(false, true, 5000U, 0U, 2U) !=
+            USB_C_AUTO_SWAP_TO_SOURCE ||
+        UsbC_AutoAction(false, false, 0U, 0U, 2U) !=
+            USB_C_AUTO_HOLD_SINK) {
+        fprintf(stderr, "AUTO action table failed\n");
+        return 1;
+    }
+
+    /* Caps interrupt before STATUS says sink: do not read RX_SOURCE_CAPS. */
+    if (UsbC_AutoShouldReadSourceCaps(true, false) ||
+        UsbC_AutoShouldReadSourceCaps(false, true) ||
+        !UsbC_AutoShouldReadSourceCaps(true, true)) {
+        fprintf(stderr, "Source PDO read-while-sink guard failed\n");
+        return 1;
+    }
+
+    /* Stale 20 V ACTIVE_PDO without a consumer contract this plug must not
+     * look like a charger: policy sees max=0 until caps or this attach's PD. */
+    if (UsbC_AutoAction(false, false, 0U, 0U, 2U) != USB_C_AUTO_HOLD_SINK) {
+        fprintf(stderr, "no-PDO sink must not SWSr a 5 V supply\n");
+        return 1;
+    }
+
     return 0;
 }

@@ -143,6 +143,7 @@ typedef struct {
     bool previous_attached;
     bool policy_locked;
     bool partner_source_caps_current;
+    bool contract_seen_this_attach;
     bool pdo_report_pending;
     bool local_source_caps_pending;
     bool local_source_caps_valid;
@@ -743,7 +744,10 @@ static uint32_t PowerManager_AutoSourceMaxMv(void)
     if (g_pm.partner_source_caps_current) {
         source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
     }
-    if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+    /* ACTIVE_PDO can keep a previous charger's 20 V until this attach
+     * finishes PD. Only trust it after a consumer contract this plug. */
+    if (g_pm.contract_seen_this_attach &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
         g_pm.status.tps.active_pdo.valid &&
         (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
         source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
@@ -811,6 +815,7 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
     g_pm.policy_swap_attempts = 0U;
     g_pm.partner_source_caps_current = false;
+    g_pm.contract_seen_this_attach = false;
     g_pm.source_caps_trace_pending = false;
     g_pm.policy_locked = false;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
@@ -855,24 +860,28 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     TPS25751_PowerRole_t desired;
     uint32_t source_max_mv = PowerManager_AutoSourceMaxMv();
     bool we_are_source = (current == TPS25751_ROLE_SOURCE);
+    UsbC_AutoAction_t action = UsbC_AutoAction(
+        we_are_source,
+        g_pm.partner_source_caps_current,
+        source_max_mv,
+        g_pm.policy_swap_attempts,
+        PM_POLICY_MAX_SWAP_ATTEMPTS);
     const char *reason;
 
-    if (UsbC_AutoDesiredSink(we_are_source, source_max_mv)) {
-        desired = TPS25751_ROLE_SINK;
-        reason = "PARTNER_SOURCE_ABOVE_5V";
-    } else if (we_are_source) {
-        desired = TPS25751_ROLE_SOURCE;
-        reason = "WE_ARE_SOURCE";
-    } else if (UsbC_AutoNeedSwapToSource(we_are_source,
-                                         g_pm.partner_source_caps_current,
-                                         source_max_mv,
-                                         g_pm.policy_swap_attempts,
-                                         PM_POLICY_MAX_SWAP_ATTEMPTS)) {
-        desired = TPS25751_ROLE_SOURCE;
-        reason = "PARTNER_SOURCE_ONLY_5V";
-    } else {
-        desired = TPS25751_ROLE_SINK;
-        reason = "STAY_SINK";
+    switch (action) {
+        case USB_C_AUTO_HOLD_SOURCE:
+            desired = TPS25751_ROLE_SOURCE;
+            reason = "WE_ARE_SOURCE";
+            break;
+        case USB_C_AUTO_SWAP_TO_SOURCE:
+            desired = TPS25751_ROLE_SOURCE;
+            reason = "PARTNER_SOURCE_ONLY_5V";
+            break;
+        default:
+            desired = TPS25751_ROLE_SINK;
+            reason = UsbC_AutoShouldSink(source_max_mv) ?
+                     "PARTNER_SOURCE_ABOVE_5V" : "STAY_SINK";
+            break;
     }
 
     g_pm.policy_desired_role = desired;
@@ -890,11 +899,7 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         return;
     }
 
-    if (UsbC_AutoNeedSwapToSource(we_are_source,
-                                  g_pm.partner_source_caps_current,
-                                  source_max_mv,
-                                  g_pm.policy_swap_attempts,
-                                  PM_POLICY_MAX_SWAP_ATTEMPTS)) {
+    if (action == USB_C_AUTO_SWAP_TO_SOURCE) {
         (void)PowerManager_QueuePortControlSwaps(true, false);
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
         g_pm.policy_next_ms = now_ms;
@@ -936,12 +941,13 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
     if (g_pm.policy_locked) {
-        if (UsbC_AutoNeedSwapToSource(
-                g_pm.status.tps.role == TPS25751_ROLE_SOURCE,
-                g_pm.partner_source_caps_current,
-                PowerManager_AutoSourceMaxMv(),
-                g_pm.policy_swap_attempts,
-                PM_POLICY_MAX_SWAP_ATTEMPTS) &&
+        if ((UsbC_AutoAction(
+                 g_pm.status.tps.role == TPS25751_ROLE_SOURCE,
+                 g_pm.partner_source_caps_current,
+                 PowerManager_AutoSourceMaxMv(),
+                 g_pm.policy_swap_attempts,
+                 PM_POLICY_MAX_SWAP_ATTEMPTS) ==
+             USB_C_AUTO_SWAP_TO_SOURCE) &&
             PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
             Debug_Printf("[PD-POLICY] lost source role on 5V partner; recovering");
             g_pm.policy_locked = false;
@@ -1085,6 +1091,9 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  TPS25751_COMMAND_ERROR,
                                  TPS25751_REG_INT_EVENT,
                                  now_ms);
+    }
+    if (event.new_contract_consumer) {
+        g_pm.contract_seen_this_attach = true;
     }
     if (event.source_caps_received) {
         /* Role in this EVENT job can still be pre-attach. Keep the
@@ -1986,8 +1995,9 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.local_source_caps_pending) {
         return PM_JOB_READ_LOCAL_SOURCE_CAPS;
     }
-    if (g_pm.source_caps_trace_pending &&
-        (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
+    if (UsbC_AutoShouldReadSourceCaps(
+            g_pm.source_caps_trace_pending,
+            g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         return PM_JOB_TRACE_SOURCE_CAPS;
     }
     if (g_pm.bq_iin_trace_pending) {
