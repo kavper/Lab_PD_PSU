@@ -33,7 +33,10 @@
 #define BQ76922_RAM_BODY_DIODE           0x9273U
 #define BQ76922_RAM_CUV_THRESHOLD        0x9275U
 #define BQ76922_RAM_COV_THRESHOLD        0x9278U
+#define BQ76922_RAM_OCC_THRESHOLD        0x9280U
+#define BQ76922_RAM_OCD1_THRESHOLD       0x9282U
 #define BQ76922_RAM_SCD_THRESHOLD        0x9286U
+#define BQ76922_RAM_OCC_RECOVERY         0x9288U
 #define BQ76922_RAM_CC_GAIN              0x91A8U
 #define BQ76922_RAM_CAPACITY_GAIN        0x91ACU
 #define BQ76922_RAM_CFETOFF_PIN_CONFIG   0x92FAU
@@ -64,13 +67,13 @@
 #define BQ76922_FET_STATUS_PDSG          0x08U
 #define BQ76922_FET_STATUS_DCHG_PIN      0x10U
 #define BQ76922_FET_STATUS_CHG_DSG       (BQ76922_FET_STATUS_CHG | BQ76922_FET_STATUS_DSG)
-/* Safety Status A — TI TRM bit map (not the swapped CUV/COV masks we had). */
-#define BQ76922_SAFETY_A_SCD             0x01U
-#define BQ76922_SAFETY_A_OCD1            0x02U
-#define BQ76922_SAFETY_A_OCD2            0x04U
-#define BQ76922_SAFETY_A_OCC             0x08U
-#define BQ76922_SAFETY_A_COV             0x10U
-#define BQ76922_SAFETY_A_CUV             0x20U
+/* Safety Status A — TI TRM §12.2.3: SCD OCD2 OCD1 OCC COV CUV (bits 7..2). */
+#define BQ76922_SAFETY_A_SCD             0x80U
+#define BQ76922_SAFETY_A_OCD2            0x40U
+#define BQ76922_SAFETY_A_OCD1            0x20U
+#define BQ76922_SAFETY_A_OCC             0x10U
+#define BQ76922_SAFETY_A_COV             0x08U
+#define BQ76922_SAFETY_A_CUV             0x04U
 #define BQ76922_SAFETY_A_CURRENT \
     (BQ76922_SAFETY_A_SCD | BQ76922_SAFETY_A_OCD1 | BQ76922_SAFETY_A_OCD2 | \
      BQ76922_SAFETY_A_OCC)
@@ -94,6 +97,9 @@ typedef enum {
     BQ76922_INIT_PROT_B,
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
+    BQ76922_INIT_OCC_THRESH,
+    BQ76922_INIT_OCD1_THRESH,
+    BQ76922_INIT_OCC_RECOVERY,
     BQ76922_INIT_CC_GAIN,
     BQ76922_INIT_CAPACITY_GAIN,
     BQ76922_INIT_CFETOFF_PIN,
@@ -387,7 +393,9 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
     if (((sa & BQ76922_SAFETY_A_CURRENT) != 0U) || (sb != 0U) || (sc != 0U)) {
         flags |= BQ76922_FAULT_SAFETY;
     }
-    if (dev->snapshot.alert_latched || dev->snapshot.alert_pin) {
+    /* ALERT Pin Config defaults to unused/Hi-Z; STM32 pull-up would look
+     * asserted forever. Only trust software-latched Alarm Status. */
+    if (dev->snapshot.alert_latched) {
         flags |= BQ76922_FAULT_ALERT;
     }
 
@@ -647,6 +655,26 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_COV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
                                         BMS_COV_THRESHOLD_CODE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_OCC_THRESH:
+            /* Raise above default ~0.8 A @ 5 mOhm so USB-C charge works. */
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCC_THRESHOLD,
+                                        BMS_OCC_THRESHOLD_CODE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_OCD1_THRESH:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCD1_THRESHOLD,
+                                        BMS_OCD1_THRESHOLD_CODE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_OCC_RECOVERY:
+            /* I2 little-endian; +100 mA lets I≈0 clear a latched OCC. */
+            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_OCC_RECOVERY,
+                                        (uint16_t)(int16_t)BMS_OCC_RECOVERY_MA);
             delay_ms = 20U;
             break;
 

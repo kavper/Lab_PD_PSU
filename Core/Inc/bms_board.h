@@ -66,19 +66,20 @@
 #define BMS_CAPACITY_GAIN                (BMS_CC_GAIN * 298261.6178f)
 
 /*
- * Prot A bits: SCD|OCD2|OCD1|OCC|COV|CUV (bit0..5).
- * 0xFD = all of those except OCD2 (still covered by SCD for hard shorts).
- * CUV needs VCell Mode skip-VC4 first or blank OTP looks like undervoltage.
+ * Enabled Protections A (TI TRM bits 7..2):
+ *   SCD=0x80 OCD2=0x40 OCD1=0x20 OCC=0x10 COV=0x08 CUV=0x04
+ * 0xBC = SCD|OCD1|OCC|COV|CUV (no OCD2 — SCD covers hard shorts).
+ * Never use the reversed bit0..5 map; that labeled real OCC (0x10) as COV.
  */
-#define BMS_ENABLED_PROTECTIONS_A        0xFDU
+#define BMS_ENABLED_PROTECTIONS_A        0xBCU
 /* Prot B: leave OT/UT off until TS pins are proven; TS2 is the wake button. */
 #define BMS_ENABLED_PROTECTIONS_B        0x00U
 
 /*
- * FET Options 0x9308: SFET|HOST_FET_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
+ * FET Options 0x9308: SFET|HOST_FETOFF_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
  * PDSG_EN soft-starts PACK caps before DSG — without it ALL_FETS_ON into
- * VIN/GaN capacitance trips SCD (sa bit0 / often seen as 0x80|COV) and the
- * pack path collapses hard enough to BOR the 3V3 rail (PIN+POR reboot loop).
+ * VIN/GaN capacitance trips SCD (sa bit7) and the pack path collapses hard
+ * enough to BOR the 3V3 rail (PIN+POR reboot loop).
  */
 #define BMS_FET_OPTIONS                  0x1DU
 /*
@@ -97,6 +98,30 @@
  * 0x05 ≈ 100 mV → ~20 A across 5 mOhm.
  */
 #define BMS_SCD_THRESHOLD                0x05U
+/*
+ * OCC / OCD1 Threshold: U1, 2 mV/LSB on the sense resistor (not CC Gain).
+ * Default OCC=2 → 4 mV / 5 mOhm ≈ 0.8 A — trips immediately when BQ25731
+ * tries ~8 A charge. Code = I_mA * R_mOhm / 2000, clamped to TI min/max.
+ */
+#define BMS_OCC_THRESHOLD_MA             10000U /* ~10 A @ 5 mOhm → 50 mV → code 25 */
+#define BMS_OCD1_THRESHOLD_MA            15000U /* ~15 A @ 5 mOhm → 75 mV → code 38 */
+#define BMS_SENSE_MV_CODE_2MV(ma) \
+    ((uint8_t)((((uint32_t)(ma) * (uint32_t)BMS_SENSE_MOHM) + 1000U) / 2000U))
+#define BMS_OCC_THRESHOLD_CODE \
+    ((BMS_SENSE_MV_CODE_2MV(BMS_OCC_THRESHOLD_MA) < 2U) ? 2U : \
+     ((BMS_SENSE_MV_CODE_2MV(BMS_OCC_THRESHOLD_MA) > 62U) ? 62U : \
+      BMS_SENSE_MV_CODE_2MV(BMS_OCC_THRESHOLD_MA)))
+#define BMS_OCD1_THRESHOLD_CODE \
+    ((BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA) < 2U) ? 2U : \
+     ((BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA) > 100U) ? 100U : \
+      BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA)))
+/*
+ * OCC recovers when I <= this for Recovery:Time (default -200 mA needs
+ * discharge). With CHG latched off and a USB charger still raising PACK,
+ * I≈0 never meets -200 mA and PACK-TOS also fails — CHG stays off forever.
+ * +100 mA lets I≈0 clear OCC once the charge pulse is gone.
+ */
+#define BMS_OCC_RECOVERY_MA              100
 /* Body Diode Threshold 0x9273 (mA after CC Gain). */
 #define BMS_BODY_DIODE_THRESHOLD_MA      2000U
 

@@ -88,11 +88,11 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 
 1. Button (TS2→VSS) or charger (LD) exits SHUTDOWN → G4 boots from +VBAT.  
 2. Hold I2C4, settle ~300 ms, `SLEEP_DISABLE`, clear alarms.  
-3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, **CFETOFF/DFETOFF Pin Config=0x00**, CC Gain for 5 mΩ, exit, verify `vcell_rb`.  
-4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD/false COV.  
-5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug / false COV), clear alarms + `ALL_FETS_ON`; sticky `chg=0` with `fet` bit4 or false COV re-runs CFGUPDATE.
+3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, **OCC/OCD1 thresholds**, **CFETOFF/DFETOFF Pin Config=0x00**, CC Gain for 5 mΩ, exit, verify `vcell_rb`.  
+4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD/OCC.  
+5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug / OCC latch), clear alarms + `ALL_FETS_ON`; sticky current faults re-issue FET commands without latching `FAULT_BMS`.
 
-If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&1==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low**. Stuck `chg=0 dsg=1 fet=0x14 sa=0x10` was **CFETOFF pin force + false COV latch** — fixed by disabling CFETOFF/DFETOFF in CFGUPDATE. Reboot loops with `sa=0x90` / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.
+If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&0x80==0`) or OCC (`sa&0x10==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low**. Stuck `chg=0 dsg=1 fet=0x14 sa=0x10` was **real OCC** (default ~0.8 A @ 5 mΩ vs ~8 A charger) mislabeled as COV by a reversed Safety A bit map — fixed by OCC/OCD1 thresholds + TI bit map; CFETOFF/DFETOFF also forced unused. Reboot loops with `sa=0x90` (SCD|OCC) / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.
 
 ### Sense resistors / current limits (do not mix paths)
 
@@ -107,5 +107,8 @@ BMS protection numbers after CFGUPDATE:
 | Limit | Value | Meaning @ 5 mΩ |
 |---|---|---|
 | SCD threshold code `0x05` | ~100 mV | ~**20 A** short (hardware mV, not CC Gain) |
+| OCC threshold | ~50 mV (code 25) | ~**10 A** charge (default was ~0.8 A) |
+| OCD1 threshold | ~75 mV (code 38) | ~**15 A** discharge tier 1 |
 | Body diode | 2000 mA | After CC Gain fix = real ~2 A |
 | COV / CUV | 4250 / 2800 mV/cell | Unchanged |
+| Safety Status A | TI bits 7..2 | SCD=0x80 … OCC=0x10 COV=0x08 CUV=0x04 |

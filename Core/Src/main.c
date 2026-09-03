@@ -701,7 +701,8 @@ static void MX_GPIO_Init(void)
 
   GPIO_InitStruct.Pin = BMS_ALERT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  /* ALERT is unused (Hi-Z) until configured — pull-down avoids false high. */
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(BMS_ALERT_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = BUCK_TR_EN_Pin|BOOST_TR_EN_Pin;
