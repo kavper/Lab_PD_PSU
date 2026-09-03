@@ -801,6 +801,7 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
     g_pm.policy_swap_attempts = 0U;
     g_pm.partner_source_caps_current = false;
+    g_pm.source_caps_trace_pending = false;
     g_pm.policy_locked = false;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
     g_pm.pdo_report_pending = attached;
@@ -857,10 +858,13 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
     }
 
-    /* Partner can source more than 5 V → draw from it. Otherwise charge it. */
-    if (UsbC_AutoShouldSink(source_max_mv)) {
+    if (UsbC_AutoDesiredSink(current == TPS25751_ROLE_SOURCE,
+                             source_max_mv)) {
         desired = TPS25751_ROLE_SINK;
         reason = "PARTNER_SOURCE_ABOVE_5V";
+    } else if (current == TPS25751_ROLE_SOURCE) {
+        desired = TPS25751_ROLE_SOURCE;
+        reason = "WE_ARE_SOURCE";
     } else {
         desired = TPS25751_ROLE_SOURCE;
         reason = g_pm.partner_source_caps_current ?
@@ -1084,8 +1088,8 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  TPS25751_REG_INT_EVENT,
                                  now_ms);
     }
-    if (event.source_caps_received) {
-        g_pm.partner_source_caps_current = true;
+    if (event.source_caps_received &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         g_pm.source_caps_trace_pending = true;
     }
     if (event.plug_changed || event.source_caps_received ||
@@ -1507,7 +1511,15 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                              (unsigned long)now_ms, length);
                 break;
             }
-            g_pm.partner_source_caps_current = true;
+            g_pm.partner_source_caps_current =
+                (g_pm.status.tps.role == TPS25751_ROLE_SINK);
+            if (!g_pm.partner_source_caps_current) {
+                memset(&g_pm.partner_source_caps, 0,
+                       sizeof(g_pm.partner_source_caps));
+                Debug_Printf("[PD-TRACE t=%lu] ignoring Source PDOs while we are not Sink",
+                             (unsigned long)now_ms);
+                break;
+            }
             Debug_Printf("[PD-TRACE t=%lu] Source_Capabilities captured immediately",
                          (unsigned long)now_ms);
             PowerManager_LogCapabilities("SOURCE",

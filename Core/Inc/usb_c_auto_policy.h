@@ -32,6 +32,17 @@ static inline bool UsbC_AutoRejectsIncomingSwapToSink(uint8_t port_control_byte0
     return (port_control_byte0 & USB_C_PC_PROCESS_TO_SINK) == 0U;
 }
 
+/* Desired sink only when we are already sink AND partner advertises >5 V.
+ * If we are already source, stay source (stale Source PDOs must not SWSk). */
+static inline bool UsbC_AutoDesiredSink(bool we_are_source,
+                                        uint32_t partner_source_max_mv)
+{
+    if (we_are_source) {
+        return false;
+    }
+    return UsbC_AutoShouldSink(partner_source_max_mv);
+}
+
 /* Clear both Initiate bits. Keep TypeC Current in the low nibble. */
 static inline uint8_t UsbC_PortControlSwapBits(uint8_t current,
                                                bool accept_to_source,

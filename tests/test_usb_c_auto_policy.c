@@ -71,7 +71,18 @@ int main(void)
         return 1;
     }
 
-    /* Type-C current nibble must survive a hold/open cycle. */
+    if (UsbC_AutoDesiredSink(true, 20000U)) {
+        fprintf(stderr, "stale 20 V PDOs must not SWSk while sourcing a gadget\n");
+        return 1;
+    }
+    if (!UsbC_AutoDesiredSink(false, 20000U)) {
+        fprintf(stderr, "sink + 20 V charger must stay sink\n");
+        return 1;
+    }
+    if (UsbC_AutoDesiredSink(false, 5000U)) {
+        fprintf(stderr, "sink + 5 V partner must become source\n");
+        return 1;
+    }
     if ((UsbC_PortControlSwapBits(0x53U, true, false) & 0x0FU) != 0x03U) {
         fprintf(stderr, "TypeC current nibble was overwritten\n");
         return 1;
