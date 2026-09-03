@@ -766,10 +766,15 @@ static void PowerManager_QueuePortControlForUserMode(void)
             (void)PowerManager_QueuePortControlSwaps(true, false);
             break;
         case POWER_MANAGER_USER_AUTO:
-            /* Accept both directions until AUTO decides, and never
-             * auto-initiate a swap from EEPROM policy. */
-            (void)PowerManager_QueuePortControlSwaps(true, true);
+        {
+            bool accept_to_source = false;
+            bool accept_to_sink = false;
+
+            UsbC_AutoDefaultSwapAccept(&accept_to_source, &accept_to_sink);
+            (void)PowerManager_QueuePortControlSwaps(accept_to_source,
+                                                     accept_to_sink);
             break;
+        }
         default:
             break;
     }
@@ -799,16 +804,12 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.policy_locked = false;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
     g_pm.pdo_report_pending = attached;
-    /* Re-open PR_SWAP processing so the next partner is not stuck with
-     * the previous attach's hold bits (otherwise SWSr after a charger
-     * session can be rejected). */
+    /* Restore AUTO default hold (reject swap-to-sink, allow SWSr). */
     if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
         PowerManager_QueuePortControlForUserMode();
     }
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
-        /* Try.SNK: wait for partner Source PDOs (or a source-only attach)
-         * before choosing a role. */
         g_pm.policy_phase = PM_POLICY_WAIT;
         g_pm.policy_next_ms = now_ms + PM_POLICY_CAPS_WAIT_MS;
         Debug_Printf("[PD-POLICY] attach role=%s; wait up to %lums for partner Source PDOs",
@@ -927,8 +928,8 @@ static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
     }
     if ((g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
         PowerManager_HasTypecPowerConnection()) {
-        /* Partner presented Rd. Charge it; do not wait for Type-C debug
-         * state 0x60 or the partner will PR_SWAP first. */
+        /* Partner presented Rd. Charge it. ProcessSwapToSink is already
+         * off in AUTO, so Apple cannot PR_SWAP this source contract away. */
         return true;
     }
     if (g_pm.partner_source_caps_current && sink_contract) {

@@ -17,6 +17,21 @@ static inline bool UsbC_AutoShouldSink(uint32_t partner_source_max_mv)
     return partner_source_max_mv > 5000U;
 }
 
+/* AUTO never accepts PR_SWAP to sink. That swap is what Apple DRP uses to
+ * steal VBUS after we have already started charging a gadget. */
+static inline void UsbC_AutoDefaultSwapAccept(bool *accept_to_source,
+                                              bool *accept_to_sink)
+{
+    *accept_to_source = true;
+    *accept_to_sink = false;
+}
+
+/* Partner asked us to become sink after we are sourcing. Must be rejected. */
+static inline bool UsbC_AutoRejectsIncomingSwapToSink(uint8_t port_control_byte0)
+{
+    return (port_control_byte0 & USB_C_PC_PROCESS_TO_SINK) == 0U;
+}
+
 /* Clear both Initiate bits. Keep TypeC Current in the low nibble. */
 static inline uint8_t UsbC_PortControlSwapBits(uint8_t current,
                                                bool accept_to_source,
