@@ -54,15 +54,16 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 | `bq_vreg_mv` `bq_ichg_set_ma` | charge targets |
 | `bq_fast` `bq_pre` `bq_in` | phase flags |
 | `tps_vbus_mv` `cc1` `cc2` `role` `conn` | Type-C / PD path |
-| `pd_role` `pd_mv` `pd_ma` | PM snapshot contract (`pd_role`: 1=sink charge, 2=source/OTG) |
-| `bq_otg` | BQ25731 `IN_OTG`. Must stay `0` in default AUTO/SINK. `1` + negative `bq_ibat_ma` / `i_pack_ma` means the pack is sourcing USB-C |
+| `pd_role` `pd_mv` `pd_ma` | PM snapshot contract (`pd_role`: 1=sink charge, 2=source) |
+| `bq_otg` | BQ25731 `IN_OTG`. Stays `0` while charging the pack. `1` only after a real Source attach (`conn` 6/7) or `USB SOURCE`. |
 
-Default USB-C policy after this firmware: **sink / charge-from-adapter**. TPS `PORT_CONFIG` is sink-only (no source PDO advertise). BQ `OTG/VAP/FRS` (PA4) is low unless the host sends `USB SOURCE`.
+Default USB-C: **AUTO = DRP + Try.SNK** (prefer charging the pack). 9 V source/sink PDOs stay in the TPS image.
 
 Expected `TC` after flash:
 
-- **iPad/iPhone as charger** (partner can source): `role` sink, `pd_role=1`, `bq_otg=0`, `bq_fast=1`, `bq_ibat_ma` charge polarity (positive), `i_pack_ma` ≥ 0. Host `T` line `pd=1` with the **partner** PDO (not our old 9 V source contract).
-- **iPad/iPhone as gadget** (Rd only, cannot source): no sink contract, `bq_otg=0`, pack must **not** discharge into the tablet. `T pd=0`. Power-out is only `USB SOURCE` (future / explicit).
+- **iPhone (good, keep)**: later `conn=6/7`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`). That is a completed contract — do not strip 9 V PDOs.
+- **iPad (was broken)**: long `conn=0` with `cc1=1 cc2=2` (Ra/Rd), `pd_mv=0`, `tps_vbus` 4998↔0, ghost `bq_vbus` 10.5–13.6 V, `bq_iin=0`, no Source_Cap/Request. Try.SNK + OTG gate target a Sink contract (or iPad-as-source charging the pack), not a pack-sourced 9 V gadget session.
+- Accidental OTG: PA4 stays low unless `USB SOURCE` or AUTO Source attach with `conn>=6`.
 
 ---
 
@@ -76,7 +77,7 @@ Expected `TC` after flash:
 | `BMS FORCE` / `BMSREINIT` | full CONFIG_UPDATE + `ALL_FETS_ON` (RAM only, **no OTP**). Can hold I2C4 (starve BQ/TPS) and PACK inrush may PIN/POR-reboot the G4 — do not click casually while running. |
 | `VERBOSE 0\|1` | debug logs on same UART (keep `0` for parsers) |
 | `ON` / `OFF` / `SET` / `ILIM` / `PERMIT` / `REMOTE` | power / LDO |
-| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. Default **AUTO = sink-only / charge-first**. `USB SOURCE` is the only mode that raises BQ OTG and advertises source PDOs (power a phone/tablet from the pack). |
+| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. Default **AUTO = DRP + Try.SNK** (charge pack from a dual-role partner; iPhone 9 V Source still allowed). `USB SOURCE` forces pack-powered output. |
 | `CLR` | clear sticky PSU fault latch |
 
 ---

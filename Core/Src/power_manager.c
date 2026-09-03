@@ -289,9 +289,11 @@ static TPS25751_PortMode_t PowerManager_MapPortMode(
         case POWER_MANAGER_USER_SINK_ONLY: return TPS25751_PORT_SINK_ONLY;
         case POWER_MANAGER_USER_SOURCE_ONLY: return TPS25751_PORT_SOURCE_ONLY;
         case POWER_MANAGER_USER_OFF: return TPS25751_PORT_DISABLED;
-        /* AUTO: sink-only so TX_SOURCE_CAPS are not advertised.  Use
-         * `USB SOURCE` for pack-powered USB-C output. */
-        default: return TPS25751_PORT_SINK_ONLY;
+        /* AUTO stays DRP.  Try.SNK (patched in PORT_CONFIG) prefers a
+         * dual-role partner as the source so the pack can charge.  A
+         * sink-only partner such as iPhone still attaches as our Source
+         * via TryWait.SRC and can take 9 V. */
+        default: return TPS25751_PORT_DRP;
     }
 }
 
@@ -306,18 +308,30 @@ static void PowerManager_SetOtgPin(bool high)
 
 static void PowerManager_MaintainOtgPermissionPin(void)
 {
-    if ((!g_pm.status.tps.attached) ||
-        (g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
-        (g_pm.status.requested_mode != POWER_MANAGER_USER_SOURCE_ONLY)) {
+    bool allow_otg;
+
+    if ((g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
+        (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF) ||
+        (!g_pm.status.tps.attached) ||
+        (g_pm.status.tps.role != TPS25751_ROLE_SOURCE)) {
         g_pm.status.source_fault_latched = false;
     }
 
-    /* PA4 is the BQ25731 OTG/VAP/FRS permission strap.  Only raise it in
-     * explicit USB SOURCE / power-out mode.  AUTO and SINK keep it low so
-     * TPS cannot reverse-boost the pack into a tablet that requested our
-     * source PDOs. */
-    PowerManager_SetOtgPin(
-        g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY);
+    /* PA4 is BQ25731 OTG/VAP/FRS.  A charge session (AUTO/SINK, or AUTO
+     * with no completed Source attach) must not reverse-boost.  Explicit
+     * USB SOURCE, or AUTO after ConnectionState 6/7 as Source (iPhone 9 V),
+     * may raise it.  iPad flap is conn=0 and keeps PA4 low. */
+    if (g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY) {
+        allow_otg = true;
+    } else if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+               g_pm.status.tps.attached &&
+               (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+               (g_pm.status.tps.connection_state >= 6U)) {
+        allow_otg = true;
+    } else {
+        allow_otg = false;
+    }
+    PowerManager_SetOtgPin(allow_otg);
 }
 
 static void PowerManager_UpdatePdSnapshot(void)
@@ -757,18 +771,21 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.pdo_report_pending = attached;
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
-        /* Charge-first: AUTO never stays Source.  An iPad DRP that accepted
-         * our TX_SOURCE_CAPS is a gadget taking pack power, not a charger. */
-        g_pm.policy_desired_role = TPS25751_ROLE_SINK;
         if ((g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
             (g_pm.status.tps.connection_state >= 6U)) {
+            /* Partner presented Rd (iPhone).  Keep Source so 5 V then 9 V
+             * can complete.  Do not PR_SWAP this away. */
             g_pm.partner_sink_observed = true;
-            g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_ROLE_DRIFT_MS;
+            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_next_ms = 0U;
             if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
-                Debug_Printf("[PD-POLICY] attach role=SOURCE; AUTO charge-first, requesting PR_SWAP to Sink");
+                Debug_Printf("[PD-POLICY] attach role=SOURCE partner=Sink(Rd); keep Source (iPhone 9V path)");
             }
         } else {
+            /* Dual-role partner that sourced first (iPad after Try.SNK):
+             * wait for Sink contract; do not PR_SWAP to Source. */
+            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
             g_pm.policy_phase = PM_POLICY_DONE;
             g_pm.policy_next_ms = 0U;
             if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
@@ -821,19 +838,28 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         }
     }
 
-    /* AUTO is charge-first.  Partner sink PDOs / Rd must not flip us to
-     * Source — that is how an iPad gadget drained the pack over OTG. */
-    desired = TPS25751_ROLE_SINK;
-    action = "DRAW_FROM_PARTNER";
-    if (source_max_mv > 5000U) {
-        reason = "PARTNER_SOURCE_ABOVE_5V";
-    } else if (current_sink_contract ||
-               (g_pm.partner_source_caps.count > 0U)) {
-        reason = "AUTO_CHARGE_FIRST_SINK";
-    } else if ((g_pm.partner_sink_caps.count > 0U) ||
-               g_pm.partner_sink_observed) {
-        reason = "AUTO_REFUSE_SOURCE_TO_PARTNER_SINK";
+    /* Charge-first when the partner can source.  Keep an existing Source
+     * contract (iPhone 9 V).  Never PR_SWAP a sink charge session to OTG. */
+    if (current_sink_contract || (source_max_mv > 5000U) ||
+        (g_pm.partner_source_caps.count > 0U)) {
+        desired = TPS25751_ROLE_SINK;
+        action = "DRAW_FROM_PARTNER";
+        reason = (source_max_mv > 5000U) ?
+                 "PARTNER_SOURCE_ABOVE_5V" : "AUTO_CHARGE_FIRST_SINK";
+    } else if ((current == TPS25751_ROLE_SOURCE) &&
+               g_pm.status.tps.active_pdo.valid &&
+               g_pm.status.tps.active_rdo.valid) {
+        desired = TPS25751_ROLE_SOURCE;
+        action = "KEEP_SOURCE_CONTRACT";
+        reason = "IPHONE_OR_SINK_ONLY_9V_PATH";
+    } else if ((current == TPS25751_ROLE_SOURCE) &&
+               (g_pm.status.tps.connection_state >= 6U)) {
+        desired = TPS25751_ROLE_SOURCE;
+        action = "KEEP_SOURCE_ATTACH";
+        reason = "PARTNER_PRESENTED_RD";
     } else {
+        desired = TPS25751_ROLE_SINK;
+        action = "DRAW_FROM_PARTNER";
         reason = "AUTO_DEFAULT_SINK";
     }
 
@@ -850,6 +876,10 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
 
     if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN) ||
         g_pm.policy_swap_attempted) {
+        g_pm.policy_phase = PM_POLICY_DONE;
+    } else if (desired == TPS25751_ROLE_SOURCE) {
+        /* AUTO does not PR_SWAP to Source; Type-C Try.SNK/TryWait.SRC
+         * establishes that attach. */
         g_pm.policy_phase = PM_POLICY_DONE;
     } else {
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
@@ -879,34 +909,29 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         ((g_pm.status.tps.active_pdo_raw & (1UL << 29)) != 0U);
 
     if ((current == TPS25751_ROLE_SOURCE) &&
-        (g_pm.policy_desired_role != TPS25751_ROLE_SINK)) {
+        (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN)) {
         g_pm.partner_sink_observed = true;
-        g_pm.policy_desired_role = TPS25751_ROLE_SINK;
-        Debug_Printf("[PD-POLICY] desired=SINK: AUTO will not remain Source (Rd/OTG)");
+        g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
+        Debug_Printf("[PD-POLICY] desired=SOURCE established from Type-C Rd attach");
     }
 
     if (active_source_pdo_is_drp && !g_pm.partner_sink_observed) {
         g_pm.partner_sink_observed = true;
-        Debug_Printf("[PD-POLICY] partner Sink capability noted by DRP bit in active PDO=0x%08lX (AUTO stays Sink)",
+        Debug_Printf("[PD-POLICY] partner Sink capability noted by DRP bit in active PDO=0x%08lX",
                      (unsigned long)g_pm.status.tps.active_pdo_raw);
     }
 
     if (contract_valid && (current == TPS25751_ROLE_SOURCE)) {
         if (!g_pm.partner_sink_observed) {
             g_pm.partner_sink_observed = true;
-            Debug_Printf("[PD-POLICY] partner Sink seen on our Source contract PDO=0x%08lX RDO=0x%08lX",
+            Debug_Printf("[PD-POLICY] partner Sink confirmed by Source contract PDO=0x%08lX RDO=0x%08lX",
                          (unsigned long)g_pm.status.tps.active_pdo_raw,
                          (unsigned long)g_pm.status.tps.active_rdo_raw);
         }
-        if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
-            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
-            Debug_Printf("[PD-POLICY] desired=SINK: refuse Source contract in AUTO");
-        }
+        g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
     } else if (contract_valid && (current == TPS25751_ROLE_SINK)) {
-        if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
-            Debug_Printf("[PD-POLICY] desired=SINK: partner contract is %lumV",
-                         (unsigned long)g_pm.status.tps.active_pdo.max_voltage_mv);
-        }
+        /* Keep charging the pack.  Do not PR_SWAP to Source just because
+         * the partner Source PDO has Dual-Role Power. */
         g_pm.policy_desired_role = TPS25751_ROLE_SINK;
     }
 
@@ -934,10 +959,15 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     }
 
     g_pm.policy_swap_attempted = false;
+    if (g_pm.policy_desired_role == TPS25751_ROLE_SOURCE) {
+        g_pm.policy_phase = PM_POLICY_DONE;
+        Debug_Printf("[PD-POLICY] AUTO will not PR_SWAP to Source; keep Type-C role");
+        return;
+    }
     g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     g_pm.policy_next_ms = now_ms;
     g_pm.policy_role_mismatch_since_ms = 0U;
-    Debug_Printf("[PD-POLICY] enforcing maintained role target=SINK (AUTO charge-first)");
+    Debug_Printf("[PD-POLICY] enforcing maintained role target=SINK");
 }
 
 static void PowerManager_HandleTpsError(TPS25751_Status_t status,
@@ -1936,9 +1966,10 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         case PM_POLICY_READ_SINK_CAPS: return PM_JOB_READ_SINK_CAPS;
         case PM_POLICY_READ_SOURCE_CAPS: return PM_JOB_READ_SOURCE_CAPS;
         case PM_POLICY_SWAP_TO_SOURCE:
-            /* AUTO must not PR_SWAP to Source; force Sink. */
-            g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
-            return PM_JOB_SWAP_TO_SINK;
+            /* AUTO never issues PR_SWAP to Source (iPad DRP).  iPhone 9 V
+             * is a native Type-C Source attach, not a swap. */
+            g_pm.policy_phase = PM_POLICY_DONE;
+            return PM_JOB_NONE;
         case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
     }
@@ -2082,7 +2113,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG/VAP/FRS=LOW unless USB SOURCE AUTO=SINK_ONLY",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG gated AUTO=DRP+Try.SNK",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);
@@ -2190,11 +2221,7 @@ bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out)
     if (out != NULL) {
         *out = g_pm.status.pd_snapshot;
     }
-    /* Host `T` pd=1 is a sink/charge contract only.  A Source/OTG 9 V/3 A
-     * contract is not input power and must not look like a charger PDO. */
     return g_pm.status.pd_snapshot.attached &&
-           (g_pm.status.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK) &&
-           (!g_pm.status.bq.in_otg) &&
            (g_pm.status.pd_snapshot.active_rdo_raw != 0U) &&
            (g_pm.status.pd_snapshot.contract_voltage_mv != 0U) &&
            (g_pm.status.pd_snapshot.contract_power_mw != 0U);

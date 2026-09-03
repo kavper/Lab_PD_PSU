@@ -778,9 +778,10 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* DRP uses Try.SNK (TRM TypeC Support Options = 2h) so a dual-role
-     * tablet/laptop is asked to source first.  Try.SRC was advertising our
-     * TX_SOURCE_CAPS (5 V / 9 V / …) and winning against iPad DRP.
+    /* DRP uses Try.SNK (TRM TypeC Support Options = 2h).  Try.SRC raced
+     * dual-role iPad (conn=0, VBUS 5 V flap, no PD contract).  Try.SNK
+     * asks that partner to source so we can take a Sink contract; a
+     * sink-only iPhone still attaches via TryWait.SRC and can request 9 V.
      * Optional Try states do not apply to the single-role modes. */
     typec_options = (mode == TPS25751_PORT_DRP) ?
                     TPS25751_TYPEC_TRY_SNK : 0U;
