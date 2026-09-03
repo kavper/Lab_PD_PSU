@@ -215,41 +215,39 @@ static BQ76922_Status_t BQ76922_WriteRamBlock(BQ76922_Device_t *dev,
                                               const uint8_t *data,
                                               uint8_t length)
 {
-    uint8_t addr_buf[2];
     uint8_t whole_block[6];
     uint8_t checksum_block[2];
     uint16_t sum = 0U;
     uint8_t i;
+    uint8_t block_len;
     BQ76922_Status_t status;
 
     if ((dev == NULL) || (data == NULL) || (length == 0U) || (length > 4U)) {
         return BQ76922_INVALID_ARG;
     }
 
-    addr_buf[0] = (uint8_t)(address & 0xFFU);
-    addr_buf[1] = (uint8_t)((address >> 8) & 0xFFU);
-
-    status = BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, addr_buf, 2U);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteDirect(dev, BQ76922_CMD_RAM_DATA, data, length);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-
-    whole_block[0] = addr_buf[0];
-    whole_block[1] = addr_buf[1];
+    /* TI protocol: one write to 0x3E with [addr_lo, addr_hi, data…], then
+     * checksum+length at 0x60. Length byte = (addr+data bytes) + 2.
+     * Splitting data to 0x40 with length=data_len+2 silently drops the write
+     * (vcell_rb stays 0x0000 after EXIT_CFGUPDATE). */
+    whole_block[0] = (uint8_t)(address & 0xFFU);
+    whole_block[1] = (uint8_t)((address >> 8) & 0xFFU);
     for (i = 0U; i < length; i++) {
         whole_block[2U + i] = data[i];
     }
+    block_len = (uint8_t)(length + 2U);
 
-    for (i = 0U; i < (uint8_t)(length + 2U); i++) {
+    for (i = 0U; i < block_len; i++) {
         sum = (uint16_t)(sum + whole_block[i]);
     }
 
+    status = BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, whole_block, block_len);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+
     checksum_block[0] = (uint8_t)(~sum & 0xFFU);
-    checksum_block[1] = (uint8_t)(length + 2U);
+    checksum_block[1] = (uint8_t)(block_len + 2U); /* +2 per TI / BQ769x2_SetRegister */
     return BQ76922_WriteDirect(dev, BQ76922_CMD_RAM_CHECKSUM, checksum_block, 2U);
 }
 
@@ -549,26 +547,31 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 
         case BQ76922_INIT_VCELL_MODE:
             status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_PROT_A:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_A,
                                         BMS_ENABLED_PROTECTIONS_A);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_PROT_B:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_B,
                                         BMS_ENABLED_PROTECTIONS_B);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_CUV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CUV_THRESHOLD,
                                         BMS_CUV_THRESHOLD_CODE);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_COV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
                                         BMS_COV_THRESHOLD_CODE);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_EXIT_CFG:
