@@ -38,14 +38,15 @@ int main(void)
         return 1;
     }
 
-    /* Charger 20 V: we are already sink, lock by also rejecting swap-to-source. */
-    hold_sink = UsbC_PortControlSwapBits(auto_default, false, true);
+    /* Charger 20 V: lock by rejecting both incoming PR_SWAPs. */
+    hold_sink = UsbC_PortControlSwapBits(auto_default, false, false);
     if (UsbC_AutoShouldSink(20000U) == false) {
         fprintf(stderr, "20 V charger must be sunk\n");
         return 1;
     }
-    if ((hold_sink & USB_C_PC_PROCESS_TO_SOURCE) != 0U) {
-        fprintf(stderr, "locked sink still accepts swap to source\n");
+    if ((hold_sink & USB_C_PC_PROCESS_TO_SOURCE) != 0U ||
+        (hold_sink & USB_C_PC_PROCESS_TO_SINK) != 0U) {
+        fprintf(stderr, "locked sink still accepts a PR_SWAP\n");
         return 1;
     }
 

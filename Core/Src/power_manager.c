@@ -792,8 +792,8 @@ static void PowerManager_LockAutoRole(TPS25751_PowerRole_t role,
         (void)PowerManager_QueuePortControlSwaps(true, false);
         Debug_Printf("[PD-POLICY] lock=SOURCE; reject partner PR_SWAP to sink");
     } else if (role == TPS25751_ROLE_SINK) {
-        (void)PowerManager_QueuePortControlSwaps(false, true);
-        Debug_Printf("[PD-POLICY] lock=SINK; reject partner PR_SWAP to source");
+        (void)PowerManager_QueuePortControlSwaps(false, false);
+        Debug_Printf("[PD-POLICY] lock=SINK; reject all partner PR_SWAP");
     }
 }
 
@@ -2011,7 +2011,6 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
 
     switch (g_pm.policy_phase) {
         case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
-        case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
     }
 }
