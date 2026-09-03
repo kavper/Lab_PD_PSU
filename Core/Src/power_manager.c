@@ -2016,21 +2016,22 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.event_clear_pending) {
         return PM_JOB_CLEAR_EVENT;
     }
-    if (g_pm.local_source_caps_pending) {
-        return PM_JOB_READ_LOCAL_SOURCE_CAPS;
-    }
     if (UsbC_AutoShouldReadSourceCaps(
             g_pm.source_caps_trace_pending,
             g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         return PM_JOB_TRACE_SOURCE_CAPS;
     }
-    if (g_pm.bq_iin_trace_pending) {
-        return PM_JOB_BQ_TRACE_IIN_HOST;
-    }
 
     policy_job = PowerManager_SelectPolicyJob(now_ms);
     if (policy_job != PM_JOB_NONE) {
         return policy_job;
+    }
+
+    if (g_pm.local_source_caps_pending) {
+        return PM_JOB_READ_LOCAL_SOURCE_CAPS;
+    }
+    if (g_pm.bq_iin_trace_pending) {
+        return PM_JOB_BQ_TRACE_IIN_HOST;
     }
 
     if (g_pm.bq_init == PM_BQ_INIT_WAIT &&
