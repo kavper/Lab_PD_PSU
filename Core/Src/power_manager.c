@@ -44,13 +44,9 @@ typedef enum {
     PM_JOB_READ_ACTIVE_RDO,
     PM_JOB_READ_EVENT,
     PM_JOB_CLEAR_EVENT,
-    PM_JOB_GET_SINK_CAPS,
-    PM_JOB_READ_SINK_CAPS,
-    PM_JOB_READ_SOURCE_CAPS,
     PM_JOB_READ_LOCAL_SOURCE_CAPS,
     PM_JOB_TRACE_SOURCE_CAPS,
     PM_JOB_SWAP_TO_SOURCE,
-    PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_TRACE_IIN_HOST,
     PM_JOB_BQ_READ_OPTION0,
     PM_JOB_BQ_WRITE_STARTUP_OPTION0,
@@ -88,7 +84,6 @@ typedef enum {
     PM_POLICY_WAIT,
     PM_POLICY_DECIDE,
     PM_POLICY_SWAP_TO_SOURCE,
-    PM_POLICY_SWAP_TO_SINK,
     PM_POLICY_DONE
 } PowerManager_PolicyPhase_t;
 
@@ -156,7 +151,6 @@ typedef struct {
     bool typec_trace_valid;
     TPS25751_PowerRole_t policy_desired_role;
     TPS25751_Capabilities_t local_source_caps;
-    TPS25751_Capabilities_t partner_sink_caps;
     TPS25751_Capabilities_t partner_source_caps;
 } PowerManager_Context_t;
 
@@ -216,13 +210,9 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_READ_ACTIVE_RDO: return "READ_ACTIVE_RDO";
         case PM_JOB_READ_EVENT: return "READ_EVENT";
         case PM_JOB_CLEAR_EVENT: return "CLEAR_EVENT";
-        case PM_JOB_GET_SINK_CAPS: return "GET_SINK_CAPS";
-        case PM_JOB_READ_SINK_CAPS: return "READ_SINK_CAPS";
-        case PM_JOB_READ_SOURCE_CAPS: return "READ_SOURCE_CAPS";
         case PM_JOB_READ_LOCAL_SOURCE_CAPS: return "READ_LOCAL_SOURCE_CAPS";
         case PM_JOB_TRACE_SOURCE_CAPS: return "TRACE_SOURCE_CAPS";
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
-        case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_TRACE_IIN_HOST: return "BQ_TRACE_IIN_HOST";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION0: return "BQ_WRITE_QUIET_OPTION0";
@@ -746,6 +736,21 @@ static void PowerManager_TryLogContractPdos(void)
     g_pm.pdo_report_pending = false;
 }
 
+static uint32_t PowerManager_AutoSourceMaxMv(void)
+{
+    uint32_t source_max_mv = 0U;
+
+    if (g_pm.partner_source_caps_current) {
+        source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
+    }
+    if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+        g_pm.status.tps.active_pdo.valid &&
+        (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
+        source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
+    }
+    return source_max_mv;
+}
+
 static bool PowerManager_QueuePortControlSwaps(bool accept_to_source,
                                                bool accept_to_sink)
 {
@@ -803,7 +808,6 @@ static void PowerManager_LockAutoRole(TPS25751_PowerRole_t role,
 
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
-    memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
     g_pm.policy_swap_attempts = 0U;
     g_pm.partner_source_caps_current = false;
@@ -849,39 +853,33 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
 {
     TPS25751_PowerRole_t current = g_pm.status.tps.role;
     TPS25751_PowerRole_t desired;
-    uint32_t source_max_mv = 0U;
-    bool current_sink_contract =
-        (current == TPS25751_ROLE_SINK) &&
-        g_pm.status.tps.active_pdo.valid &&
-        g_pm.status.tps.active_rdo.valid;
+    uint32_t source_max_mv = PowerManager_AutoSourceMaxMv();
+    bool we_are_source = (current == TPS25751_ROLE_SOURCE);
     const char *reason;
 
-    if (g_pm.partner_source_caps_current) {
-        source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
-    }
-    if (current_sink_contract &&
-        (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
-        source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
-    }
-
-    if (UsbC_AutoDesiredSink(current == TPS25751_ROLE_SOURCE,
-                             source_max_mv)) {
+    if (UsbC_AutoDesiredSink(we_are_source, source_max_mv)) {
         desired = TPS25751_ROLE_SINK;
         reason = "PARTNER_SOURCE_ABOVE_5V";
-    } else if (current == TPS25751_ROLE_SOURCE) {
+    } else if (we_are_source) {
         desired = TPS25751_ROLE_SOURCE;
         reason = "WE_ARE_SOURCE";
-    } else {
+    } else if (UsbC_AutoNeedSwapToSource(we_are_source,
+                                         g_pm.partner_source_caps_current,
+                                         source_max_mv,
+                                         g_pm.policy_swap_attempts,
+                                         PM_POLICY_MAX_SWAP_ATTEMPTS)) {
         desired = TPS25751_ROLE_SOURCE;
-        reason = g_pm.partner_source_caps_current ?
-                 "PARTNER_SOURCE_ONLY_5V" :
-                 "PARTNER_IS_SINK";
+        reason = "PARTNER_SOURCE_ONLY_5V";
+    } else {
+        desired = TPS25751_ROLE_SINK;
+        reason = "STAY_SINK";
     }
 
     g_pm.policy_desired_role = desired;
-    Debug_Printf("[PD-POLICY] source_pdos=%u source_max=%lumV current=%s desired=%s reason=%s",
+    Debug_Printf("[PD-POLICY] source_pdos=%u source_max=%lumV caps=%u current=%s desired=%s reason=%s",
                  g_pm.partner_source_caps.count,
                  (unsigned long)source_max_mv,
+                 g_pm.partner_source_caps_current ? 1U : 0U,
                  PowerManager_RoleToString(current),
                  PowerManager_RoleToString(desired),
                  reason);
@@ -892,7 +890,8 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         return;
     }
 
-    if (UsbC_AutoNeedSwapToSource(current == TPS25751_ROLE_SOURCE,
+    if (UsbC_AutoNeedSwapToSource(we_are_source,
+                                  g_pm.partner_source_caps_current,
                                   source_max_mv,
                                   g_pm.policy_swap_attempts,
                                   PM_POLICY_MAX_SWAP_ATTEMPTS)) {
@@ -907,21 +906,10 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
 
 static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
 {
-    bool sink_contract =
-        (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-        g_pm.status.tps.active_pdo.valid &&
-        g_pm.status.tps.active_rdo.valid;
-    uint32_t source_max_mv = 0U;
+    uint32_t source_max_mv = PowerManager_AutoSourceMaxMv();
 
     if (g_pm.policy_swap_attempts > 0U) {
         return PowerManager_TickReached(now_ms, g_pm.policy_next_ms);
-    }
-    if (g_pm.partner_source_caps_current) {
-        source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
-    }
-    if (sink_contract &&
-        (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
-        source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
     }
     if (UsbC_AutoShouldSink(source_max_mv)) {
         return true;
@@ -932,7 +920,8 @@ static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
          * off in AUTO, so Apple cannot PR_SWAP this source contract away. */
         return true;
     }
-    if (g_pm.partner_source_caps_current && sink_contract) {
+    if (g_pm.partner_source_caps_current &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         return true;
     }
     return PowerManager_TickReached(now_ms, g_pm.policy_next_ms);
@@ -947,19 +936,10 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
     if (g_pm.policy_locked) {
-        uint32_t source_max_mv = 0U;
-
-        if (g_pm.partner_source_caps_current) {
-            source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
-        }
-        if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-            g_pm.status.tps.active_pdo.valid &&
-            (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
-            source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
-        }
         if (UsbC_AutoNeedSwapToSource(
                 g_pm.status.tps.role == TPS25751_ROLE_SOURCE,
-                source_max_mv,
+                g_pm.partner_source_caps_current,
+                PowerManager_AutoSourceMaxMv(),
                 g_pm.policy_swap_attempts,
                 PM_POLICY_MAX_SWAP_ATTEMPTS) &&
             PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
@@ -971,7 +951,6 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
     if ((g_pm.policy_phase == PM_POLICY_SWAP_TO_SOURCE) ||
-        (g_pm.policy_phase == PM_POLICY_SWAP_TO_SINK) ||
         g_pm.port_control_write_pending) {
         return;
     }
@@ -1142,25 +1121,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         if (completed_job == PM_JOB_READ_BOOT_FLAGS) {
             g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
             PowerManager_HandleTpsError(operation_status, now_ms);
-        } else if (completed_job == PM_JOB_GET_SINK_CAPS) {
-            memset(&g_pm.partner_sink_caps, 0,
-                   sizeof(g_pm.partner_sink_caps));
-            Debug_Printf("[PD-POLICY] partner did not provide Sink PDOs task=%u status=%s",
-                         g_pm.tps.task_return_code,
-                         TPS25751_StatusToString(operation_status));
-            if (operation_status != TPS25751_COMMAND_ERROR) {
-                PowerManager_HandleTpsError(operation_status, now_ms);
-            }
-        } else if (completed_job == PM_JOB_READ_SINK_CAPS) {
-            memset(&g_pm.partner_sink_caps, 0,
-                   sizeof(g_pm.partner_sink_caps));
-            PowerManager_HandleTpsError(operation_status, now_ms);
-        } else if (completed_job == PM_JOB_READ_SOURCE_CAPS) {
-            memset(&g_pm.partner_source_caps, 0,
-                   sizeof(g_pm.partner_source_caps));
-            g_pm.policy_phase = PM_POLICY_DECIDE;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            PowerManager_HandleTpsError(operation_status, now_ms);
         } else if (completed_job == PM_JOB_READ_LOCAL_SOURCE_CAPS) {
             memset(&g_pm.local_source_caps, 0,
                    sizeof(g_pm.local_source_caps));
@@ -1188,8 +1148,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_READ_PORT_CONTROL) {
             g_pm.port_control_valid = false;
             PowerManager_HandleTpsError(operation_status, now_ms);
-        } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
-                   (completed_job == PM_JOB_SWAP_TO_SINK)) {
+        } else if (completed_job == PM_JOB_SWAP_TO_SOURCE) {
             Debug_Printf("[PD-POLICY] role swap rejected target=%s task=%u status=%s attempts=%u/%u",
                          PowerManager_RoleToString(g_pm.policy_desired_role),
                          g_pm.tps.task_return_code,
@@ -1460,47 +1419,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                    sizeof(g_pm.event_to_clear));
             break;
 
-        case PM_JOB_GET_SINK_CAPS:
-            break;
-
-        case PM_JOB_READ_SINK_CAPS:
-            if (!TPS25751_DecodeCapabilities(&g_pm.partner_sink_caps,
-                                             data, length)) {
-                memset(&g_pm.partner_sink_caps, 0,
-                       sizeof(g_pm.partner_sink_caps));
-                Debug_Printf("[PD-POLICY] invalid Sink PDO payload; ignoring it");
-                break;
-            }
-            if (g_pm.partner_sink_caps.count > 0U) {
-                Debug_Printf("[PD-POLICY] partner Sink PDOs stored for telemetry");
-            }
-            PowerManager_LogCapabilities("SINK", &g_pm.partner_sink_caps);
-            break;
-
-        case PM_JOB_READ_SOURCE_CAPS:
-            if (!TPS25751_DecodeCapabilities(&g_pm.partner_source_caps,
-                                             data, length)) {
-                memset(&g_pm.partner_source_caps, 0,
-                       sizeof(g_pm.partner_source_caps));
-                Debug_Printf("[PD-POLICY] invalid Source PDO payload; ignoring it");
-                g_pm.policy_phase = PM_POLICY_DECIDE;
-                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-                break;
-            }
-            if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-                g_pm.status.tps.active_pdo.valid) {
-                g_pm.partner_source_caps_current = true;
-            }
-            PowerManager_LogCapabilities("SOURCE",
-                                         &g_pm.partner_source_caps);
-            PowerManager_TryLogContractPdos();
-            g_pm.policy_phase = PM_POLICY_DECIDE;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            if (g_pm.policy_locked) {
-                g_pm.policy_phase = PM_POLICY_DONE;
-            }
-            break;
-
         case PM_JOB_READ_LOCAL_SOURCE_CAPS:
             g_pm.local_source_caps_pending = false;
             if (!TPS25751_DecodeTxSourceCapabilities(
@@ -1547,7 +1465,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
-        case PM_JOB_SWAP_TO_SINK:
             Debug_Printf("[PD-POLICY] role swap accepted target=%s",
                          PowerManager_RoleToString(g_pm.policy_desired_role));
             PowerManager_LockAutoRole(g_pm.policy_desired_role, now_ms);
@@ -1859,16 +1776,6 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = TPS_IntEventStartClear(&g_pm.tps,
                                             g_pm.event_to_clear);
             break;
-        case PM_JOB_GET_SINK_CAPS:
-            status = TPS25751_StartCommand(&g_pm.tps, "GSkC",
-                                           NULL, 0U, 1U);
-            break;
-        case PM_JOB_READ_SINK_CAPS:
-            status = TPS25751_StartReadRegister(
-                &g_pm.tps, TPS25751_REG_RX_SINK_CAPS,
-                TPS25751_RX_CAPS_LEN);
-            break;
-        case PM_JOB_READ_SOURCE_CAPS:
         case PM_JOB_TRACE_SOURCE_CAPS:
             status = TPS25751_StartReadRegister(
                 &g_pm.tps, TPS25751_REG_RX_SOURCE_CAPS,
@@ -1881,10 +1788,6 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             break;
         case PM_JOB_SWAP_TO_SOURCE:
             status = TPS25751_StartCommand(&g_pm.tps, "SWSr",
-                                           NULL, 0U, 1U);
-            break;
-        case PM_JOB_SWAP_TO_SINK:
-            status = TPS25751_StartCommand(&g_pm.tps, "SWSk",
                                            NULL, 0U, 1U);
             break;
         case PM_JOB_BQ_TRACE_IIN_HOST:
@@ -1966,8 +1869,7 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
 
     if (status == TPS25751_OK) {
         g_pm.job = job;
-        if ((job == PM_JOB_SWAP_TO_SOURCE) ||
-            (job == PM_JOB_SWAP_TO_SINK)) {
+        if (job == PM_JOB_SWAP_TO_SOURCE) {
             if (g_pm.policy_swap_attempts < 0xFFU) {
                 ++g_pm.policy_swap_attempts;
             }
@@ -2035,18 +1937,19 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
         return PM_JOB_READ_MODE;
     }
+    /* Reject Apple PR_SWAP to sink before Try.SRC / port mode is patched.
+     * EEPROM reset accepts both swaps (0x52); that window is the iPad blink. */
+    if (g_pm.port_control_write_pending) {
+        return PM_JOB_WRITE_PORT_CONTROL;
+    }
+    if (!g_pm.port_control_valid) {
+        return PM_JOB_READ_PORT_CONTROL;
+    }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
     }
     if (g_pm.mode_update_pending) {
         return PM_JOB_READ_PORT_CONFIG;
-    }
-    if (g_pm.port_control_write_pending) {
-        return PM_JOB_WRITE_PORT_CONTROL;
-    }
-    if (!g_pm.port_control_valid &&
-        g_pm.status.applied_mode_valid) {
-        return PM_JOB_READ_PORT_CONTROL;
     }
     if (g_pm.event_mask_write_pending) {
         return PM_JOB_WRITE_INT_MASK;

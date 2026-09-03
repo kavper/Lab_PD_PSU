@@ -84,14 +84,22 @@ int main(void)
         fprintf(stderr, "sink + 5 V partner must become source\n");
         return 1;
     }
-    if (UsbC_AutoNeedSwapToSource(true, 5000U, 0U, 2U) ||
-        UsbC_AutoNeedSwapToSource(false, 20000U, 0U, 2U) ||
-        UsbC_AutoNeedSwapToSource(false, 5000U, 2U, 2U)) {
+    if (UsbC_AutoNeedSwapToSource(true, true, 5000U, 0U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, true, 20000U, 0U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, true, 5000U, 2U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, false, 0U, 0U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, false, 5000U, 0U, 2U)) {
         fprintf(stderr, "swap-to-source guard failed\n");
         return 1;
     }
-    if (!UsbC_AutoNeedSwapToSource(false, 5000U, 0U, 2U) ||
-        !UsbC_AutoNeedSwapToSource(false, 0U, 1U, 2U)) {
+    if (!UsbC_AutoStaySink(false, false, 0U) ||
+        !UsbC_AutoStaySink(false, true, 20000U) ||
+        UsbC_AutoStaySink(true, false, 0U) ||
+        UsbC_AutoStaySink(false, true, 5000U)) {
+        fprintf(stderr, "stay-sink rule failed\n");
+        return 1;
+    }
+    if (!UsbC_AutoNeedSwapToSource(false, true, 5000U, 0U, 2U)) {
         fprintf(stderr, "must SWSr a 5 V-only sink partner\n");
         return 1;
     }
@@ -103,7 +111,7 @@ int main(void)
         unsigned i;
 
         for (i = 0U; i < 8U; ++i) {
-            if (UsbC_AutoNeedSwapToSource(false, 5000U, attempts, 2U)) {
+            if (UsbC_AutoNeedSwapToSource(false, true, 5000U, attempts, 2U)) {
                 ++swsr;
                 ++attempts;
             }
@@ -113,7 +121,7 @@ int main(void)
             return 1;
         }
         if (UsbC_AutoDesiredSink(true, 9000U) ||
-            UsbC_AutoNeedSwapToSource(true, 9000U, 0U, 2U)) {
+            UsbC_AutoNeedSwapToSource(true, true, 9000U, 0U, 2U)) {
             fprintf(stderr, "ping-pong: source gadget must not SWSk\n");
             return 1;
         }

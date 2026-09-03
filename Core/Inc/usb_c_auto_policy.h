@@ -43,13 +43,36 @@ static inline bool UsbC_AutoDesiredSink(bool we_are_source,
     return UsbC_AutoShouldSink(partner_source_max_mv);
 }
 
-/* Sink on a 5 V-only partner: SWSr, up to max_attempts. Never SWSk. */
+/* Stay sink when the partner is a >5 V PD source, a dedicated 5 V supply
+ * (no Source PDOs), or caps have not arrived yet. Never SWSk. */
+static inline bool UsbC_AutoStaySink(bool we_are_source,
+                                     bool partner_source_caps_current,
+                                     uint32_t partner_source_max_mv)
+{
+    if (we_are_source) {
+        return false;
+    }
+    if (UsbC_AutoShouldSink(partner_source_max_mv)) {
+        return true;
+    }
+    return !partner_source_caps_current;
+}
+
+/* Sink on a partner that advertised 5 V-only Source PDOs: SWSr, capped.
+ * Unknown/missing PDOs are not treated as a gadget (that would SWSr a
+ * 5 V wall wart). Never SWSk. */
 static inline bool UsbC_AutoNeedSwapToSource(bool we_are_source,
+                                             bool partner_source_caps_current,
                                              uint32_t partner_source_max_mv,
                                              uint8_t swap_attempts,
                                              uint8_t max_attempts)
 {
-    if (we_are_source || UsbC_AutoShouldSink(partner_source_max_mv)) {
+    if (UsbC_AutoStaySink(we_are_source,
+                          partner_source_caps_current,
+                          partner_source_max_mv)) {
+        return false;
+    }
+    if (we_are_source) {
         return false;
     }
     return swap_attempts < max_attempts;
