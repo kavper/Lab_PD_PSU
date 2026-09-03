@@ -420,6 +420,7 @@ static void BQ76922_InitRestart(BQ76922_Device_t *dev, uint32_t delay_ms)
     dev->snapshot.fault_flags |= BQ76922_FAULT_I2C;
     dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
     dev->cfg_poll_tries = 0U;
+    dev->fet_en_attempts = 0U;
     dev->next_action_ms = HAL_GetTick() + delay_ms;
     dev->snapshot.init_step = dev->init_step;
 }
