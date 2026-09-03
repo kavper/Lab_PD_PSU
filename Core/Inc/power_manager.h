@@ -90,6 +90,10 @@ typedef struct {
 void PowerManager_Init(I2C_HandleTypeDef *hi2c);
 void PowerManager_Task(void);
 bool PowerManager_IsI2cIdle(void);
+/* While held, PowerManager will not start new I2C jobs (in-flight finish).
+ * Use during BQ76922 CONFIG_UPDATE so 4S/FET wake is not starved by TPS. */
+void PowerManager_SetBmsBusHold(bool hold);
+bool PowerManager_GetBmsBusHold(void);
 void PowerManager_GetStatus(PowerManager_Status_t *out);
 bool PowerManager_SetUserMode(PowerManager_UserMode_t mode);
 

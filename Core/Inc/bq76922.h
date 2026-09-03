@@ -68,6 +68,10 @@ typedef struct {
     uint32_t i2c_error_count;
     uint8_t fet_status;
     uint16_t manuf_status;
+    uint16_t battery_status;
+    /* Wake debug on TB: init_step / vcell_mode_rb / manuf / fet */
+    uint8_t init_step;
+    uint16_t vcell_mode_rb;
     bool chg_fet_on;
     bool dsg_fet_on;
 } BQ76922_Snapshot_t;
@@ -78,8 +82,11 @@ typedef struct {
     BQ76922_Snapshot_t snapshot;
     uint8_t scan_index;
     uint8_t init_step;
+    uint8_t cfg_poll_tries;
+    uint8_t fet_en_attempts;
     uint32_t next_action_ms;
     uint32_t last_fet_cmd_ms;
+    uint32_t bus_hold_since_ms;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);
@@ -93,7 +100,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms);
 void BQ76922_AlertFromIsr(BQ76922_Device_t *dev);
 void BQ76922_GetSnapshot(const BQ76922_Device_t *dev, BQ76922_Snapshot_t *out);
 void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev);
-/* Re-run CONFIG_UPDATE + 4S VCell Mode + ALL_FETS_ON (no OTP). */
+/* Re-run CONFIG_UPDATE + 4S VCell Mode + FET_ENABLE + ALL_FETS_ON (no OTP). */
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
 
 #endif /* BQ76922_H */

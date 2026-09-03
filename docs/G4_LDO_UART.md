@@ -76,7 +76,7 @@ Hardware is a **4S** Li-ion pack on the BQ76922 (5-channel AFE). Firmware writes
 
 See [HOST_TELEMETRY.md](HOST_TELEMETRY.md) for USART1 `T`/`TB`/`TC` parsing. Charger `BOARD_CHARGER_CELL_COUNT` is already 4.
 
-With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off; ON/OFF is USART1. The pack-path button only wakes the AFE — firmware must `ALL_FETS_ON` after 4S config (`BMS` command forces re-init).
+With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. Wake path polls `Battery Status[CFGUPDATE]` before RAM writes and briefly holds I2C4 so TPS does not starve FET bring-up. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off; ON/OFF is USART1. The pack-path button only wakes the AFE — firmware must `ALL_FETS_ON` after 4S config (`BMS` command forces re-init).
 
 ## Bring-up sequence
 

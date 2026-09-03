@@ -1750,8 +1750,9 @@ void App_Run(void)
     LdoLink_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_ControlSlowTask();
-    PowerManager_Task();
+    /* BMS before PM: button/charger wake must open FETs before TPS grabs I2C4. */
     BQ76922_Task(&g_bq76922, HAL_GetTick());
+    PowerManager_Task();
     App_BmsShutdownTask();
     App_StatusLedUpdate();
     StatusLed_Task();

@@ -158,6 +158,7 @@ static void HostLink_SendMachineTelemetry(void)
     n = snprintf(line, sizeof(line),
                  "TB bms=%u cfg=%u st=%u fault=0x%08lX alert=%u alarm=0x%04X "
                  "sa=0x%02X sb=0x%02X sc=0x%02X fet=0x%02X manuf=0x%04X "
+                 "init_step=%u vcell_rb=0x%04X batt=0x%04X "
                  "chg=%u dsg=%u fets=%u series=%u "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d "
                  "min_mv=%d max_mv=%d dV_mv=%d sum_mv=%d "
@@ -175,6 +176,9 @@ static void HostLink_SendMachineTelemetry(void)
                  (unsigned int)bms.safety_status_c,
                  (unsigned int)bms.fet_status,
                  (unsigned int)bms.manuf_status,
+                 (unsigned int)bms.init_step,
+                 (unsigned int)bms.vcell_mode_rb,
+                 (unsigned int)bms.battery_status,
                  (unsigned int)(bms.chg_fet_on ? 1U : 0U),
                  (unsigned int)(bms.dsg_fet_on ? 1U : 0U),
                  (unsigned int)(bms.fets_enabled ? 1U : 0U),

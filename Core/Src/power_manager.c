@@ -119,6 +119,7 @@ typedef struct {
     uint32_t next_mode_ms;
     uint32_t next_boot_flags_ms;
     uint32_t next_tps_step_ms;
+    bool bms_bus_hold;
     uint32_t next_bq_action_ms;
     uint32_t next_bq_telemetry_ms;
     uint32_t next_bq_config_ms;
@@ -1981,6 +1982,12 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
 {
     PowerManager_Job_t policy_job;
 
+    /* Pack-path wake: BMS must finish CONFIG_UPDATE + ALL_FETS_ON before
+     * TPS/BQ traffic monopolizes the shared I2C4 bus. */
+    if (g_pm.bms_bus_hold) {
+        return PM_JOB_NONE;
+    }
+
     if (g_pm.status.tps.mode != TPS25751_MODE_APP) {
         if ((g_pm.status.tps.mode == TPS25751_MODE_PTCH) &&
             PowerManager_TickReached(now_ms, g_pm.next_boot_flags_ms)) {
@@ -2128,6 +2135,16 @@ bool PowerManager_IsI2cIdle(void)
         return false;
     }
     return HAL_I2C_GetState(g_pm.hi2c) == HAL_I2C_STATE_READY;
+}
+
+void PowerManager_SetBmsBusHold(bool hold)
+{
+    g_pm.bms_bus_hold = hold;
+}
+
+bool PowerManager_GetBmsBusHold(void)
+{
+    return g_pm.bms_bus_hold;
 }
 
 void PowerManager_Task(void)

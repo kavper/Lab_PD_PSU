@@ -10,7 +10,15 @@
  * (user pack / harness skips that tap). VCell Mode must omit cell 4
  * or CUV/imbalance on the empty input keeps CHG/DSG FETs off — button
  * wake and USB-C bring-up then look "alive" (G4 boots, cells 1/2/3/5
- * read OK) while the pack path stays open.
+ * read OK) while the pack path stays locked.
+ *
+ * Wake hardware (BQ769x2):
+ *   - Button → TS2 pulled to VSS (exit SHUTDOWN)
+ *   - USB-C / charger → LD pin > VWAKEONLD (~1.45 V)
+ *   - REG1/REG18 from BAT keep G4 alive with CHG/DSG OFF; PACK needs FETs
+ *
+ * Blank OTP boots FET Test Mode (Mfg Status Init FET_EN=0). Host must
+ * FET_ENABLE() then ALL_FETS_ON() every wake — RAM only, no OTP burn.
  *
  * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
  * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
@@ -47,8 +55,10 @@
 #define BMS_WARN_PACK_LOW_MV             11000U
 #define BMS_WARN_PACK_HIGH_MV            17000U
 
+/* Prot A: SCD|OCD2|OCD1|OCC|COV|CUV — CUV needs VCell Mode skip-VC4 first. */
 #define BMS_ENABLED_PROTECTIONS_A        0xBCU
-#define BMS_ENABLED_PROTECTIONS_B        0xF0U
+/* Prot B: leave OT/UT off until TS pins are proven; TS2 is the wake button. */
+#define BMS_ENABLED_PROTECTIONS_B        0x00U
 
 #define BMS_CELL_USED(i)                 (((BMS_VCELL_MODE >> (i)) & 1U) != 0U)
 

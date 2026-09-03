@@ -90,9 +90,12 @@ while True:
 | `chg` `dsg` `fets` | CHG FET / DSG FET / either on |
 | `sa` `sb` `sc` | Safety Status A/B/C |
 | `alarm` `alert` `fault` | alarm / alert pin / fault flags |
+| `istep` | init state machine step (0…done); stuck value diagnoses wake |
+| `vcell` | VCell Mode readback (expect `0x0017`) |
+| `batt` | Battery Status `0x12` (`CFGUPDATE`=bit0, `SEC` in bits 9:8) |
 | `series` | `4` |
 
-Healthy after button/USB wake: `cfg=1`, `fets=1`, `pack_mv` ≈ `stack_mv` ≈ `sum_mv`, `c4_mv=-1`, `min_mv` ~3700.
+Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell=0x0017`, `pack_mv` ≈ `stack_mv` ≈ `sum_mv`, `c4_mv=-1`, `min_mv` ~3700.
 
 ## Line `TC` — charger (BQ25731) + TPS
 
@@ -122,9 +125,9 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `pack_mv` ≈ `stack_mv` ≈ `
 
 ## Button / charger wake (no OTP)
 
-1. Button / TS2 wakes BQ76922 from SHUTDOWN → G4 boots.  
-2. Firmware writes `VCell Mode=0x0017`, clears alarms, `SLEEP_DISABLE`, `ALL_FETS_ON`.  
-3. If MCU is powered from the **PACK** side, FETs must open before the rail collapses — that looks like a **bootloop** if config never sticks.  
-4. OTP is optional factory programming so the AFE would boot already as 4S without the host; this project **re-applies RAM config every wake** instead.
+1. Button (TS2→VSS) or charger (LD > wake threshold) exits BQ76922 SHUTDOWN → G4 boots from REG1.  
+2. Firmware holds I2C4 for BMS, waits `Battery Status` ready, `SET_CFGUPDATE` until `CFGUPDATE=1`, writes `VCell Mode=0x0017`, exits CFGUPDATE, `SLEEP_DISABLE`, `FET_ENABLE` if needed, `ALL_FETS_ON`.  
+3. Prot B OT/UT left off (TS2 is the wake button).  
+4. OTP is optional; this firmware re-applies RAM config every wake.
 
-If FETs stay off: send `BMS`, then `?`, check `TB` for `cfg=1 fets=1 pack_mv=…`.
+If FETs stay off: `BMS` then `?` — check `TB` for `cfg=1 vcell=0x0017 fets=1` and `istep`/`batt`.
