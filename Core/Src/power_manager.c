@@ -453,9 +453,13 @@ static void PowerManager_LogPd(uint32_t now_ms)
     (void)snprintf(value, sizeof(value), "%s  desired=%s", role,
                    PowerManager_RoleToString(g_pm.policy_desired_role));
     (void)snprintf(details, sizeof(details),
-                   "mode=%s  conn=%u  EN_PIN=HIGH",
+                   "mode=%s lock=%u swsr=%u PSnk=%u PSrc=%u src_max=%lumV",
                    PowerManager_UserModeToString(g_pm.status.requested_mode),
-                   tps->connection_state);
+                   g_pm.policy_locked ? 1U : 0U,
+                   g_pm.policy_swap_attempts,
+                   (g_pm.port_control[0] & USB_C_PC_PROCESS_TO_SINK) ? 1U : 0U,
+                   (g_pm.port_control[0] & USB_C_PC_PROCESS_TO_SOURCE) ? 1U : 0U,
+                   (unsigned long)g_pm.partner_source_caps.max_voltage_mv);
     PowerManager_LogMonitorRow("ROLE", value, details);
 
     (void)snprintf(value, sizeof(value), "PDO%u  %lu mV  %lu mA",
