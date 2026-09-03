@@ -1,4 +1,5 @@
 #include "tps25751.h"
+#include "usb_c_auto_policy.h"
 
 #include <string.h>
 
@@ -11,11 +12,6 @@
 #define TPS25751_PORT_STATE_MASK       0x03U
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
 #define TPS25751_TYPEC_TRY_SNK         0x02U
-#define TPS25751_PC_PROCESS_TO_SINK    0x10U
-#define TPS25751_PC_INITIATE_TO_SINK   0x20U
-#define TPS25751_PC_PROCESS_TO_SOURCE  0x40U
-#define TPS25751_PC_INITIATE_TO_SOURCE 0x80U
-#define TPS25751_PC_PR_SWAP_MASK       0xF0U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -805,7 +801,6 @@ bool TPS25751_PatchPortControlSwaps(
     bool accept_swap_to_sink)
 {
     uint8_t old_value;
-    uint8_t bits;
 
     if (port_control == NULL) {
         return false;
@@ -814,15 +809,9 @@ bool TPS25751_PatchPortControlSwaps(
     /* Never auto-initiate PR_SWAP; AUTO decides once from Source PDOs.
      * Process bits accept or reject the partner's swap request. */
     old_value = port_control[0];
-    bits = 0U;
-    if (accept_swap_to_source) {
-        bits |= TPS25751_PC_PROCESS_TO_SOURCE;
-    }
-    if (accept_swap_to_sink) {
-        bits |= TPS25751_PC_PROCESS_TO_SINK;
-    }
-    port_control[0] = (uint8_t)(
-        (old_value & (uint8_t)~TPS25751_PC_PR_SWAP_MASK) | bits);
+    port_control[0] = UsbC_PortControlSwapBits(old_value,
+                                               accept_swap_to_source,
+                                               accept_swap_to_sink);
     return port_control[0] != old_value;
 }
 

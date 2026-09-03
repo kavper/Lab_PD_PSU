@@ -2,6 +2,7 @@
 
 #include "debug_uart.h"
 #include "tps_int_event.h"
+#include "usb_c_auto_policy.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -798,6 +799,12 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.policy_locked = false;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
     g_pm.pdo_report_pending = attached;
+    /* Re-open PR_SWAP processing so the next partner is not stuck with
+     * the previous attach's hold bits (otherwise SWSr after a charger
+     * session can be rejected). */
+    if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
+        PowerManager_QueuePortControlForUserMode();
+    }
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
         /* Try.SNK: wait for partner Source PDOs (or a source-only attach)
@@ -850,7 +857,7 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     }
 
     /* Partner can source more than 5 V → draw from it. Otherwise charge it. */
-    if (source_max_mv > 5000U) {
+    if (UsbC_AutoShouldSink(source_max_mv)) {
         desired = TPS25751_ROLE_SINK;
         reason = "PARTNER_SOURCE_ABOVE_5V";
     } else {
@@ -868,8 +875,14 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
                  PowerManager_RoleToString(desired),
                  reason);
 
+    if (!g_pm.port_control_valid) {
+        g_pm.policy_phase = PM_POLICY_WAIT;
+        g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+        return;
+    }
+
     if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN)) {
-        PowerManager_LockAutoRole(desired == TPS25751_ROLE_UNKNOWN ?
+        PowerManager_LockAutoRole((desired == TPS25751_ROLE_UNKNOWN) ?
                                   current : desired);
         return;
     }
@@ -909,15 +922,16 @@ static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
         (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
         source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
     }
-    if (source_max_mv > 5000U) {
-        return true;
-    }
-    if (g_pm.partner_source_caps_current) {
+    if (UsbC_AutoShouldSink(source_max_mv)) {
         return true;
     }
     if ((g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
-        PowerManager_HasTypecPowerConnection() &&
-        (g_pm.status.tps.typec_port_state == 0x60U)) {
+        PowerManager_HasTypecPowerConnection()) {
+        /* Partner presented Rd. Charge it; do not wait for Type-C debug
+         * state 0x60 or the partner will PR_SWAP first. */
+        return true;
+    }
+    if (g_pm.partner_source_caps_current && sink_contract) {
         return true;
     }
     return PowerManager_TickReached(now_ms, g_pm.policy_next_ms);
@@ -1498,11 +1512,6 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
             PowerManager_TryLogContractPdos();
-            if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
-                !g_pm.policy_locked &&
-                (g_pm.policy_phase == PM_POLICY_WAIT)) {
-                g_pm.policy_phase = PM_POLICY_DECIDE;
-            }
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
@@ -1965,6 +1974,9 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         return PM_JOB_NONE;
     }
 
+    if (!g_pm.port_control_valid || g_pm.port_control_write_pending) {
+        return PM_JOB_NONE;
+    }
     if (!PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
         return PM_JOB_NONE;
     }
