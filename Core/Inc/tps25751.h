@@ -43,6 +43,12 @@
 /* PORT_CONTROL is a 32-bit policy register.  Some APP images report a
  * longer payload; readers copy the first 4 bytes and ignore extras. */
 #define TPS25751_PORT_CONTROL_LEN        4U
+/* PORT_CONTROL[7:4] PR_Swap (TRM 3.2.13): Process/Initiate Sink, then Source. */
+#define TPS25751_PC_PROCESS_SWAP_SNK    0x10U
+#define TPS25751_PC_INITIATE_SWAP_SNK   0x20U
+#define TPS25751_PC_PROCESS_SWAP_SRC    0x40U
+#define TPS25751_PC_INITIATE_SWAP_SRC   0x80U
+#define TPS25751_PC_SWAP_MASK           0xF0U
 #define TPS25751_BOOT_FLAGS_LEN          5U
 #define TPS25751_RX_CAPS_LEN            53U
 #define TPS25751_TX_SOURCE_CAPS_LEN     63U
@@ -100,6 +106,7 @@ typedef struct {
     uint8_t count;
     TPS25751_Pdo_t pdo[7];
     uint32_t max_voltage_mv;
+    uint32_t max_power_mw;
     bool first_pdo_dual_role_power;
 } TPS25751_Capabilities_t;
 
@@ -250,6 +257,9 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 bool TPS25751_PatchPortControl(
     uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
     TPS25751_PortMode_t mode);
+bool TPS25751_PatchPortControlSwap(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    uint8_t swap_bits);
 void TPS25751_SetPortStateMachine(
     uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     TPS25751_PortMode_t mode);

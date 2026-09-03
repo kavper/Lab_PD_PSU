@@ -709,6 +709,9 @@ static bool TPS25751_DecodeCapabilitiesAt(
             capabilities->max_voltage_mv =
                 capabilities->pdo[i].max_voltage_mv;
         }
+        if (capabilities->pdo[i].power_mw > capabilities->max_power_mw) {
+            capabilities->max_power_mw = capabilities->pdo[i].power_mw;
+        }
     }
 
     if ((count > 0U) &&
@@ -828,30 +831,51 @@ bool TPS25751_PatchPortControl(
      * (iPad) is immediately PR_SWAP'd into an OTG/VBUS fight. */
     old = port_control[0];
     v = (uint8_t)(old & (uint8_t)~(
-        TPS25751_PORT_STATE_MASK | /* bits 1:0 TypeC Current, reused mask 0x03 */
-        0xF0U));                   /* bits 7:4 PR_Swap initiate/process */
+        TPS25751_PORT_STATE_MASK | /* bits 1:0 TypeC Current */
+        TPS25751_PC_SWAP_MASK));   /* bits 7:4 PR_Swap initiate/process */
 
     /* 3.0 A Rp while sourcing (ignored during an explicit PD contract). */
     v |= 0x02U;
 
     switch (mode) {
         case TPS25751_PORT_SINK_ONLY:
-            v |= (1U << 4); /* ProcessSwapToSink */
+            /* Always charge the pack.  Reject swap to source; do not
+             * initiate source.  Accept a swap to sink if we somehow sourced. */
+            v |= TPS25751_PC_PROCESS_SWAP_SNK;
             break;
         case TPS25751_PORT_SOURCE_ONLY:
-            v |= (1U << 6); /* ProcessSwapToSource */
+            /* Always power the gadget.  Reject swap to sink so a DRP iPad
+             * cannot PR_SWAP us off VBUS; do not initiate sink. */
+            v |= TPS25751_PC_PROCESS_SWAP_SRC;
             break;
         case TPS25751_PORT_DRP:
-            /* AUTO: accept a swap to sink (pack charge), never initiate a
-             * swap, never auto-accept a swap to source (iPhone 9 V stays
-             * a native Type-C Source attach; iPad cannot PR_SWAP us to OTG). */
-            v |= (1U << 4); /* ProcessSwapToSink */
+            /* AUTO starts with all PR_Swap bits 0.  Firmware decides
+             * source vs sink from partner Source PDOs, then writes the
+             * matching Process/Initiate bits and optionally SWSk/SWSr.
+             * Leaving ProcessSwapToSink=1 here let iPad swap us to sink
+             * before RX_SOURCE_CAPS was even read. */
             break;
         default:
             break;
     }
 
     port_control[0] = v;
+    return port_control[0] != old;
+}
+
+bool TPS25751_PatchPortControlSwap(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    uint8_t swap_bits)
+{
+    uint8_t old;
+
+    if (port_control == NULL) {
+        return false;
+    }
+    old = port_control[0];
+    port_control[0] = (uint8_t)(
+        (old & (uint8_t)~TPS25751_PC_SWAP_MASK) |
+        (swap_bits & TPS25751_PC_SWAP_MASK));
     return port_control[0] != old;
 }
 
