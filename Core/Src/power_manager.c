@@ -1494,10 +1494,23 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
             PowerManager_TryLogContractPdos();
-            if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
-                !g_pm.policy_locked) {
-                g_pm.policy_phase = PM_POLICY_DECIDE;
-                g_pm.policy_next_ms = now_ms;
+            if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
+                UsbC_AutoAction_t action = UsbC_AutoAction(
+                    false,
+                    true,
+                    PowerManager_AutoSourceMaxMv(),
+                    g_pm.policy_swap_attempts,
+                    PM_POLICY_MAX_SWAP_ATTEMPTS);
+
+                if (UsbC_AutoReopenAfterSourceCaps(g_pm.policy_locked,
+                                                   action)) {
+                    if (action == USB_C_AUTO_SWAP_TO_SOURCE) {
+                        g_pm.policy_locked = false;
+                    }
+                    g_pm.policy_phase = PM_POLICY_DECIDE;
+                    g_pm.policy_next_ms = now_ms;
+                    PowerManager_DecidePolicy(now_ms);
+                }
             }
             break;
 

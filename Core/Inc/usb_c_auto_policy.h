@@ -67,6 +67,17 @@ static inline UsbC_AutoAction_t UsbC_AutoAction(
     return USB_C_AUTO_HOLD_SINK;
 }
 
+/* After Source PDOs arrive: always decide if still open; if already locked
+ * as sink, reopen only to SWSr a 5 V gadget. */
+static inline bool UsbC_AutoReopenAfterSourceCaps(bool policy_locked,
+                                                 UsbC_AutoAction_t action)
+{
+    if (action == USB_C_AUTO_SWAP_TO_SOURCE) {
+        return true;
+    }
+    return !policy_locked;
+}
+
 static inline bool UsbC_AutoDesiredSink(bool we_are_source,
                                         uint32_t partner_source_max_mv)
 {
