@@ -213,6 +213,7 @@ static void HostLink_SendMachineTelemetry(void)
                  "bq_st=0x%04X bq_fault=0x%02X "
                  "bq_in=%u bq_pre=%u bq_fast=%u bq_otg=%u bq_iindpm=%u bq_vindpm=%u "
                  "tps_vbus_mv=%lu cc1=%u cc2=%u role=%u conn=%u "
+                 "plug=%u typec=0x%02X rst=%lu rst_busy=%u "
                  "pd_role=%u pd_mv=%lu pd_ma=%lu\r\n",
                  (unsigned int)(pm.bq.online && pm.bq.adc_sample_valid ? 1U : 0U),
                  (unsigned long)pm.bq.adc_vbat_mv,
@@ -238,6 +239,10 @@ static void HostLink_SendMachineTelemetry(void)
                  (unsigned int)pm.tps.cc2_state,
                  (unsigned int)pm.tps.role,
                  (unsigned int)pm.tps.connection_state,
+                 (unsigned int)(pm.tps.attached ? 1U : 0U),
+                 (unsigned int)pm.tps.typec_port_state,
+                 (unsigned long)pm.pd_reset_seq,
+                 (unsigned int)(pm.pd_reset_busy ? 1U : 0U),
                  (unsigned int)pm.pd_snapshot.power_role,
                  (unsigned long)pm.pd_snapshot.contract_voltage_mv,
                  (unsigned long)pm.pd_snapshot.contract_current_ma);

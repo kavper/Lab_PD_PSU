@@ -22,8 +22,14 @@
 #define PM_POLICY_ROLE_DRIFT_MS       750U
 #define PM_POLICY_SWAP_RETRY_MS      3000U
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
-#define PM_SESSION_RESET_STUCK_MS     300U
+#define PM_SESSION_RESET_STUCK_MS     400U
 #define PM_SESSION_RESET_COOLDOWN_MS 1500U
+/* USB Type-C tSrcRecover is 660–1000 ms after vSafe0V.  TRM STATUS
+ * VBUS Status 0h is <0.8 V.  bd90e21 wrote 0x28 Disabled then immediately
+ * restored DRP, so the silicon never reached vSafe0V. */
+#define PM_SESSION_TSRC_RECOVER_MS    800U
+#define PM_SESSION_VSAFE0_MV          800U
+#define PM_SESSION_VSAFE0_GIVEUP_MS  2500U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
 typedef enum {
@@ -61,6 +67,8 @@ typedef enum {
     PM_JOB_BQ_WRITE_STARTUP_OPTION4,
     PM_JOB_BQ_READ_OPTION1,
     PM_JOB_BQ_WRITE_STARTUP_OPTION1,
+    PM_JOB_BQ_READ_OPTION3,
+    PM_JOB_BQ_WRITE_OPTION3,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
     PM_JOB_BQ_READ_ID,
@@ -125,8 +133,15 @@ typedef struct {
     bool dbfg_pending;
     bool session_reset_busy;
     bool session_reset_restore_config;
+    bool session_reset_wait_vsafe0;
+    uint32_t session_reset_disable_ms;
+    uint32_t session_reset_seq;
     uint32_t session_reset_cooldown_until_ms;
     uint32_t leftover_vbus_since_ms;
+    bool bq_option3_read_pending;
+    bool bq_option3_write_pending;
+    bool bq_option3_valid;
+    uint16_t bq_option3_target;
     bool event_mask_ready;
     bool event_mask_write_pending;
     bool event_clear_pending;
@@ -184,6 +199,7 @@ static const char *PowerManager_CcStateToString(uint8_t state);
 static void PowerManager_UpdatePdSnapshot(void);
 static TPS25751_PortMode_t PowerManager_MapPortMode(
     PowerManager_UserMode_t mode);
+static void PowerManager_TickSessionResetWait(uint32_t now_ms);
 
 static bool PowerManager_TickReached(uint32_t now_ms, uint32_t deadline_ms)
 {
@@ -250,6 +266,8 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_BQ_WRITE_STARTUP_OPTION4: return "BQ_WRITE_DITHER_OPTION4";
         case PM_JOB_BQ_READ_OPTION1: return "BQ_READ_5MOHM_OPTION1";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION1: return "BQ_WRITE_5MOHM_OPTION1";
+        case PM_JOB_BQ_READ_OPTION3: return "BQ_READ_OPTION3";
+        case PM_JOB_BQ_WRITE_OPTION3: return "BQ_WRITE_OPTION3";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
         case PM_JOB_BQ_READ_ID: return "BQ_READ_ID";
@@ -310,10 +328,8 @@ static TPS25751_PortMode_t PowerManager_MapPortMode(
         case POWER_MANAGER_USER_SINK_ONLY: return TPS25751_PORT_SINK_ONLY;
         case POWER_MANAGER_USER_SOURCE_ONLY: return TPS25751_PORT_SOURCE_ONLY;
         case POWER_MANAGER_USER_OFF: return TPS25751_PORT_DISABLED;
-        /* AUTO stays DRP.  Try.SNK (patched in PORT_CONFIG) prefers a
-         * dual-role partner as the source so the pack can charge.  A
-         * sink-only partner such as iPhone still attaches as our Source
-         * via TryWait.SRC and can take 9 V. */
+        /* AUTO stays DRP.  Try.SRC (PORT_CONFIG 0x28 bits 9:8 = 1h) is
+         * the USB-C optional state for a charging port. */
         default: return TPS25751_PORT_DRP;
     }
 }
@@ -354,6 +370,10 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms, const char *why)
     g_pm.leftover_vbus_since_ms = 0U;
 
     g_pm.session_reset_busy = true;
+    g_pm.session_reset_wait_vsafe0 = false;
+    g_pm.session_reset_seq++;
+    g_pm.status.pd_reset_seq = g_pm.session_reset_seq;
+    g_pm.status.pd_reset_busy = true;
     g_pm.dbfg_pending = true;
     g_pm.port_control_write_pending = false;
     if (g_pm.port_control_valid) {
@@ -365,9 +385,15 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms, const char *why)
         g_pm.port_control_read_pending = true;
     }
 
+    /* BQ25731: OTG needs EN_OTG and the pin.  PA4 is already low; force
+     * EN_HIZ so converter VBUS can fall to vSafe0V (datasheet 9.3.8). */
+    if (g_pm.bq_init == PM_BQ_INIT_DONE) {
+        g_pm.bq_option3_read_pending = true;
+    }
+
     if (g_pm.port_config_valid) {
-        /* Writing 0x28 disconnects/reconnects the Type-C SM (TRM 3.10).
-         * Disabled then DRP+Try.SNK is the same cold start as first plug. */
+        /* TRM 3.2.12: any 0x28 write disconnects the Type-C SM.  Stay
+         * Disabled until tSrcRecover + vSafe0V, then write policy. */
         TPS25751_SetPortStateMachine(g_pm.port_config,
                                      TPS25751_PORT_DISABLED);
         g_pm.port_write_pending = true;
@@ -379,9 +405,21 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms, const char *why)
         g_pm.session_reset_restore_config = false;
     }
 
-    Debug_Printf("[PD-RESET t=%lu] %s; OTG=LOW, 0x28 Disabled->policy, 0x29 PR_SWAP off, DBfg",
+    Debug_Printf("[PD-RESET t=%lu seq=%lu] START %s; OTG=LOW, 0x28 Disabled, wait vSafe0V+tSrcRecover, then 0x28 DRP+Try.SRC, 0x29 PR_SWAP off; STATUS=0x%02lX%08lX typec=0x%02X(%s) cc1=%u cc2=%u tps_vbus=%lu bq_vbus=%lu plug=%u conn=%u",
                  (unsigned long)now_ms,
-                 (why != NULL) ? why : "session");
+                 (unsigned long)g_pm.session_reset_seq,
+                 (why != NULL) ? why : "session",
+                 (unsigned long)((g_pm.status.tps.status_raw >> 32) & 0xFFU),
+                 (unsigned long)g_pm.status.tps.status_raw,
+                 g_pm.status.tps.typec_port_state,
+                 PowerManager_TypecStateToString(
+                     g_pm.status.tps.typec_port_state),
+                 g_pm.status.tps.cc1_state,
+                 g_pm.status.tps.cc2_state,
+                 (unsigned long)g_pm.status.tps.vbus_mv,
+                 (unsigned long)g_pm.status.bq.adc_vbus_mv,
+                 g_pm.status.tps.attached ? 1U : 0U,
+                 g_pm.status.tps.connection_state);
 }
 
 static void PowerManager_SetOtgPin(bool high)
@@ -882,7 +920,7 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
                 Debug_Printf("[PD-POLICY] attach role=SOURCE partner=Sink(Rd); keep Source (iPhone 9V path)");
             }
         } else {
-            /* Dual-role partner that sourced first (iPad after Try.SNK):
+            /* Dual-role partner that sourced first (iPad after TryWait.SNK):
              * wait for Sink contract; do not PR_SWAP to Source. */
             g_pm.policy_desired_role = TPS25751_ROLE_SINK;
             g_pm.policy_phase = PM_POLICY_DONE;
@@ -905,23 +943,88 @@ static void PowerManager_FinishSessionResetIfIdle(uint32_t now_ms)
     }
     if (g_pm.port_write_pending ||
         g_pm.session_reset_restore_config ||
+        g_pm.session_reset_wait_vsafe0 ||
         g_pm.port_control_read_pending ||
         g_pm.port_control_write_pending ||
+        g_pm.bq_option3_read_pending ||
+        g_pm.bq_option3_write_pending ||
         g_pm.dbfg_pending ||
         g_pm.mode_update_pending) {
         return;
     }
     g_pm.session_reset_busy = false;
+    g_pm.status.pd_reset_busy = false;
     g_pm.session_reset_cooldown_until_ms =
         now_ms + PM_SESSION_RESET_COOLDOWN_MS;
+    Debug_Printf("[PD-RESET t=%lu seq=%lu] DONE chip hit; next plug uses 0x28 DRP+Try.SRC after vSafe0V",
+                 (unsigned long)now_ms,
+                 (unsigned long)g_pm.session_reset_seq);
+}
+
+static void PowerManager_QueuePolicyPortConfig(void)
+{
+    (void)TPS25751_PatchPortMode(
+        g_pm.port_config,
+        PowerManager_MapPortMode(g_pm.status.requested_mode));
+    g_pm.port_write_pending = true;
+    g_pm.session_reset_restore_config = false;
+    g_pm.session_reset_wait_vsafe0 = false;
+}
+
+static void PowerManager_TickSessionResetWait(uint32_t now_ms)
+{
+    uint32_t elapsed;
+    bool vsafe0;
+    bool give_up;
+
+    if (!g_pm.session_reset_wait_vsafe0) {
+        return;
+    }
+    if (g_pm.port_write_pending || g_pm.bq_option3_write_pending ||
+        g_pm.bq_option3_read_pending) {
+        return;
+    }
+
+    elapsed = now_ms - g_pm.session_reset_disable_ms;
+    vsafe0 = (g_pm.status.tps.vbus_mv < PM_SESSION_VSAFE0_MV) ||
+             (g_pm.status.tps.vbus_state == 0U);
+    give_up = elapsed >= PM_SESSION_VSAFE0_GIVEUP_MS;
+    if ((elapsed < PM_SESSION_TSRC_RECOVER_MS) || (!vsafe0 && !give_up)) {
+        return;
+    }
+
+    if (give_up && !vsafe0) {
+        Debug_Printf("[PD-RESET t=%lu seq=%lu] VBUS still %lu mV after %lu ms (BQ ADC %lu mV); connector may be back-fed — restoring Type-C SM anyway",
+                     (unsigned long)now_ms,
+                     (unsigned long)g_pm.session_reset_seq,
+                     (unsigned long)g_pm.status.tps.vbus_mv,
+                     (unsigned long)elapsed,
+                     (unsigned long)g_pm.status.bq.adc_vbus_mv);
+    } else {
+        Debug_Printf("[PD-RESET t=%lu seq=%lu] vSafe0V ok tps_vbus=%lu STATUS.VBUS=%u elapsed=%lu; restore 0x28 DRP+Try.SRC",
+                     (unsigned long)now_ms,
+                     (unsigned long)g_pm.session_reset_seq,
+                     (unsigned long)g_pm.status.tps.vbus_mv,
+                     g_pm.status.tps.vbus_state,
+                     (unsigned long)elapsed);
+    }
+
+    if (g_pm.bq_option3_valid) {
+        g_pm.bq_option3_target =
+            (uint16_t)(g_pm.status.bq.charge_option3 &
+                       (uint16_t)~BQ25731_CHARGE_OPTION3_EN_HIZ);
+        g_pm.bq_option3_write_pending = true;
+    }
+    PowerManager_QueuePolicyPortConfig();
 }
 
 static void PowerManager_CheckLeftoverVbus(uint32_t now_ms)
 {
     bool cc_live;
-    bool vbus_dirty;
     uint8_t cc1 = g_pm.status.tps.cc1_state;
     uint8_t cc2 = g_pm.status.tps.cc2_state;
+
+    PowerManager_TickSessionResetWait(now_ms);
 
     if (g_pm.status.tps.attached ||
         (g_pm.status.tps.connection_state >= 6U) ||
@@ -930,15 +1033,13 @@ static void PowerManager_CheckLeftoverVbus(uint32_t now_ms)
         return;
     }
 
-    /* CC showing Rd/Ra/Rp while STATUS.ConnectionState is 0: Type-C SM is
-     * wedged (typical after leftover OTG VBUS). */
+    /* TRM 3.2.27: 1h=Ra 2h=Rd are Source-only pin states.  conn=0 with
+     * those bits means AttachWait.SRC never reached Attached.SRC
+     * (typically VBUS not vSafe0V).  Do not require BQ ADC >= 8 V —
+     * tps_vbus flaps 0–5 V so the old leftover-VBUS gate never fired. */
     cc_live = ((cc1 >= 1U) && (cc1 <= 5U)) ||
               ((cc2 >= 1U) && (cc2 <= 5U));
-    vbus_dirty = g_pm.status.otg_pin_high ||
-                 g_pm.status.bq.in_otg ||
-                 (g_pm.status.bq.adc_vbus_mv >= 8000U) ||
-                 (g_pm.status.tps.vbus_mv >= 5500U);
-    if (!(cc_live && vbus_dirty)) {
+    if (!cc_live) {
         g_pm.leftover_vbus_since_ms = 0U;
         return;
     }
@@ -949,7 +1050,7 @@ static void PowerManager_CheckLeftoverVbus(uint32_t now_ms)
     if ((uint32_t)(now_ms - g_pm.leftover_vbus_since_ms) >=
         PM_SESSION_RESET_STUCK_MS) {
         PowerManager_BeginSessionReset(now_ms,
-            "conn=0 with CC and leftover VBUS/OTG");
+            "conn=0 CC live (Ra/Rd/Rp), no PlugPresent");
     }
 }
 
@@ -1034,7 +1135,7 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         g_pm.policy_swap_attempted) {
         g_pm.policy_phase = PM_POLICY_DONE;
     } else if (desired == TPS25751_ROLE_SOURCE) {
-        /* AUTO does not PR_SWAP to Source; Type-C Try.SNK/TryWait.SRC
+        /* AUTO does not PR_SWAP to Source; Type-C Try.SRC/Attached.SRC
          * establishes that attach. */
         g_pm.policy_phase = PM_POLICY_DONE;
     } else {
@@ -1331,9 +1432,17 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_CLEAR_DBFG) {
             g_pm.dbfg_pending = false;
             PowerManager_FinishSessionResetIfIdle(now_ms);
-            Debug_Printf("[PD-RESET] DBfg failed status=%s task=%u",
+            Debug_Printf("[PD-RESET] DBfg status=%s task=%u (TRM 4.6.2 rejects if not dead-battery — that is not a failed session reset)",
                          TPS25751_StatusToString(operation_status),
                          g_pm.tps.task_return_code);
+        } else if ((completed_job == PM_JOB_BQ_READ_OPTION3) ||
+                   (completed_job == PM_JOB_BQ_WRITE_OPTION3)) {
+            g_pm.bq_option3_read_pending = false;
+            g_pm.bq_option3_write_pending = false;
+            Debug_Printf("[PD-RESET] BQ Option3 %s status=%s — continue TPS vSafe0V wait",
+                         PowerManager_JobToString(completed_job),
+                         TPS25751_StatusToString(operation_status));
+            PowerManager_FinishSessionResetIfIdle(now_ms);
         } else if ((completed_job == PM_JOB_READ_PORT_CONTROL) ||
                    (completed_job == PM_JOB_WRITE_PORT_CONTROL)) {
             g_pm.port_control_read_pending = false;
@@ -1434,14 +1543,15 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             }
             memcpy(g_pm.port_config, data, sizeof(g_pm.port_config));
             g_pm.port_config_valid = true;
-            g_pm.port_write_pending = TPS25751_PatchPortMode(
-                g_pm.port_config,
-                PowerManager_MapPortMode(g_pm.status.requested_mode));
-            if (g_pm.session_reset_busy && !g_pm.port_write_pending) {
+            if (g_pm.session_reset_busy) {
                 TPS25751_SetPortStateMachine(g_pm.port_config,
                                              TPS25751_PORT_DISABLED);
                 g_pm.port_write_pending = true;
                 g_pm.session_reset_restore_config = true;
+            } else {
+                g_pm.port_write_pending = TPS25751_PatchPortMode(
+                    g_pm.port_config,
+                    PowerManager_MapPortMode(g_pm.status.requested_mode));
             }
             if (!g_pm.port_write_pending) {
                 g_pm.status.applied_mode = g_pm.status.requested_mode;
@@ -1455,11 +1565,21 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_WRITE_PORT_CONFIG:
             if (g_pm.session_reset_restore_config) {
+                /* Disabled is on the silicon.  Hold Unattached until VBUS
+                 * is vSafe0V (USB-C tSrcRecover).  Immediate restore was
+                 * bd90e21 and did not change attach behavior. */
                 g_pm.session_reset_restore_config = false;
-                (void)TPS25751_PatchPortMode(
-                    g_pm.port_config,
-                    PowerManager_MapPortMode(g_pm.status.requested_mode));
-                g_pm.port_write_pending = true;
+                g_pm.port_write_pending = false;
+                g_pm.session_reset_wait_vsafe0 = true;
+                g_pm.session_reset_disable_ms = now_ms;
+                g_pm.status.applied_mode_valid = false;
+                Debug_Printf("[PD-RESET t=%lu seq=%lu] 0x28 Disabled APPLIED; waiting tSrcRecover>=%ums vSafe0V<%umV tps_vbus=%lu STATUS.VBUS=%u",
+                             (unsigned long)now_ms,
+                             (unsigned long)g_pm.session_reset_seq,
+                             (unsigned int)PM_SESSION_TSRC_RECOVER_MS,
+                             (unsigned int)PM_SESSION_VSAFE0_MV,
+                             (unsigned long)g_pm.status.tps.vbus_mv,
+                             g_pm.status.tps.vbus_state);
                 break;
             }
             g_pm.port_write_pending = false;
@@ -1468,6 +1588,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.applied_mode_valid = true;
             g_pm.status.source_fault_latched = false;
             g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+            Debug_Printf("[PD-RESET t=%lu seq=%lu] 0x28 policy APPLIED sm=%u try=%u (1=Try.SRC 2=Try.SNK)",
+                         (unsigned long)now_ms,
+                         (unsigned long)g_pm.session_reset_seq,
+                         (unsigned int)(g_pm.port_config[0] & 0x03U),
+                         (unsigned int)(g_pm.port_config[1] & 0x03U));
             if (!g_pm.port_control_valid) {
                 g_pm.port_control_read_pending = true;
             } else {
@@ -1602,6 +1727,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_READ_ADC:
             TPS25751_DecodeAdcResults(&g_pm.status.tps, data);
+            PowerManager_TickSessionResetWait(now_ms);
             g_pm.telemetry_phase = 6U;
             break;
 
@@ -1877,6 +2003,38 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             break;
 
+        case PM_JOB_BQ_READ_OPTION3:
+            raw16 = PowerManager_ResultLe16(&valid);
+            g_pm.bq_option3_read_pending = false;
+            if (!valid) {
+                Debug_Printf("[PD-RESET] BQ Option3 read short");
+                break;
+            }
+            g_pm.status.bq.charge_option3 = raw16;
+            g_pm.bq_option3_valid = true;
+            g_pm.bq_option3_target = (uint16_t)(
+                (raw16 | BQ25731_CHARGE_OPTION3_EN_HIZ) &
+                (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG);
+            g_pm.bq_option3_write_pending =
+                (g_pm.bq_option3_target != raw16) || g_pm.session_reset_busy;
+            Debug_Printf("[PD-RESET] BQ Option3=0x%04X EN_OTG=%u EN_HIZ=%u write=%u target=0x%04X",
+                         raw16,
+                         (raw16 & BQ25731_CHARGE_OPTION3_EN_OTG) != 0U ? 1U : 0U,
+                         (raw16 & BQ25731_CHARGE_OPTION3_EN_HIZ) != 0U ? 1U : 0U,
+                         g_pm.bq_option3_write_pending ? 1U : 0U,
+                         g_pm.bq_option3_target);
+            break;
+
+        case PM_JOB_BQ_WRITE_OPTION3:
+            g_pm.bq_option3_write_pending = false;
+            g_pm.status.bq.charge_option3 = g_pm.bq_option3_target;
+            Debug_Printf("[PD-RESET] BQ Option3 APPLIED 0x%04X EN_OTG=%u EN_HIZ=%u",
+                         g_pm.bq_option3_target,
+                         (g_pm.bq_option3_target & BQ25731_CHARGE_OPTION3_EN_OTG) != 0U ? 1U : 0U,
+                         (g_pm.bq_option3_target & BQ25731_CHARGE_OPTION3_EN_HIZ) != 0U ? 1U : 0U);
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            break;
+
         case PM_JOB_BQ_WRITE_ADC:
             g_pm.bq_init = PM_BQ_INIT_VERIFY_ADC;
             g_pm.next_bq_action_ms = now_ms + PM_BQ_TELEMETRY_MS;
@@ -2125,6 +2283,17 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_BQ_READ_OPTION3:
+            bq_status = BQ25731_StartReadOption3(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_OPTION3:
+            bq_status = BQ25731_StartWriteOption3(
+                &g_pm.bq, g_pm.bq_option3_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
         case PM_JOB_BQ_WRITE_ADC:
             bq_status = BQ25731_StartConfigureMonitoringAdc(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
@@ -2255,6 +2424,12 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
         return PM_JOB_READ_MODE;
     }
+    if (g_pm.bq_option3_write_pending) {
+        return PM_JOB_BQ_WRITE_OPTION3;
+    }
+    if (g_pm.bq_option3_read_pending) {
+        return PM_JOB_BQ_READ_OPTION3;
+    }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
     }
@@ -2380,7 +2555,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG gated AUTO=DRP+Try.SNK unplug-reset=0x28/0x29/DBfg",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG gated AUTO=DRP+Try.SRC unplug-reset=0x28-hold-vSafe0V/0x29/DBfg/BQ-HIZ",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);
@@ -2422,6 +2597,7 @@ void PowerManager_Task(void)
     }
     now_ms = HAL_GetTick();
     PowerManager_MaintainOtgPermissionPin();
+    PowerManager_TickSessionResetWait(now_ms);
 
     if (g_pm.job != PM_JOB_NONE) {
         operation_status = TPS25751_Task(&g_pm.tps, now_ms);

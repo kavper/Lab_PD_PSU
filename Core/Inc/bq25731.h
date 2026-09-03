@@ -15,6 +15,7 @@
 #define BQ25731_REG_ADC_VBUS_PSYS       0x26U
 #define BQ25731_REG_MANUFACTURER_ID     0x2EU
 #define BQ25731_REG_CHARGE_OPTION1      0x30U
+#define BQ25731_REG_CHARGE_OPTION3      0x34U
 #define BQ25731_REG_ADC_OPTION          0x3AU
 #define BQ25731_REG_CHARGE_OPTION4      0x3CU
 
@@ -28,6 +29,9 @@
 #define BQ25731_CHARGE_OPTION0_PWM_FREQ 0x0200U
 #define BQ25731_CHARGE_OPTION4_DITHER_MASK 0x1800U
 #define BQ25731_CHARGE_OPTION1_5MOHM_MASK  0x0D00U
+/* ChargeOption3 (I2C 35/34h): high byte EN_HIZ bit7, EN_OTG bit4. */
+#define BQ25731_CHARGE_OPTION3_EN_HIZ   0x8000U
+#define BQ25731_CHARGE_OPTION3_EN_OTG   0x1000U
 /* Monitoring ADC configuration shared with startup verification. */
 #define BQ25731_ADC_OPTION_MONITORING   0xE05FU
 /* ADC_START (bit 14) is a trigger and may read back as zero. Verify the
@@ -57,6 +61,7 @@ typedef struct {
     uint8_t manufacturer_id;
     uint8_t device_id;
     uint16_t charge_option0;
+    uint16_t charge_option3;
     uint16_t charge_option4;
     uint16_t adc_option;
     uint16_t charge_voltage;
@@ -107,6 +112,9 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption0(
 BQ25731_Status_t BQ25731_StartWriteStartupOption4(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartWriteStartupOption1(
+    BQ25731_Device_t *dev, uint16_t value);
+BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev);
+BQ25731_Status_t BQ25731_StartWriteOption3(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev);

@@ -57,15 +57,17 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 | `pd_role` `pd_mv` `pd_ma` | PM snapshot contract (`pd_role`: 1=sink charge, 2=source) |
 | `bq_otg` | BQ25731 `IN_OTG`. Stays `0` while charging the pack. `1` only after a real Source attach (`conn` 6/7) or `USB SOURCE`. |
 
-Default USB-C: **AUTO = DRP + Try.SNK** (prefer charging the pack). 9 V source/sink PDOs stay in the TPS image.
+Default USB-C: **AUTO = DRP + Try.SRC** (USB-C charging-port optional state, TPS `0x28` bits 9:8 = `1h`). 9 V source/sink PDOs stay in the TPS image.
+
+`cc1`/`cc2` are TPS `0x69` pin states (TRM 3.2.27): `1`=Ra and `2`=Rd are **Source-only** detections. `conn` is `STATUS 0x1A` bits 3:1 (`0`=no connection, `6`/`7`=attached). `plug` is `STATUS` bit 0 PlugPresent. `typec` is `0x69` TypeC Port State (`0x60` Attached.SRC, `0x61` Attached.SNK, `0x64` AttachWait.SRC, `0x67` Unattached.SRC, `0x00` Disabled). `rst` increments only when firmware actually starts a silicon reset; `rst_busy=1` while `0x28` is held Disabled waiting vSafe0V.
 
 Expected `TC` after flash:
 
-- **iPhone (good, keep)**: later `conn=6/7`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`). That is a completed contract — do not strip 9 V PDOs.
-- **iPad (was broken)**: long `conn=0` with `cc1=1 cc2=2` (Ra/Rd), `pd_mv=0`, `tps_vbus` 4998↔0, ghost `bq_vbus` 10.5–13.6 V, `bq_iin=0`, no Source_Cap/Request. Try.SNK + OTG gate target a Sink contract (or iPad-as-source charging the pack), not a pack-sourced 9 V gadget session.
+- **iPhone (good, keep)**: later `conn=6/7`, `typec=0x60`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`).
+- **iPad**: must leave `conn=0 typec=0x64/0x67` + `cc1=1 cc2=2`. After unplug you **must** see `[PD-RESET] START` then `0x28 Disabled APPLIED` then `vSafe0V ok` then `0x28 policy APPLIED sm=2 try=1`. Next plug: `typec=0x60` or `0x61`, `conn=6/7`, either our source PDO or a sink contract. `rst` increases on each unplug.
 - Accidental OTG: PA4 stays low unless `USB SOURCE` or AUTO Source attach with `conn>=6`.
 
-Unplug/reattach: PA4 is forced LOW, leftover PDO/RDO are dropped (`pd_mv=0` until `conn>=6`), PORT_CONFIG is cycled Disabled→DRP+Try.SNK, PORT_CONTROL `0x29` clears InitiateSwap (accept sink swap only), and `DBfg` runs. Same kick if `conn=0` with live CC and leftover `bq_vbus`/`bq_otg`. Next plug must look like the first: no ghost 10–13 V, `bq_otg=0` until a real Source contract.
+Unplug/reattach: PA4 LOW, BQ `ChargeOption3` EN_HIZ=1 EN_OTG=0, `0x28` Disabled and **held** until TPS VBUS `<0.8 V` and `tSrcRecover` 800 ms (USB-C), then `0x28` DRP+Try.SRC, `0x29` InitiateSwap=0, `DBfg` (rejected if not dead-battery — TRM 4.6.2). Same kick if `conn=0` with live CC for 400 ms (does not require ghost `bq_vbus>=8 V`).
 
 ---
 

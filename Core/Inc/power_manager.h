@@ -85,6 +85,8 @@ typedef struct {
     BQ25731_Telemetry_t bq;
     PowerManager_PdSnapshot_t pd_snapshot;
     PowerManager_Error_t last_error;
+    uint32_t pd_reset_seq;
+    bool pd_reset_busy;
 } PowerManager_Status_t;
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c);

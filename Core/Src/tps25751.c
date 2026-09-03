@@ -779,13 +779,16 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* DRP uses Try.SNK (TRM TypeC Support Options = 2h).  Try.SRC raced
-     * dual-role iPad (conn=0, VBUS 5 V flap, no PD contract).  Try.SNK
-     * asks that partner to source so we can take a Sink contract; a
-     * sink-only iPhone still attaches via TryWait.SRC and can request 9 V.
+    /* DRP uses Try.SRC (TRM 3.2.12 TypeC Support Options = 1h).
+     * USB-C: a charging port / lab PSU is Source-preferring.  Complementary
+     * to iPad Try.SNK, so tCCDebounce can finish as Attached.SRC.
+     * Try.SNK vs iPad Try.SNK left both presenting Rd; STATUS.ConnectionState
+     * stayed 0h while 0x69 showed Source-only Ra/Rd (cc1=1 cc2=2).
+     * Sink-only iPhone still attaches from Unattached.SRC (Rd) as Source.
+     * A dedicated adapter (Rp) takes Try.SRC then TryWait.SNK → Attached.SNK.
      * Optional Try states do not apply to the single-role modes. */
     typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SNK : 0U;
+                    TPS25751_TYPEC_TRY_SRC : 0U;
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
     port_config[1] = (uint8_t)(

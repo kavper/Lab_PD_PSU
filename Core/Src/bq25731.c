@@ -147,6 +147,18 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption1(
         dev, BQ25731_REG_CHARGE_OPTION1, value);
 }
 
+BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev)
+{
+    return BQ25731_StartRead16(dev, BQ25731_REG_CHARGE_OPTION3);
+}
+
+BQ25731_Status_t BQ25731_StartWriteOption3(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION3, value);
+}
+
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev)
 {
