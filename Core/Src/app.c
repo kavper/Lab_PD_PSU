@@ -1668,6 +1668,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 
     PowerStage_ForceSafeState();
     reset_flags = RCC->CSR;
+    HostLink_SetBootResetFlags(reset_flags);
 
     set_x100 = App_ToFixed(VOUT_SETPOINT_DEFAULT_V, 100);
     ovp_x100 = App_ToFixed(VOUT_OVP_LIMIT, 100);

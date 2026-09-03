@@ -69,9 +69,10 @@ typedef struct {
     uint8_t fet_status;
     uint16_t manuf_status;
     uint16_t battery_status;
-    /* Wake debug on TB: init_step / vcell_mode_rb / manuf / fet */
+    /* Wake debug on TB: init_step / vcell_mode_rb / manuf / fet / cfg_fail */
     uint8_t init_step;
     uint16_t vcell_mode_rb;
+    uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
 } BQ76922_Snapshot_t;
@@ -83,10 +84,12 @@ typedef struct {
     uint8_t scan_index;
     uint8_t init_step;
     uint8_t cfg_poll_tries;
+    uint8_t cfg_enter_tries;
     uint8_t fet_en_attempts;
     uint32_t next_action_ms;
     uint32_t last_fet_cmd_ms;
     uint32_t bus_hold_since_ms;
+    uint32_t boot_settle_ms;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);

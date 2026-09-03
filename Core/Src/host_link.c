@@ -20,6 +20,7 @@
 #define HOST_LINK_TEL_DEFAULT_MS     500U
 
 static UART_HandleTypeDef *s_huart = NULL;
+static uint32_t s_boot_reset_flags;
 static uint8_t s_rx_byte;
 static char s_rx_line[HOST_LINK_RX_LINE_MAX];
 static volatile uint8_t s_rx_len;
@@ -158,7 +159,7 @@ static void HostLink_SendMachineTelemetry(void)
     n = snprintf(line, sizeof(line),
                  "TB bms=%u cfg=%u st=%u fault=0x%08lX alert=%u alarm=0x%04X "
                  "sa=0x%02X sb=0x%02X sc=0x%02X fet=0x%02X manuf=0x%04X "
-                 "init_step=%u vcell_rb=0x%04X batt=0x%04X "
+                 "init_step=%u vcell_rb=0x%04X batt=0x%04X cfg_fail=%u "
                  "chg=%u dsg=%u fets=%u series=%u "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d "
                  "min_mv=%d max_mv=%d dV_mv=%d sum_mv=%d "
@@ -179,6 +180,7 @@ static void HostLink_SendMachineTelemetry(void)
                  (unsigned int)bms.init_step,
                  (unsigned int)bms.vcell_mode_rb,
                  (unsigned int)bms.battery_status,
+                 (unsigned int)bms.cfg_fail_count,
                  (unsigned int)(bms.chg_fet_on ? 1U : 0U),
                  (unsigned int)(bms.dsg_fet_on ? 1U : 0U),
                  (unsigned int)(bms.fets_enabled ? 1U : 0U),
@@ -544,8 +546,16 @@ static void HostLink_HandleLine(char *line)
     HostLink_Tx("ERR CMD — send HELP\r\n");
 }
 
+void HostLink_SetBootResetFlags(uint32_t rcc_csr)
+{
+    s_boot_reset_flags = rcc_csr;
+}
+
 void HostLink_Init(UART_HandleTypeDef *huart)
 {
+    char line[96];
+    int n;
+
     s_huart = huart;
     s_rx_len = 0U;
     s_line_ready = false;
@@ -554,6 +564,18 @@ void HostLink_Init(UART_HandleTypeDef *huart)
     s_last_tel_ms = HAL_GetTick();
     HostLink_ArmRx();
     HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
+    n = snprintf(line, sizeof(line),
+                 "boot rcc_csr=0x%08lX (PIN=%u POR=%u SFT=%u IWDG=%u WWDG=%u LPWR=%u)\r\n",
+                 (unsigned long)s_boot_reset_flags,
+                 (s_boot_reset_flags & RCC_CSR_PINRSTF) ? 1U : 0U,
+                 (s_boot_reset_flags & RCC_CSR_BORRSTF) ? 1U : 0U,
+                 (s_boot_reset_flags & RCC_CSR_SFTRSTF) ? 1U : 0U,
+                 (s_boot_reset_flags & RCC_CSR_IWDGRSTF) ? 1U : 0U,
+                 (s_boot_reset_flags & RCC_CSR_WWDGRSTF) ? 1U : 0U,
+                 (s_boot_reset_flags & RCC_CSR_LPWRRSTF) ? 1U : 0U);
+    if (n > 0) {
+        HostLink_Tx(line);
+    }
     HostLink_Tx("USART1 = T/TB/TC telemetry only (VERBOSE 0). Send HELP.\r\n");
     HostLink_SendHelp();
 }

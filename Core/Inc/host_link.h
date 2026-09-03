@@ -21,6 +21,8 @@
  */
 
 void HostLink_Init(UART_HandleTypeDef *huart);
+/* Optional: print RCC CSR reset cause on the host banner (call before clear). */
+void HostLink_SetBootResetFlags(uint32_t rcc_csr);
 void HostLink_Task(void);
 void HostLink_RxCplt(UART_HandleTypeDef *huart);
 void HostLink_OnUartError(UART_HandleTypeDef *huart);

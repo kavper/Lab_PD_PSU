@@ -38,9 +38,11 @@
 #define BQ76922_PROBE_RETRY_MS           200U
 #define BQ76922_INIT_STEP_DELAY_MS       10U
 #define BQ76922_POST_CFG_DELAY_MS        200U
+#define BQ76922_BOOT_SETTLE_MS           300U
 #define BQ76922_FET_RETRY_MS             250U
-#define BQ76922_BUS_HOLD_MAX_MS          4000U
-#define BQ76922_CFG_POLL_MAX             25U
+#define BQ76922_BUS_HOLD_MAX_MS          15000U
+#define BQ76922_CFG_POLL_MAX             50U
+#define BQ76922_CFG_ENTER_MAX            6U
 #define BQ76922_CC2_CHARGE_MA            50
 #define BQ76922_CC2_DISCHARGE_MA         (-50)
 #define BQ76922_MANUF_FET_EN             (1U << 4)
@@ -61,6 +63,8 @@
 
 typedef enum {
     BQ76922_INIT_WAIT_READY = 0,
+    BQ76922_INIT_SLEEP_DISABLE_PRE,
+    BQ76922_INIT_CLR_ALARM_PRE,
     BQ76922_INIT_ENTER_CFG,
     BQ76922_INIT_WAIT_CFG,
     BQ76922_INIT_VCELL_MODE,
@@ -124,6 +128,11 @@ static bool BQ76922_BusIdle(const BQ76922_Device_t *dev)
 {
     if ((dev == NULL) || (dev->hi2c == NULL)) {
         return false;
+    }
+    /* During BMS bus-hold, do not wait on PM job flags — only the wire state.
+     * Otherwise a stale TPS IT job can freeze CONFIG_UPDATE forever. */
+    if (PowerManager_GetBmsBusHold()) {
+        return HAL_I2C_GetState(dev->hi2c) == HAL_I2C_STATE_READY;
     }
     if (!PowerManager_IsI2cIdle()) {
         return false;
@@ -418,9 +427,13 @@ static BQ76922_Status_t BQ76922_ReadBatteryStatus(BQ76922_Device_t *dev)
 static void BQ76922_InitRestart(BQ76922_Device_t *dev, uint32_t delay_ms)
 {
     dev->snapshot.fault_flags |= BQ76922_FAULT_I2C;
+    dev->snapshot.cfg_fail_count++;
     dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
     dev->cfg_poll_tries = 0U;
+    dev->cfg_enter_tries = 0U;
     dev->fet_en_attempts = 0U;
+    /* Allow a fresh exclusive-bus window after a failed CFGUPDATE cycle. */
+    dev->bus_hold_since_ms = 0U;
     dev->next_action_ms = HAL_GetTick() + delay_ms;
     dev->snapshot.init_step = dev->init_step;
 }
@@ -455,7 +468,8 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 
     switch ((BQ76922_InitStep_t)dev->init_step) {
         case BQ76922_INIT_WAIT_READY:
-            /* After button/charger wake SEC may be 0 until AFE finishes boot. */
+            /* After button/charger wake SEC may be 0 until AFE finishes boot.
+             * Also wait BOOT_SETTLE_MS — TI recommends ~300 ms before CFGUPDATE. */
             status = BQ76922_ReadBatteryStatus(dev);
             if (status == BQ76922_OK) {
                 sec = (uint16_t)(dev->snapshot.battery_status & BQ76922_BATT_SEC_MASK);
@@ -470,12 +484,37 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                     BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
                     return false;
                 }
+                if (dev->boot_settle_ms == 0U) {
+                    dev->boot_settle_ms = HAL_GetTick();
+                }
+                if ((uint32_t)(HAL_GetTick() - dev->boot_settle_ms) <
+                    BQ76922_BOOT_SETTLE_MS) {
+                    delay_ms = 50U;
+                    dev->next_action_ms = HAL_GetTick() + delay_ms;
+                    return false;
+                }
             }
+            break;
+
+        case BQ76922_INIT_SLEEP_DISABLE_PRE:
+            /* SLEEP_EN was set in user log (batt=0x0184). Disable before CFGUPDATE. */
+            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SLEEP_DISABLE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_CLR_ALARM_PRE:
+            status = BQ76922_ReadDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+            if (status == BQ76922_OK) {
+                (void)BQ76922_WriteDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+                dev->snapshot.alarm_status = (uint16_t)BQ76922_Le16(buf);
+                dev->snapshot.alert_latched = false;
+            }
+            delay_ms = 10U;
             break;
 
         case BQ76922_INIT_ENTER_CFG:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SET_CFGUPDATE);
-            delay_ms = 5U;
+            delay_ms = 10U; /* SET_CFGUPDATE needs ~2 ms; give margin before poll */
             dev->cfg_poll_tries = 0U;
             break;
 
@@ -485,14 +524,26 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                 if ((dev->snapshot.battery_status & BQ76922_BATT_CFGUPDATE) == 0U) {
                     dev->cfg_poll_tries++;
                     if (dev->cfg_poll_tries >= BQ76922_CFG_POLL_MAX) {
-                        BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
+                        dev->snapshot.cfg_fail_count++;
+                        dev->cfg_enter_tries++;
+                        if (dev->cfg_enter_tries >= BQ76922_CFG_ENTER_MAX) {
+                            /* HW suspect: RST_SHUT must be LOW (TP28). */
+                            BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
+                            return false;
+                        }
+                        /* Resend SET_CFGUPDATE without full restart. */
+                        dev->init_step = (uint8_t)BQ76922_INIT_ENTER_CFG;
+                        dev->snapshot.init_step = dev->init_step;
+                        dev->cfg_poll_tries = 0U;
+                        dev->next_action_ms = HAL_GetTick() + 50U;
                         return false;
                     }
-                    delay_ms = 10U;
+                    delay_ms = 20U;
                     dev->next_action_ms = HAL_GetTick() + delay_ms;
                     return false;
                 }
                 dev->cfg_poll_tries = 0U;
+                dev->cfg_enter_tries = 0U;
             }
             break;
 
@@ -801,9 +852,11 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
     dev->snapshot.init_step = dev->init_step;
     dev->cfg_poll_tries = 0U;
+    dev->cfg_enter_tries = 0U;
     dev->fet_en_attempts = 0U;
     dev->scan_index = 0U;
     dev->bus_hold_since_ms = 0U;
+    dev->boot_settle_ms = 0U;
     dev->next_action_ms = HAL_GetTick();
     BQ76922_UpdateBusHold(dev, HAL_GetTick());
 }
