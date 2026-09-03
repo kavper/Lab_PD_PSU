@@ -80,7 +80,7 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 | **S1** → **TS2**–**BATT-** (+R61) | Button wake from SHUTDOWN |
 | **LD** (TP27) | Charger/USB wake when LD > ~1.45 V |
 | **RST_SHUT** (**TP28**) | Must stay **LOW** in normal run. High &lt;1 s = AFE digital reset; high ≥1 s = SHUTDOWN (FETs off, REG1 off). Floating/pull-up here blocks `CFGUPDATE` and looks like a wake/reset loop. |
-| **CFETOFF / DFETOFF** (TP29 / TP30) | If asserted, FETs stay forced off even after `ALL_FETS_ON` |
+| **CFETOFF / DFETOFF** (TP29 / TP30) | Leave floating OK now: CFGUPDATE writes Pin Config **0x00** (unused). If OTP had CFETOFF (`0x02`) and the pin floated high → `fet=0x14` (`DSG`+`DCHG_PIN`), `chg=0` forever |
 | **+VBAT** → LMR33620 → 3V3 | G4 MCU keep-alive (independent of PACK/FETs) |
 | **PACK** | After CHG/DSG; `pack_mv≈0` with FETs off is expected |
 
@@ -88,17 +88,17 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 
 1. Button (TS2→VSS) or charger (LD) exits SHUTDOWN → G4 boots from +VBAT.  
 2. Hold I2C4, settle ~300 ms, `SLEEP_DISABLE`, clear alarms.  
-3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, exit, verify `vcell_rb`.  
-4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD.  
-5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug transient), clear alarms + `ALL_FETS_ON` — SCD/OCC do **not** latch `FAULT_BMS`.
+3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, **CFETOFF/DFETOFF Pin Config=0x00**, CC Gain for 5 mΩ, exit, verify `vcell_rb`.  
+4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD/false COV.  
+5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug / false COV), clear alarms + `ALL_FETS_ON`; sticky `chg=0` with `fet` bit4 or false COV re-runs CFGUPDATE.
 
-If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&1==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low** or CFETOFF/DFETOFF asserted. Reboot loops with `sa=0x90` / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.
+If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&1==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low**. Stuck `chg=0 dsg=1 fet=0x14 sa=0x10` was **CFETOFF pin force + false COV latch** — fixed by disabling CFETOFF/DFETOFF in CFGUPDATE. Reboot loops with `sa=0x90` / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.
 
 ### Sense resistors / current limits (do not mix paths)
 
 | Path | Shunt | Where set | Notes |
 |---|---|---|---|
-| **BQ76922 pack** (`i_pack_ma` / `i_cc2_ma`) | **5 mΩ** SRP–SRN | `BMS_SENSE_MOHM` → `CC Gain` / `Capacity Gain` in CFGUPDATE | OTP default is ~1 mΩ → readings were ~**5× too high** until `CC Gain=7.4768/5` |
+| **BQ76922 pack** (`i_pack_ma` / `i_cc2_ma`) | **5 mΩ** SRP–SRN | `BMS_SENSE_MOHM` → `CC Gain` / `Capacity Gain` in CFGUPDATE | OTP default is ~1 mΩ → readings were ~**5× too high** until `CC Gain=7.4768/5`. **Already in this FW** — schematic 5 mΩ is correct; not the `chg=0` root cause |
 | **BQ25731 charger** | **5 mΩ** RAC/RSR | `power_manager` Option1 `FAST_5MOHM` | Already programmed at BQ init |
 | **DCDC / INA296** (`iout` on T line) | **1 mΩ** in `board_rev.h` | `BOARD_INA296_SHUNT_OHM` | Separate from BMS pack sense |
 

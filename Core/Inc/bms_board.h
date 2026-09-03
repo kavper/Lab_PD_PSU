@@ -75,12 +75,20 @@
 #define BMS_ENABLED_PROTECTIONS_B        0x00U
 
 /*
- * FET Options 0x9308: SFET|HOST_FETOFF_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
+ * FET Options 0x9308: SFET|HOST_FET_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
  * PDSG_EN soft-starts PACK caps before DSG — without it ALL_FETS_ON into
  * VIN/GaN capacitance trips SCD (sa bit0 / often seen as 0x80|COV) and the
  * pack path collapses hard enough to BOR the 3V3 rail (PIN+POR reboot loop).
  */
 #define BMS_FET_OPTIONS                  0x1DU
+/*
+ * CFETOFF / DFETOFF Pin Config (0x92FA / 0x92FB): PIN_FXN=0 → unused.
+ * HW rev2 leaves TP29/TP30 floating; if PIN_FXN=CFETOFF (0x02) and the pin
+ * floats high (active-high default), CHG stays forced off forever
+ * (fet≈0x14 = DSG + DCHG_PIN) even after ALL_FETS_ON. Explicit 0x00.
+ */
+#define BMS_CFETOFF_PIN_CONFIG           0x00U
+#define BMS_DFETOFF_PIN_CONFIG           0x00U
 /* Predischarge Timeout 0x930E (U1, ~10 ms/step); Stop Delta 0x930F (U1, 10 mV). */
 #define BMS_PDSG_TIMEOUT                 0x32U  /* ~500 ms max predischarge */
 #define BMS_PDSG_STOP_DELTA              50U    /* exit PDSG when |stack-pack| < 500 mV */

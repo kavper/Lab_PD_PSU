@@ -76,7 +76,7 @@ Hardware is a **4S** Li-ion pack on the BQ76922 (5-channel AFE). Firmware writes
 
 See [HOST_TELEMETRY.md](HOST_TELEMETRY.md) for USART1 `T`/`TB`/`TC` parsing. Charger `BOARD_CHARGER_CELL_COUNT` is already 4.
 
-With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. Wake path polls `Battery Status[CFGUPDATE]` before RAM writes, briefly holds I2C4 so TPS does not starve FET bring-up, rejects stale Manufacturing Status `0x0017` (VCell Mode bit4 false-positive for `FET_EN`), then `FET_ENABLE` + `ALL_FETS_ON`. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off; ON/OFF is USART1. Button wakes via **TS2**; charger via **LD**. Check `TB`: `init_step`, `vcell_rb=0x0017`, `manuf` bit4, `fet`/`fets`.
+With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. Wake path polls `Battery Status[CFGUPDATE]` before RAM writes, briefly holds I2C4 so TPS does not starve FET bring-up, rejects stale Manufacturing Status `0x0017` (VCell Mode bit4 false-positive for `FET_EN`), writes **CFETOFF/DFETOFF Pin Config=0x00** (floating TP29/TP30 must not force CHG off), CC Gain for **5 mΩ** pack sense, then `FET_ENABLE` + `ALL_FETS_ON`. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off; ON/OFF is USART1. Button wakes via **TS2**; charger via **LD**. Check `TB`: `init_step`, `vcell_rb=0x0017`, `manuf` bit4, `fet`/`fets` (`chg=1 dsg=1`; `fet=0x14` was CFETOFF force).
 
 ## Bring-up sequence
 

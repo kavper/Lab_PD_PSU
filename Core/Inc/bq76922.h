@@ -87,6 +87,7 @@ typedef struct {
     uint8_t cfg_enter_tries;
     uint8_t fet_en_attempts;
     uint8_t fet_verify_attempts;
+    uint8_t fet_recover_fails;
     uint32_t next_action_ms;
     uint32_t last_fet_cmd_ms;
     uint32_t bus_hold_since_ms;
