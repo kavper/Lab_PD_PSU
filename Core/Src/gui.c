@@ -491,7 +491,7 @@ static char *GUI_UsbModeText(PSU_GuiUsbMode_t mode) {
       return "SOURCE ONLY";
     case PSU_GUI_USB_MODE_AUTO:
     default:
-      return "AUTO (DRP)";
+      return "AUTO";
   }
 }
 

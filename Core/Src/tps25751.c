@@ -10,7 +10,12 @@
  * byte 1 bits 1:0 are register bits 9:8 (Type-C Support Options). */
 #define TPS25751_PORT_STATE_MASK       0x03U
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
-#define TPS25751_TYPEC_TRY_SRC         0x01U
+#define TPS25751_TYPEC_TRY_SNK         0x02U
+#define TPS25751_PC_PROCESS_TO_SINK    0x10U
+#define TPS25751_PC_INITIATE_TO_SINK   0x20U
+#define TPS25751_PC_PROCESS_TO_SOURCE  0x40U
+#define TPS25751_PC_INITIATE_TO_SOURCE 0x80U
+#define TPS25751_PC_PR_SWAP_MASK       0xF0U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -359,10 +364,11 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
     }
 
     if (dev->operation == TPS25751_OP_READ_REGISTER) {
-        bool active_contract_register =
+        bool flexible_length =
             (dev->register_address == TPS25751_REG_ACTIVE_PDO) ||
-            (dev->register_address == TPS25751_REG_ACTIVE_RDO);
-        status = TPS25751_CheckRead(dev, !active_contract_register);
+            (dev->register_address == TPS25751_REG_ACTIVE_RDO) ||
+            (dev->register_address == TPS25751_REG_PORT_CONTROL);
+        status = TPS25751_CheckRead(dev, !flexible_length);
         TPS25751_Finish(dev, status);
         return status;
     }
@@ -777,12 +783,12 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* AUTO remains a true DRP port, but Try.SRC biases the initial Type-C
-     * attach toward Source.  This avoids first accepting 5 V from another
-     * DRP (for example a Mac) and then performing a time-critical PR_SWAP.
-     * Optional Try states do not apply to the single-role modes. */
+    /* AUTO stays DRP. Try.SNK makes us the sink first so the partner
+     * advertises Source PDOs; that is the evidence AUTO needs (>5 V
+     * charger vs 5 V gadget). Optional Try states do not apply to
+     * single-role modes. */
     typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
+                    TPS25751_TYPEC_TRY_SNK : 0U;
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
     port_config[1] = (uint8_t)(
@@ -791,6 +797,33 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 
     return (port_config[0] != old_state) ||
            (port_config[1] != old_options);
+}
+
+bool TPS25751_PatchPortControlSwaps(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    bool accept_swap_to_source,
+    bool accept_swap_to_sink)
+{
+    uint8_t old_value;
+    uint8_t bits;
+
+    if (port_control == NULL) {
+        return false;
+    }
+
+    /* Never auto-initiate PR_SWAP; AUTO decides once from Source PDOs.
+     * Process bits accept or reject the partner's swap request. */
+    old_value = port_control[0];
+    bits = 0U;
+    if (accept_swap_to_source) {
+        bits |= TPS25751_PC_PROCESS_TO_SOURCE;
+    }
+    if (accept_swap_to_sink) {
+        bits |= TPS25751_PC_PROCESS_TO_SINK;
+    }
+    port_control[0] = (uint8_t)(
+        (old_value & (uint8_t)~TPS25751_PC_PR_SWAP_MASK) | bits);
+    return port_control[0] != old_value;
 }
 
 const char *TPS25751_StatusToString(TPS25751_Status_t status)
