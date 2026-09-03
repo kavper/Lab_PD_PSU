@@ -30,8 +30,13 @@
 #define BQ76922_RAM_VCELL_MODE           0x9304U
 #define BQ76922_RAM_ENABLED_PROT_A       0x9261U
 #define BQ76922_RAM_ENABLED_PROT_B       0x9262U
+#define BQ76922_RAM_BODY_DIODE           0x9273U
 #define BQ76922_RAM_CUV_THRESHOLD        0x9275U
 #define BQ76922_RAM_COV_THRESHOLD        0x9278U
+#define BQ76922_RAM_SCD_THRESHOLD        0x9286U
+#define BQ76922_RAM_FET_OPTIONS          0x9308U
+#define BQ76922_RAM_PDSG_TIMEOUT         0x930EU
+#define BQ76922_RAM_PDSG_STOP_DELTA      0x930FU
 
 #define BQ76922_I2C_TIMEOUT_MS           20U
 #define BQ76922_SCAN_PERIOD_MS           50U
@@ -40,6 +45,7 @@
 #define BQ76922_POST_CFG_DELAY_MS        200U
 #define BQ76922_BOOT_SETTLE_MS           300U
 #define BQ76922_FET_RETRY_MS             250U
+#define BQ76922_FET_VERIFY_MAX           8U
 #define BQ76922_BUS_HOLD_MAX_MS          15000U
 #define BQ76922_CFG_POLL_MAX             50U
 #define BQ76922_CFG_ENTER_MAX            6U
@@ -49,9 +55,18 @@
 /* FET Status: CHG=bit0, PCHG=bit1, DSG=bit2, PDSG=bit3 */
 #define BQ76922_FET_STATUS_CHG           0x01U
 #define BQ76922_FET_STATUS_DSG           0x04U
+#define BQ76922_FET_STATUS_PDSG          0x08U
 #define BQ76922_FET_STATUS_CHG_DSG       (BQ76922_FET_STATUS_CHG | BQ76922_FET_STATUS_DSG)
-#define BQ76922_SAFETY_A_CUV             0x04U
-#define BQ76922_SAFETY_A_COV             0x08U
+/* Safety Status A — TI TRM bit map (not the swapped CUV/COV masks we had). */
+#define BQ76922_SAFETY_A_SCD             0x01U
+#define BQ76922_SAFETY_A_OCD1            0x02U
+#define BQ76922_SAFETY_A_OCD2            0x04U
+#define BQ76922_SAFETY_A_OCC             0x08U
+#define BQ76922_SAFETY_A_COV             0x10U
+#define BQ76922_SAFETY_A_CUV             0x20U
+#define BQ76922_SAFETY_A_CURRENT \
+    (BQ76922_SAFETY_A_SCD | BQ76922_SAFETY_A_OCD1 | BQ76922_SAFETY_A_OCD2 | \
+     BQ76922_SAFETY_A_OCC)
 /* Battery Status 0x12 */
 #define BQ76922_BATT_CFGUPDATE             (1U << 0)
 #define BQ76922_BATT_SEC_MASK            (3U << 8)
@@ -72,6 +87,11 @@ typedef enum {
     BQ76922_INIT_PROT_B,
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
+    BQ76922_INIT_FET_OPTIONS,
+    BQ76922_INIT_PDSG_TIMEOUT,
+    BQ76922_INIT_PDSG_STOP_DELTA,
+    BQ76922_INIT_SCD_THRESH,
+    BQ76922_INIT_BODY_DIODE,
     BQ76922_INIT_EXIT_CFG,
     BQ76922_INIT_WAIT_EXIT,
     BQ76922_INIT_READ_VCELL_ADDR,
@@ -84,6 +104,8 @@ typedef enum {
     BQ76922_INIT_MANUF_CONFIRM_ISSUE,
     BQ76922_INIT_MANUF_CONFIRM_READ,
     BQ76922_INIT_ALL_FETS_ON,
+    BQ76922_INIT_FET_SETTLE,
+    BQ76922_INIT_FET_VERIFY,
     BQ76922_INIT_DONE,
 } BQ76922_InitStep_t;
 
@@ -314,14 +336,26 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
     uint8_t sa = dev->snapshot.safety_status_a;
     uint8_t sb = dev->snapshot.safety_status_b;
     uint8_t sc = dev->snapshot.safety_status_c;
+    bool real_cov;
+    bool real_cuv;
 
-    if ((sa & 0x08U) != 0U) {
+    /* Only treat COV/CUV as cell faults when voltages agree — a capacitive
+     * ALL_FETS_ON transient can latch safety bits without a real OV/UV. */
+    real_cov = ((sa & BQ76922_SAFETY_A_COV) != 0U) &&
+               dev->snapshot.sample_valid &&
+               (dev->snapshot.max_cell_mv >= (int16_t)BMS_COV_THRESHOLD_MV);
+    real_cuv = ((sa & BQ76922_SAFETY_A_CUV) != 0U) &&
+               dev->snapshot.sample_valid &&
+               (dev->snapshot.min_cell_mv > 0) &&
+               (dev->snapshot.min_cell_mv <= (int16_t)BMS_CUV_THRESHOLD_MV);
+
+    if (real_cov) {
         flags |= BQ76922_FAULT_CELL_OV;
     }
-    if ((sa & 0x04U) != 0U) {
+    if (real_cuv) {
         flags |= BQ76922_FAULT_CELL_UV;
     }
-    if ((sb != 0U) || (sc != 0U)) {
+    if (((sa & BQ76922_SAFETY_A_CURRENT) != 0U) || (sb != 0U) || (sc != 0U)) {
         flags |= BQ76922_FAULT_SAFETY;
     }
     if (dev->snapshot.alert_latched || dev->snapshot.alert_pin) {
@@ -330,12 +364,9 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
 
     dev->snapshot.fault_flags = flags;
 
-    if ((flags & (BQ76922_FAULT_CELL_OV |
-                  BQ76922_FAULT_CELL_UV |
-                  BQ76922_FAULT_SAFETY)) != 0U) {
-        /* Do not kill the rail until 4S config stuck and FETs were attempted.
-         * Blank OTP boots as "all cells" — a skipped VC4 looks like CUV and
-         * would otherwise latch FAULT_BMS before VCell Mode is applied. */
+    /* SCD/OCD/OCC and false COV are recoverable — clear + ALL_FETS_ON.
+     * Only confirmed cell UV/OV may request a host rail shutdown. */
+    if ((flags & (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) != 0U) {
         if (dev->snapshot.configured) {
             dev->snapshot.shutdown_request = true;
             dev->snapshot.state = BQ76922_STATE_FAULT;
@@ -422,21 +453,7 @@ static BQ76922_Status_t BQ76922_ReadBatteryStatus(BQ76922_Device_t *dev)
     return BQ76922_OK;
 }
 
-static void BQ76922_InitRestart(BQ76922_Device_t *dev, uint32_t delay_ms)
-{
-    dev->snapshot.fault_flags |= BQ76922_FAULT_I2C;
-    dev->snapshot.cfg_fail_count++;
-    dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
-    dev->cfg_poll_tries = 0U;
-    dev->cfg_enter_tries = 0U;
-    dev->fet_en_attempts = 0U;
-    /* Allow a fresh exclusive-bus window after a failed CFGUPDATE cycle. */
-    dev->bus_hold_since_ms = 0U;
-    dev->next_action_ms = HAL_GetTick() + delay_ms;
-    dev->snapshot.init_step = dev->init_step;
-}
-
-static BQ76922_Status_t BQ76922_HandleAlert(BQ76922_Device_t *dev)
+static BQ76922_Status_t BQ76922_ClearAlarms(BQ76922_Device_t *dev)
 {
     uint8_t buf[2];
     BQ76922_Status_t status;
@@ -446,11 +463,40 @@ static BQ76922_Status_t BQ76922_HandleAlert(BQ76922_Device_t *dev)
         return status;
     }
 
-    dev->snapshot.alarm_status = (uint16_t)BQ76922_Le16(buf);
-    (void)BQ76922_ReadSafetyStatus(dev);
+    status = BQ76922_WriteDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+    if (status != BQ76922_OK) {
+        return status;
+    }
 
-    (void)BQ76922_WriteDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+    dev->snapshot.alarm_status = (uint16_t)BQ76922_Le16(buf);
     dev->snapshot.alert_latched = false;
+    (void)BQ76922_ReadSafetyStatus(dev);
+    return BQ76922_OK;
+}
+
+static void BQ76922_InitRestart(BQ76922_Device_t *dev, uint32_t delay_ms)
+{
+    dev->snapshot.fault_flags |= BQ76922_FAULT_I2C;
+    dev->snapshot.cfg_fail_count++;
+    dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
+    dev->cfg_poll_tries = 0U;
+    dev->cfg_enter_tries = 0U;
+    dev->fet_en_attempts = 0U;
+    dev->fet_verify_attempts = 0U;
+    /* Allow a fresh exclusive-bus window after a failed CFGUPDATE cycle. */
+    dev->bus_hold_since_ms = 0U;
+    dev->next_action_ms = HAL_GetTick() + delay_ms;
+    dev->snapshot.init_step = dev->init_step;
+}
+
+static BQ76922_Status_t BQ76922_HandleAlert(BQ76922_Device_t *dev)
+{
+    BQ76922_Status_t status;
+
+    status = BQ76922_ClearAlarms(dev);
+    if (status != BQ76922_OK) {
+        return status;
+    }
     BQ76922_DecodeSafetyFaults(dev);
     return BQ76922_OK;
 }
@@ -571,6 +617,36 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_COV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
                                         BMS_COV_THRESHOLD_CODE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_FET_OPTIONS:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_FET_OPTIONS,
+                                        BMS_FET_OPTIONS);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_PDSG_TIMEOUT:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT,
+                                        BMS_PDSG_TIMEOUT);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_PDSG_STOP_DELTA:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA,
+                                        BMS_PDSG_STOP_DELTA);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_SCD_THRESH:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_SCD_THRESHOLD,
+                                        BMS_SCD_THRESHOLD);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_BODY_DIODE:
+            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_BODY_DIODE,
+                                        BMS_BODY_DIODE_THRESHOLD_MA);
             delay_ms = 20U;
             break;
 
@@ -706,7 +782,55 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_ALL_FETS_ON:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
             dev->last_fet_cmd_ms = HAL_GetTick();
-            delay_ms = 30U;
+            /* Let PDSG soft-start PACK caps before we decide FETs failed. */
+            delay_ms = 80U;
+            break;
+
+        case BQ76922_INIT_FET_SETTLE:
+            status = BQ76922_ClearAlarms(dev);
+            delay_ms = 40U;
+            break;
+
+        case BQ76922_INIT_FET_VERIFY:
+            status = BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, buf, 1U);
+            if (status == BQ76922_OK) {
+                uint8_t fet = buf[0];
+                bool path_on = ((fet & BQ76922_FET_STATUS_DSG) != 0U) ||
+                               ((fet & BQ76922_FET_STATUS_PDSG) != 0U);
+                bool chg_on = ((fet & BQ76922_FET_STATUS_CHG) != 0U);
+
+                dev->snapshot.fet_status = fet;
+                dev->snapshot.chg_fet_on = chg_on;
+                dev->snapshot.dsg_fet_on =
+                    ((fet & BQ76922_FET_STATUS_DSG) != 0U);
+                dev->snapshot.fets_enabled = (chg_on || path_on);
+                (void)BQ76922_ReadSafetyStatus(dev);
+
+                if (chg_on && path_on) {
+                    dev->fet_verify_attempts = 0U;
+                    break;
+                }
+
+                /* SCD/inrush or transient COV — clear and retry, do not reboot. */
+                if (dev->fet_verify_attempts < BQ76922_FET_VERIFY_MAX) {
+                    dev->fet_verify_attempts++;
+                    (void)BQ76922_ClearAlarms(dev);
+                    status = BQ76922_SendSubcommand(dev,
+                                                    BQ76922_SUBCMD_ALL_FETS_ON);
+                    if (status == BQ76922_OK) {
+                        dev->last_fet_cmd_ms = HAL_GetTick();
+                        delay_ms = 120U;
+                        dev->init_step = (uint8_t)BQ76922_INIT_FET_SETTLE;
+                        dev->snapshot.init_step = dev->init_step;
+                        dev->next_action_ms = HAL_GetTick() + delay_ms;
+                        return false;
+                    }
+                    break;
+                }
+                /* Keep going READY even if FETs still off — runtime retry
+                 * will keep clearing SCD and re-issuing ALL_FETS_ON. */
+                dev->fet_verify_attempts = 0U;
+            }
             break;
 
         case BQ76922_INIT_DONE:
@@ -857,6 +981,7 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     dev->cfg_poll_tries = 0U;
     dev->cfg_enter_tries = 0U;
     dev->fet_en_attempts = 0U;
+    dev->fet_verify_attempts = 0U;
     dev->scan_index = 0U;
     dev->bus_hold_since_ms = 0U;
     dev->boot_settle_ms = 0U;
@@ -972,8 +1097,11 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
             dev->snapshot.fet_status = buf[0];
             dev->snapshot.chg_fet_on = ((buf[0] & BQ76922_FET_STATUS_CHG) != 0U);
             dev->snapshot.dsg_fet_on = ((buf[0] & BQ76922_FET_STATUS_DSG) != 0U);
+            /* PDSG counts as discharge path while soft-starting PACK caps. */
             dev->snapshot.fets_enabled =
-                (dev->snapshot.chg_fet_on || dev->snapshot.dsg_fet_on);
+                (dev->snapshot.chg_fet_on ||
+                 dev->snapshot.dsg_fet_on ||
+                 ((buf[0] & BQ76922_FET_STATUS_PDSG) != 0U));
             dev->scan_index++;
         } else if (status == BQ76922_BUSY) {
             return;
@@ -993,34 +1121,60 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         dev->snapshot.sample_tick_ms = now_ms;
         dev->scan_index = 0U;
         BQ76922_UpdateCellStats(dev);
+        BQ76922_DecodeSafetyFaults(dev);
         BQ76922_UpdateWarnState(dev);
 
-        /* Button / USB-C wake unlock: leave FET Test Mode if needed, then
-         * ALL_FETS_ON. Do not trust a stale manuf==VCellMode (0x0017) bit4. */
-        hard_uv_ov = ((dev->snapshot.safety_status_a &
-                       (BQ76922_SAFETY_A_CUV | BQ76922_SAFETY_A_COV)) != 0U);
-        if (!dev->snapshot.fets_enabled &&
-            ((int32_t)(now_ms - dev->last_fet_cmd_ms) >= (int32_t)BQ76922_FET_RETRY_MS)) {
-            if (hard_uv_ov && (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE)) {
-                BQ76922_RequestReinit(dev);
-                return;
-            }
-            if (!hard_uv_ov) {
-                bool manuf_unknown =
-                    BQ76922_ManufLooksStaleVcell(dev->snapshot.manuf_status) ||
-                    ((dev->snapshot.manuf_status & BQ76922_MANUF_FET_EN) == 0U);
+        /* Button / USB-C wake unlock + charger-unplug recovery:
+         * clear recoverable SCD/OCC/false-COV, keep CHG+DSG both on. */
+        hard_uv_ov = ((dev->snapshot.fault_flags &
+                       (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) != 0U);
+        {
+            bool dsg_path =
+                dev->snapshot.dsg_fet_on ||
+                ((dev->snapshot.fet_status & BQ76922_FET_STATUS_PDSG) != 0U);
+            bool need_fet_cmd =
+                (!dev->snapshot.chg_fet_on || !dsg_path) ||
+                ((dev->snapshot.safety_status_a & BQ76922_SAFETY_A_CURRENT) != 0U);
 
-                if (manuf_unknown) {
-                    /* Need a verified FET_ENABLE path — do not toggle blindly. */
+            if (need_fet_cmd &&
+                ((int32_t)(now_ms - dev->last_fet_cmd_ms) >=
+                 (int32_t)BQ76922_FET_RETRY_MS)) {
+                if (hard_uv_ov && (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE)) {
                     BQ76922_RequestReinit(dev);
                     return;
                 }
-                status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
-                if (status == BQ76922_BUSY) {
-                    return;
-                }
-                if (status == BQ76922_OK) {
-                    dev->last_fet_cmd_ms = now_ms;
+                if (!hard_uv_ov) {
+                    bool manuf_unknown =
+                        BQ76922_ManufLooksStaleVcell(dev->snapshot.manuf_status) ||
+                        ((dev->snapshot.manuf_status & BQ76922_MANUF_FET_EN) == 0U);
+
+                    if (manuf_unknown) {
+                        /* Need a verified FET_ENABLE path — do not toggle blindly. */
+                        BQ76922_RequestReinit(dev);
+                        return;
+                    }
+                    status = BQ76922_ClearAlarms(dev);
+                    if (status == BQ76922_BUSY) {
+                        return;
+                    }
+                    if (status == BQ76922_OK) {
+                        status = BQ76922_SendSubcommand(dev,
+                                                        BQ76922_SUBCMD_ALL_FETS_ON);
+                    }
+                    if (status == BQ76922_BUSY) {
+                        return;
+                    }
+                    if (status == BQ76922_OK) {
+                        dev->last_fet_cmd_ms = now_ms;
+                        /* Recoverable current/COV latch must not keep FAULT. */
+                        if ((dev->snapshot.fault_flags &
+                             (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) == 0U) {
+                            dev->snapshot.shutdown_request = false;
+                            if (dev->snapshot.state == BQ76922_STATE_FAULT) {
+                                dev->snapshot.state = BQ76922_STATE_READY;
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -89,7 +89,7 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 1. Button (TS2→VSS) or charger (LD) exits SHUTDOWN → G4 boots from +VBAT.  
 2. Hold I2C4, settle ~300 ms, `SLEEP_DISABLE`, clear alarms.  
 3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, exit, verify `vcell_rb`.  
-4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON`.  
-5. Prot B OT/UT left off (TS2 is the wake button).
+4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD.  
+5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug transient), clear alarms + `ALL_FETS_ON` — SCD/OCC do **not** latch `FAULT_BMS`.
 
-If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1`. Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low** or CFETOFF/DFETOFF asserted.
+If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&1==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low** or CFETOFF/DFETOFF asserted. Reboot loops with `sa=0x90` / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.

@@ -55,10 +55,33 @@
 #define BMS_WARN_PACK_LOW_MV             11000U
 #define BMS_WARN_PACK_HIGH_MV            17000U
 
-/* Prot A: SCD|OCD2|OCD1|OCC|COV|CUV — CUV needs VCell Mode skip-VC4 first. */
-#define BMS_ENABLED_PROTECTIONS_A        0xBCU
+/*
+ * Prot A bits: SCD|OCD2|OCD1|OCC|COV|CUV (bit0..5).
+ * 0xFD = all of those except OCD2 (still covered by SCD for hard shorts).
+ * CUV needs VCell Mode skip-VC4 first or blank OTP looks like undervoltage.
+ */
+#define BMS_ENABLED_PROTECTIONS_A        0xFDU
 /* Prot B: leave OT/UT off until TS pins are proven; TS2 is the wake button. */
 #define BMS_ENABLED_PROTECTIONS_B        0x00U
+
+/*
+ * FET Options 0x9308: SFET|HOST_FETOFF_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
+ * PDSG_EN soft-starts PACK caps before DSG — without it ALL_FETS_ON into
+ * VIN/GaN capacitance trips SCD (sa bit0 / often seen as 0x80|COV) and the
+ * pack path collapses hard enough to BOR the 3V3 rail (PIN+POR reboot loop).
+ */
+#define BMS_FET_OPTIONS                  0x1DU
+/* Predischarge Timeout 0x930E (U1, ~10 ms/step); Stop Delta 0x930F (U1, 10 mV). */
+#define BMS_PDSG_TIMEOUT                 0x32U  /* ~500 ms max predischarge */
+#define BMS_PDSG_STOP_DELTA              50U    /* exit PDSG when |stack-pack| < 500 mV */
+/*
+ * SCD Threshold 0x9286 index — higher = less sensitive. Capacitive PACK wake
+ * needs headroom even with PDSG; 0x05 ≈ TI 100 mV example.
+ */
+#define BMS_SCD_THRESHOLD                0x05U
+/* Body Diode Threshold 0x9273 (mA). Default 50 mA kills DSG when CHG is off
+ * and the charger/load pushes current through the DSG body diode. */
+#define BMS_BODY_DIODE_THRESHOLD_MA      2000U
 
 #define BMS_CELL_USED(i)                 (((BMS_VCELL_MODE >> (i)) & 1U) != 0U)
 
