@@ -22,6 +22,8 @@
 #define PM_POLICY_ROLE_DRIFT_MS       750U
 #define PM_POLICY_SWAP_RETRY_MS      3000U
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
+#define PM_SESSION_RESET_STUCK_MS     300U
+#define PM_SESSION_RESET_COOLDOWN_MS 1500U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
 typedef enum {
@@ -30,6 +32,9 @@ typedef enum {
     PM_JOB_READ_BOOT_FLAGS,
     PM_JOB_READ_PORT_CONFIG,
     PM_JOB_WRITE_PORT_CONFIG,
+    PM_JOB_READ_PORT_CONTROL,
+    PM_JOB_WRITE_PORT_CONTROL,
+    PM_JOB_CLEAR_DBFG,
     PM_JOB_READ_INT_MASK,
     PM_JOB_WRITE_INT_MASK,
     PM_JOB_READ_STATUS,
@@ -106,12 +111,22 @@ typedef struct {
     uint8_t telemetry_phase;
     uint8_t bq_telemetry_phase;
     uint8_t port_config[TPS25751_PORT_CONFIG_LEN];
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN];
     uint8_t int_mask[TPS_INT_EVENT_BYTES];
     uint8_t event_to_clear[TPS_INT_EVENT_BYTES];
 
     bool initialized;
     bool mode_update_pending;
     bool port_write_pending;
+    bool port_config_valid;
+    bool port_control_valid;
+    bool port_control_read_pending;
+    bool port_control_write_pending;
+    bool dbfg_pending;
+    bool session_reset_busy;
+    bool session_reset_restore_config;
+    uint32_t session_reset_cooldown_until_ms;
+    uint32_t leftover_vbus_since_ms;
     bool event_mask_ready;
     bool event_mask_write_pending;
     bool event_clear_pending;
@@ -166,6 +181,9 @@ static PowerManager_Context_t g_pm;
 static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role);
 static const char *PowerManager_TypecStateToString(uint8_t state);
 static const char *PowerManager_CcStateToString(uint8_t state);
+static void PowerManager_UpdatePdSnapshot(void);
+static TPS25751_PortMode_t PowerManager_MapPortMode(
+    PowerManager_UserMode_t mode);
 
 static bool PowerManager_TickReached(uint32_t now_ms, uint32_t deadline_ms)
 {
@@ -203,6 +221,9 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_READ_BOOT_FLAGS: return "READ_BOOT_FLAGS";
         case PM_JOB_READ_PORT_CONFIG: return "READ_PORT_CONFIG";
         case PM_JOB_WRITE_PORT_CONFIG: return "WRITE_PORT_CONFIG";
+        case PM_JOB_READ_PORT_CONTROL: return "READ_PORT_CONTROL";
+        case PM_JOB_WRITE_PORT_CONTROL: return "WRITE_PORT_CONTROL";
+        case PM_JOB_CLEAR_DBFG: return "CLEAR_DBFG";
         case PM_JOB_READ_INT_MASK: return "READ_INT_MASK";
         case PM_JOB_WRITE_INT_MASK: return "WRITE_INT_MASK";
         case PM_JOB_READ_STATUS: return "READ_STATUS";
@@ -297,6 +318,72 @@ static TPS25751_PortMode_t PowerManager_MapPortMode(
     }
 }
 
+static void PowerManager_ForceOtgOff(void)
+{
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    g_pm.status.otg_pin_high = false;
+}
+
+static void PowerManager_ClearContractTelemetry(void)
+{
+    g_pm.status.tps.active_pdo_raw = 0U;
+    g_pm.status.tps.active_rdo_raw = 0U;
+    memset(&g_pm.status.tps.active_pdo, 0,
+           sizeof(g_pm.status.tps.active_pdo));
+    memset(&g_pm.status.tps.active_rdo, 0,
+           sizeof(g_pm.status.tps.active_rdo));
+    PowerManager_UpdatePdSnapshot();
+}
+
+static void PowerManager_BeginSessionReset(uint32_t now_ms, const char *why)
+{
+    if (g_pm.session_reset_busy ||
+        !PowerManager_TickReached(now_ms,
+                                  g_pm.session_reset_cooldown_until_ms)) {
+        return;
+    }
+
+    PowerManager_ForceOtgOff();
+    PowerManager_ClearContractTelemetry();
+    memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
+    memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
+    g_pm.partner_source_caps_current = false;
+    g_pm.partner_sink_observed = false;
+    g_pm.policy_swap_attempted = false;
+    g_pm.status.source_fault_latched = false;
+    g_pm.leftover_vbus_since_ms = 0U;
+
+    g_pm.session_reset_busy = true;
+    g_pm.dbfg_pending = true;
+    g_pm.port_control_write_pending = false;
+    if (g_pm.port_control_valid) {
+        (void)TPS25751_PatchPortControl(
+            g_pm.port_control,
+            PowerManager_MapPortMode(g_pm.status.requested_mode));
+        g_pm.port_control_write_pending = true;
+    } else {
+        g_pm.port_control_read_pending = true;
+    }
+
+    if (g_pm.port_config_valid) {
+        /* Writing 0x28 disconnects/reconnects the Type-C SM (TRM 3.10).
+         * Disabled then DRP+Try.SNK is the same cold start as first plug. */
+        TPS25751_SetPortStateMachine(g_pm.port_config,
+                                     TPS25751_PORT_DISABLED);
+        g_pm.port_write_pending = true;
+        g_pm.session_reset_restore_config = true;
+        g_pm.mode_update_pending = false;
+        g_pm.status.applied_mode_valid = false;
+    } else {
+        g_pm.mode_update_pending = true;
+        g_pm.session_reset_restore_config = false;
+    }
+
+    Debug_Printf("[PD-RESET t=%lu] %s; OTG=LOW, 0x28 Disabled->policy, 0x29 PR_SWAP off, DBfg",
+                 (unsigned long)now_ms,
+                 (why != NULL) ? why : "session");
+}
+
 static void PowerManager_SetOtgPin(bool high)
 {
     if (g_pm.status.otg_pin_high != high) {
@@ -310,7 +397,8 @@ static void PowerManager_MaintainOtgPermissionPin(void)
 {
     bool allow_otg;
 
-    if ((g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
+    if (g_pm.session_reset_busy ||
+        (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
         (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF) ||
         (!g_pm.status.tps.attached) ||
         (g_pm.status.tps.role != TPS25751_ROLE_SOURCE)) {
@@ -321,7 +409,9 @@ static void PowerManager_MaintainOtgPermissionPin(void)
      * with no completed Source attach) must not reverse-boost.  Explicit
      * USB SOURCE, or AUTO after ConnectionState 6/7 as Source (iPhone 9 V),
      * may raise it.  iPad flap is conn=0 and keeps PA4 low. */
-    if (g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY) {
+    if (g_pm.session_reset_busy) {
+        allow_otg = false;
+    } else if (g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY) {
         allow_otg = true;
     } else if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
                g_pm.status.tps.attached &&
@@ -343,6 +433,15 @@ static void PowerManager_UpdatePdSnapshot(void)
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->attached = t->attached;
     snapshot->data_role_dfp = t->data_role_dfp;
+
+    /* STATUS.PresentPDRole and Active PDO/RDO survive unplug inside the
+     * TPS.  Host telemetry must not keep advertising a dead 9 V contract
+     * (pd_role=2, leftover pd_mv) while conn=0. */
+    if ((!t->attached) || (t->connection_state < 6U)) {
+        snapshot->power_role = POWER_MANAGER_PD_ROLE_UNKNOWN;
+        return;
+    }
+
     snapshot->active_pdo_raw = t->active_pdo_raw;
     snapshot->active_rdo_raw = t->active_rdo_raw;
 
@@ -799,6 +898,61 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     }
 }
 
+static void PowerManager_FinishSessionResetIfIdle(uint32_t now_ms)
+{
+    if (!g_pm.session_reset_busy) {
+        return;
+    }
+    if (g_pm.port_write_pending ||
+        g_pm.session_reset_restore_config ||
+        g_pm.port_control_read_pending ||
+        g_pm.port_control_write_pending ||
+        g_pm.dbfg_pending ||
+        g_pm.mode_update_pending) {
+        return;
+    }
+    g_pm.session_reset_busy = false;
+    g_pm.session_reset_cooldown_until_ms =
+        now_ms + PM_SESSION_RESET_COOLDOWN_MS;
+}
+
+static void PowerManager_CheckLeftoverVbus(uint32_t now_ms)
+{
+    bool cc_live;
+    bool vbus_dirty;
+    uint8_t cc1 = g_pm.status.tps.cc1_state;
+    uint8_t cc2 = g_pm.status.tps.cc2_state;
+
+    if (g_pm.status.tps.attached ||
+        (g_pm.status.tps.connection_state >= 6U) ||
+        g_pm.session_reset_busy) {
+        g_pm.leftover_vbus_since_ms = 0U;
+        return;
+    }
+
+    /* CC showing Rd/Ra/Rp while STATUS.ConnectionState is 0: Type-C SM is
+     * wedged (typical after leftover OTG VBUS). */
+    cc_live = ((cc1 >= 1U) && (cc1 <= 5U)) ||
+              ((cc2 >= 1U) && (cc2 <= 5U));
+    vbus_dirty = g_pm.status.otg_pin_high ||
+                 g_pm.status.bq.in_otg ||
+                 (g_pm.status.bq.adc_vbus_mv >= 8000U) ||
+                 (g_pm.status.tps.vbus_mv >= 5500U);
+    if (!(cc_live && vbus_dirty)) {
+        g_pm.leftover_vbus_since_ms = 0U;
+        return;
+    }
+    if (g_pm.leftover_vbus_since_ms == 0U) {
+        g_pm.leftover_vbus_since_ms = now_ms;
+        return;
+    }
+    if ((uint32_t)(now_ms - g_pm.leftover_vbus_since_ms) >=
+        PM_SESSION_RESET_STUCK_MS) {
+        PowerManager_BeginSessionReset(now_ms,
+            "conn=0 with CC and leftover VBUS/OTG");
+    }
+}
+
 static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
 {
     if (g_pm.status.tps.attached != g_pm.previous_attached) {
@@ -809,9 +963,11 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
             g_pm.detach_count++;
         }
         PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
-        if ((PM_VERBOSE_TRANSITION_LOGS != 0U) &&
-            !g_pm.status.tps.attached) {
-            Debug_Printf("[PD-POLICY] detach; decision state cleared");
+        if (!g_pm.status.tps.attached) {
+            PowerManager_BeginSessionReset(now_ms, "unplug");
+            if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
+                Debug_Printf("[PD-POLICY] detach; decision state cleared");
+            }
         }
     }
 }
@@ -1172,6 +1328,18 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                          (unsigned long)now_ms,
                          TPS25751_StatusToString(operation_status),
                          g_pm.tps.task_return_code);
+        } else if (completed_job == PM_JOB_CLEAR_DBFG) {
+            g_pm.dbfg_pending = false;
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            Debug_Printf("[PD-RESET] DBfg failed status=%s task=%u",
+                         TPS25751_StatusToString(operation_status),
+                         g_pm.tps.task_return_code);
+        } else if ((completed_job == PM_JOB_READ_PORT_CONTROL) ||
+                   (completed_job == PM_JOB_WRITE_PORT_CONTROL)) {
+            g_pm.port_control_read_pending = false;
+            g_pm.port_control_write_pending = false;
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            PowerManager_HandleTpsError(operation_status, now_ms);
         } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
                    (completed_job == PM_JOB_SWAP_TO_SINK)) {
             g_pm.policy_phase = PM_POLICY_DONE;
@@ -1217,6 +1385,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     g_pm.bq_init = PM_BQ_INIT_WAIT;
                     g_pm.local_source_caps_pending = true;
                     g_pm.local_source_caps_valid = false;
+                    g_pm.dbfg_pending = true;
+                    g_pm.port_control_read_pending = true;
                 }
                 PowerManager_SetState(POWER_MANAGER_TPS_READY);
             } else {
@@ -1263,23 +1433,85 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 break;
             }
             memcpy(g_pm.port_config, data, sizeof(g_pm.port_config));
+            g_pm.port_config_valid = true;
             g_pm.port_write_pending = TPS25751_PatchPortMode(
                 g_pm.port_config,
                 PowerManager_MapPortMode(g_pm.status.requested_mode));
+            if (g_pm.session_reset_busy && !g_pm.port_write_pending) {
+                TPS25751_SetPortStateMachine(g_pm.port_config,
+                                             TPS25751_PORT_DISABLED);
+                g_pm.port_write_pending = true;
+                g_pm.session_reset_restore_config = true;
+            }
             if (!g_pm.port_write_pending) {
                 g_pm.status.applied_mode = g_pm.status.requested_mode;
                 g_pm.status.applied_mode_valid = true;
                 g_pm.mode_update_pending = false;
+                if (!g_pm.port_control_valid) {
+                    g_pm.port_control_read_pending = true;
+                }
             }
             break;
 
         case PM_JOB_WRITE_PORT_CONFIG:
+            if (g_pm.session_reset_restore_config) {
+                g_pm.session_reset_restore_config = false;
+                (void)TPS25751_PatchPortMode(
+                    g_pm.port_config,
+                    PowerManager_MapPortMode(g_pm.status.requested_mode));
+                g_pm.port_write_pending = true;
+                break;
+            }
             g_pm.port_write_pending = false;
             g_pm.mode_update_pending = false;
             g_pm.status.applied_mode = g_pm.status.requested_mode;
             g_pm.status.applied_mode_valid = true;
             g_pm.status.source_fault_latched = false;
             g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+            if (!g_pm.port_control_valid) {
+                g_pm.port_control_read_pending = true;
+            } else {
+                (void)TPS25751_PatchPortControl(
+                    g_pm.port_control,
+                    PowerManager_MapPortMode(g_pm.status.requested_mode));
+                g_pm.port_control_write_pending = true;
+            }
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            break;
+
+        case PM_JOB_READ_PORT_CONTROL:
+            if ((data == NULL) || (length < TPS25751_PORT_CONTROL_LEN)) {
+                PowerManager_HandleTpsError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            memcpy(g_pm.port_control, data, TPS25751_PORT_CONTROL_LEN);
+            g_pm.port_control_valid = true;
+            g_pm.port_control_read_pending = false;
+            g_pm.port_control_write_pending =
+                TPS25751_PatchPortControl(
+                    g_pm.port_control,
+                    PowerManager_MapPortMode(g_pm.status.requested_mode)) ||
+                g_pm.session_reset_busy;
+            Debug_Printf("[PD-RESET] PORT_CONTROL=0x%02X%02X%02X%02X write=%u",
+                         g_pm.port_control[3], g_pm.port_control[2],
+                         g_pm.port_control[1], g_pm.port_control[0],
+                         g_pm.port_control_write_pending ? 1U : 0U);
+            break;
+
+        case PM_JOB_WRITE_PORT_CONTROL:
+            g_pm.port_control_write_pending = false;
+            Debug_Printf("[PD-RESET] PORT_CONTROL applied 0x%02X (PR_SWAP initiate=0 process_src=%u process_snk=%u)",
+                         g_pm.port_control[0],
+                         (g_pm.port_control[0] & 0x40U) != 0U ? 1U : 0U,
+                         (g_pm.port_control[0] & 0x10U) != 0U ? 1U : 0U);
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            break;
+
+        case PM_JOB_CLEAR_DBFG:
+            g_pm.dbfg_pending = false;
+            PowerManager_FinishSessionResetIfIdle(now_ms);
+            Debug_Printf("[PD-RESET] DBfg done task=%u",
+                         g_pm.tps.task_return_code);
             break;
 
         case PM_JOB_READ_INT_MASK:
@@ -1344,6 +1576,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                              (unsigned long)g_pm.status.tps.status_raw);
             }
             g_pm.typec_trace_valid = true;
+            PowerManager_CheckLeftoverVbus(now_ms);
             g_pm.telemetry_phase = 2U;
             break;
         }
@@ -1373,6 +1606,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_READ_ACTIVE_PDO:
+            if (!g_pm.status.tps.attached ||
+                (g_pm.status.tps.connection_state < 6U)) {
+                PowerManager_ClearContractTelemetry();
+                g_pm.telemetry_phase = 8U;
+                break;
+            }
             if (g_pm.status.tps.active_pdo_raw !=
                 TPS25751_ReadLe32(data)) {
                 g_pm.pdo_report_pending = g_pm.status.tps.attached;
@@ -1385,6 +1624,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_READ_ACTIVE_RDO:
+            if (!g_pm.status.tps.attached ||
+                (g_pm.status.tps.connection_state < 6U)) {
+                PowerManager_ClearContractTelemetry();
+                g_pm.telemetry_phase = 8U;
+                break;
+            }
             if (g_pm.status.tps.active_rdo_raw !=
                 TPS25751_ReadLe32(data)) {
                 g_pm.pdo_report_pending = g_pm.status.tps.attached;
@@ -1746,6 +1991,19 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                 TPS25751_REG_PORT_CONFIG, g_pm.port_config,
                 sizeof(g_pm.port_config));
             break;
+        case PM_JOB_READ_PORT_CONTROL:
+            status = TPS25751_StartReadRegister(&g_pm.tps,
+                TPS25751_REG_PORT_CONTROL, TPS25751_PORT_CONTROL_LEN);
+            break;
+        case PM_JOB_WRITE_PORT_CONTROL:
+            status = TPS25751_StartWriteRegister(&g_pm.tps,
+                TPS25751_REG_PORT_CONTROL, g_pm.port_control,
+                sizeof(g_pm.port_control));
+            break;
+        case PM_JOB_CLEAR_DBFG:
+            status = TPS25751_StartCommand(&g_pm.tps, "DBfg",
+                                           NULL, 0U, 1U);
+            break;
         case PM_JOB_READ_INT_MASK:
             status = TPS25751_StartReadRegister(&g_pm.tps,
                 TPS25751_REG_INT_MASK, TPS_INT_EVENT_BYTES);
@@ -2003,6 +2261,15 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.mode_update_pending) {
         return PM_JOB_READ_PORT_CONFIG;
     }
+    if (g_pm.port_control_write_pending) {
+        return PM_JOB_WRITE_PORT_CONTROL;
+    }
+    if (g_pm.port_control_read_pending) {
+        return PM_JOB_READ_PORT_CONTROL;
+    }
+    if (g_pm.dbfg_pending) {
+        return PM_JOB_CLEAR_DBFG;
+    }
     if (g_pm.event_mask_write_pending) {
         return PM_JOB_WRITE_INT_MASK;
     }
@@ -2113,7 +2380,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG gated AUTO=DRP+Try.SNK",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG gated AUTO=DRP+Try.SNK unplug-reset=0x28/0x29/DBfg",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);

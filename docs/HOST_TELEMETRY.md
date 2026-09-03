@@ -65,6 +65,8 @@ Expected `TC` after flash:
 - **iPad (was broken)**: long `conn=0` with `cc1=1 cc2=2` (Ra/Rd), `pd_mv=0`, `tps_vbus` 4998↔0, ghost `bq_vbus` 10.5–13.6 V, `bq_iin=0`, no Source_Cap/Request. Try.SNK + OTG gate target a Sink contract (or iPad-as-source charging the pack), not a pack-sourced 9 V gadget session.
 - Accidental OTG: PA4 stays low unless `USB SOURCE` or AUTO Source attach with `conn>=6`.
 
+Unplug/reattach: PA4 is forced LOW, leftover PDO/RDO are dropped (`pd_mv=0` until `conn>=6`), PORT_CONFIG is cycled Disabled→DRP+Try.SNK, PORT_CONTROL `0x29` clears InitiateSwap (accept sink swap only), and `DBfg` runs. Same kick if `conn=0` with live CC and leftover `bq_vbus`/`bq_otg`. Next plug must look like the first: no ghost 10–13 V, `bq_otg=0` until a real Source contract.
+
 ---
 
 ## Commands (host → G4)

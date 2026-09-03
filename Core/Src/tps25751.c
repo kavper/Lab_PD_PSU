@@ -360,10 +360,11 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
     }
 
     if (dev->operation == TPS25751_OP_READ_REGISTER) {
-        bool active_contract_register =
+        bool flexible_length =
             (dev->register_address == TPS25751_REG_ACTIVE_PDO) ||
-            (dev->register_address == TPS25751_REG_ACTIVE_RDO);
-        status = TPS25751_CheckRead(dev, !active_contract_register);
+            (dev->register_address == TPS25751_REG_ACTIVE_RDO) ||
+            (dev->register_address == TPS25751_REG_PORT_CONTROL);
+        status = TPS25751_CheckRead(dev, !flexible_length);
         TPS25751_Finish(dev, status);
         return status;
     }
@@ -793,6 +794,62 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 
     return (port_config[0] != old_state) ||
            (port_config[1] != old_options);
+}
+
+void TPS25751_SetPortStateMachine(
+    uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
+    TPS25751_PortMode_t mode)
+{
+    if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
+        return;
+    }
+    port_config[0] = (uint8_t)(
+        (port_config[0] & (uint8_t)~TPS25751_PORT_STATE_MASK) |
+        (uint8_t)mode);
+}
+
+bool TPS25751_PatchPortControl(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    TPS25751_PortMode_t mode)
+{
+    uint8_t old;
+    uint8_t v;
+
+    if ((port_control == NULL) || ((uint8_t)mode > 3U)) {
+        return false;
+    }
+
+    /* Byte 0 = PORT_CONTROL[7:0]: TypeC Current + PR_Swap policy.
+     * EEPROM / APP firmware may set InitiateSwapToSource during a source
+     * contract.  That bit survives unplug and the next dual-role partner
+     * (iPad) is immediately PR_SWAP'd into an OTG/VBUS fight. */
+    old = port_control[0];
+    v = (uint8_t)(old & (uint8_t)~(
+        TPS25751_PORT_STATE_MASK | /* bits 1:0 TypeC Current, reused mask 0x03 */
+        0xF0U));                   /* bits 7:4 PR_Swap initiate/process */
+
+    /* 3.0 A Rp while sourcing (ignored during an explicit PD contract). */
+    v |= 0x02U;
+
+    switch (mode) {
+        case TPS25751_PORT_SINK_ONLY:
+            v |= (1U << 4); /* ProcessSwapToSink */
+            break;
+        case TPS25751_PORT_SOURCE_ONLY:
+            v |= (1U << 6); /* ProcessSwapToSource */
+            break;
+        case TPS25751_PORT_DRP:
+            /* AUTO: accept a swap to sink (pack charge), never initiate a
+             * swap, never auto-accept a swap to source (iPhone 9 V stays
+             * a native Type-C Source attach; iPad cannot PR_SWAP us to OTG). */
+            v |= (1U << 4); /* ProcessSwapToSink */
+            break;
+        default:
+            break;
+    }
+
+    port_control[0] = v;
+    return port_control[0] != old;
 }
 
 const char *TPS25751_StatusToString(TPS25751_Status_t status)
