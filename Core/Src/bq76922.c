@@ -13,7 +13,8 @@
 #define BQ76922_CMD_SAFETY_STATUS_B      0x05U
 #define BQ76922_CMD_SAFETY_STATUS_C      0x07U
 #define BQ76922_CMD_CELL1_V              0x14U
-#define BQ76922_CMD_PACK_V               0x28U
+#define BQ76922_CMD_STACK_V              0x34U
+#define BQ76922_CMD_PACK_V               0x36U
 #define BQ76922_CMD_CC2                  0x3AU
 #define BQ76922_CMD_ALARM_STATUS         0x62U
 #define BQ76922_CMD_FET_STATUS           0x7FU
@@ -39,9 +40,14 @@
 #define BQ76922_CC2_CHARGE_MA            50
 #define BQ76922_CC2_DISCHARGE_MA         (-50)
 #define BQ76922_MANUF_FET_EN             (1U << 4)
-#define BQ76922_FET_STATUS_CHG_DSG       0x0CU
+/* FET Status: CHG=bit0, PCHG=bit1, DSG=bit2, PDSG=bit3 */
+#define BQ76922_FET_STATUS_CHG           0x01U
+#define BQ76922_FET_STATUS_DSG           0x04U
+#define BQ76922_FET_STATUS_CHG_DSG       (BQ76922_FET_STATUS_CHG | BQ76922_FET_STATUS_DSG)
 #define BQ76922_SAFETY_A_CUV             0x04U
 #define BQ76922_SAFETY_A_COV             0x08U
+/* Default DA Config USER_VOLTS_CV=1 → Stack/PACK in centivolts (10 mV). */
+#define BQ76922_USERV_TO_MV(raw)         ((int16_t)((int16_t)(raw) * 10))
 
 typedef enum {
     BQ76922_INIT_ENTER_CFG = 0,
@@ -206,6 +212,7 @@ static void BQ76922_UpdateCellStats(BQ76922_Device_t *dev)
 {
     int16_t min_mv = 32767;
     int16_t max_mv = -32768;
+    int32_t sum_mv = 0;
     uint8_t i;
     uint8_t used = 0U;
 
@@ -219,6 +226,7 @@ static void BQ76922_UpdateCellStats(BQ76922_Device_t *dev)
 
         mv = dev->snapshot.cell_mv[i];
         used++;
+        sum_mv += (int32_t)mv;
         if (mv < min_mv) {
             min_mv = mv;
         }
@@ -230,6 +238,7 @@ static void BQ76922_UpdateCellStats(BQ76922_Device_t *dev)
     if (dev->snapshot.sample_valid && (used > 0U)) {
         dev->snapshot.min_cell_mv = min_mv;
         dev->snapshot.max_cell_mv = max_mv;
+        dev->snapshot.cell_sum_mv = (int16_t)sum_mv;
     }
 }
 
@@ -613,12 +622,20 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     } else if (dev->scan_index == BQ76922_CELL_COUNT) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_PACK_V, buf, 2U);
         if (status == BQ76922_OK) {
-            dev->snapshot.pack_mv = BQ76922_Le16(buf);
+            dev->snapshot.pack_mv = BQ76922_USERV_TO_MV(BQ76922_Le16(buf));
             dev->scan_index++;
         } else if (status == BQ76922_BUSY) {
             return;
         }
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 1U)) {
+        status = BQ76922_ReadDirect(dev, BQ76922_CMD_STACK_V, buf, 2U);
+        if (status == BQ76922_OK) {
+            dev->snapshot.stack_mv = BQ76922_USERV_TO_MV(BQ76922_Le16(buf));
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 2U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_CC2, buf, 2U);
         if (status == BQ76922_OK) {
             dev->snapshot.cc2_ma = BQ76922_Le16(buf);
@@ -626,16 +643,19 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         } else if (status == BQ76922_BUSY) {
             return;
         }
-    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 2U)) {
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 3U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, buf, 1U);
         if (status == BQ76922_OK) {
             dev->snapshot.fet_status = buf[0];
-            dev->snapshot.fets_enabled = ((buf[0] & BQ76922_FET_STATUS_CHG_DSG) != 0U);
+            dev->snapshot.chg_fet_on = ((buf[0] & BQ76922_FET_STATUS_CHG) != 0U);
+            dev->snapshot.dsg_fet_on = ((buf[0] & BQ76922_FET_STATUS_DSG) != 0U);
+            dev->snapshot.fets_enabled =
+                (dev->snapshot.chg_fet_on || dev->snapshot.dsg_fet_on);
             dev->scan_index++;
         } else if (status == BQ76922_BUSY) {
             return;
         }
-    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 3U)) {
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 4U)) {
         status = BQ76922_ReadSafetyStatus(dev);
         if (status == BQ76922_OK) {
             dev->scan_index++;

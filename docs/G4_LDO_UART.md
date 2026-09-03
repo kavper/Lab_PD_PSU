@@ -67,6 +67,9 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 | `REMOTE 0\|OFF` | Local sense (default) |
 | `REMOTE 1\|ON` | Enable remote sense path |
 | `TEL` / `?` | Status dump |
+| `HUMAN 0\|1` | `0` = machine `T`/`TB`/`TC` (H7), `1` = readable multi-line dump |
+| `MACHINE` / `H7` | Alias for `HUMAN 0` |
+| `STATUS` | One human snapshot (even in machine mode) |
 
 ## BMS (4S pack, skip VC4)
 

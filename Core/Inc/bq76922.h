@@ -59,6 +59,8 @@ typedef struct {
     int16_t min_cell_mv;
     int16_t max_cell_mv;
     int16_t pack_mv;
+    int16_t stack_mv;
+    int16_t cell_sum_mv;
     int16_t cc2_ma;
     uint32_t fault_flags;
     uint32_t sample_tick_ms;
@@ -66,6 +68,8 @@ typedef struct {
     uint32_t i2c_error_count;
     uint8_t fet_status;
     uint16_t manuf_status;
+    bool chg_fet_on;
+    bool dsg_fet_on;
 } BQ76922_Snapshot_t;
 
 typedef struct {

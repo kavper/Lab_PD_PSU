@@ -11,32 +11,54 @@
  * Physical: 115200 8N1, no flow control.
  * Framing: one ASCII line per message, terminated by \n (\r ignored).
  *
- * Telemetry (G4 -> host), space-separated key=value, integers only:
+ * =============================================================================
+ * Machine telemetry (default, HUMAN 0) — H7-friendly
+ * =============================================================================
+ * Three space-separated key=value lines per frame (integers / hex only):
  *
- *   T vin_mv=... vout_mv=... iout_ma=... set_mv=... ilim_ma=... duty_ppm=...
- *     run=0|1 mode=IDLE|CV|CC fault=... pd=0|1 pd_mv=... pd_ma=... pd_mw=...
- *     permit=0|1 bms=0|1 alert=0|1 alarm=0x.... c1_mv=... c2_mv=... c3_mv=...
- *     c4_mv=... c5_mv=... pack_mv=... i_cc2_ma=... fets=0|1 sa=0x..
+ *   T  … PSU / G0 / PD / pre-reg core
+ *   TB … full BMS (cells, pack/stack V, pack I, FETs, safety)
+ *   TC … BQ25731 charger + TPS path
  *
- *   duty_ppm is PWM duty A in parts-per-million (0.512 duty => 512000).
+ * Stable field names (H7 may ignore unknown keys):
+ *   T:  vin_mv vout_mv iout_ma set_mv ilim_ma duty_ppm run mode fault
+ *       pd pd_mv pd_ma pd_mw permit rem_sense
+ *       g0 g0_out g0_want g0_ctrl g0_kill g0_outoff g0_vout_mv
+ *       vpre_req_mv vpre_cmd_mv reg_ok stage_en ps_en flt hold_ms ps_err
+ *       g0_rx g0_tlm g0_age_ms g0_err g0_uart pm_st fmt(=0)
+ *   TB: bms cfg st fault alert alarm sa sb sc fet manuf chg dsg fets series
+ *       c1_mv..c5_mv min_mv max_mv dV_mv sum_mv pack_mv stack_mv
+ *       i_pack_ma i_cc2_ma sample alerts i2c_err
+ *       (c4_mv=-1 expected on 4S skip-VC4)
+ *   TC: bq_ok bq_vbat_mv bq_vsys_mv bq_ibat_ma bq_ichg_ma bq_idchg_ma
+ *       bq_vbus_mv bq_iin_ma bq_vreg_mv bq_ichg_set_ma bq_iin_set_ma
+ *       bq_st bq_fault bq_in bq_pre bq_fast bq_otg bq_iindpm bq_vindpm
+ *       tps_vbus_mv cc1 cc2 role conn pd_role pd_mv pd_ma
  *
- * Commands (host -> G4), case-insensitive, optional argument:
+ * duty_ppm: PWM duty A in ppm (0.512 => 512000).
+ *
+ * =============================================================================
+ * Human mode (HUMAN 1) — multi-line labeled dump for terminal / bring-up
+ * =============================================================================
+ *
+ * Commands (host -> G4), case-insensitive:
  *
  *   HELP / H           command list
- *   STATUS / ST        human summary + hints
- *   ON                 start G4 DCDC + G0 SET/OUT ON sequencer
- *   OFF                G0 OUT OFF + PERMIT kill + DCDC stop
- *   SET <volts>        G0 LDO voltage (also local DCDC if G0 idle)
+ *   HUMAN 0|1          machine (H7) vs human dump; default 0
+ *   MACHINE / H7       alias HUMAN 0
+ *   STATUS / ST        one human snapshot (even if HUMAN 0)
+ *   ON / OFF           G0 sequencer + DCDC
+ *   SET <volts>        G0 LDO voltage
  *   ILIM <amps>        G0 current limit
  *   USB AUTO|SINK|SOURCE
- *   PERMIT 0|1         1 = ena (PB7 HIGH, clears G0 POWER_KILL), 0 = LDO zabity (PB7 LOW) + OUT OFF
- *   REMOTE ON|1        enable remote sense path (PB6 REMOTE_ON high)
- *   REMOTE OFF|0       local sense (default; REMOTE_ON low)
- *   TEL [period_ms]    0 = stop periodic T lines; default 500
- *   ?                  one immediate T line
+ *   PERMIT 0|1         PB7 kill / allow
+ *   REMOTE ON|OFF      sense path
+ *   TEL [period_ms]    0 = stop periodic frames; default 500
+ *   ?                  one telemetry frame now
+ *   G0DIAG / G0SWAP
+ *   CLR / CLEAR
  *
- * Telemetry also includes rem_sense=, g0_want=, g0_ctrl=, g0_kill=, g0_outoff=.
- * Replies: OK..., ERR <reason>, STATUS/HELP text, or a T line.
+ * Replies: OK..., ERR <reason>, HELP text, STATUS dump, or T/TB/TC / HUMAN block.
  */
 
 void HostLink_Init(UART_HandleTypeDef *huart);
