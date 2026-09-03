@@ -66,18 +66,17 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 | `PERMIT 0\|1` | Force G0 kill assert / clear (**PB7**) |
 | `REMOTE 0\|OFF` | Local sense (default) |
 | `REMOTE 1\|ON` | Enable remote sense path |
-| `TEL` / `?` | Status dump |
-| `HUMAN 0\|1` | `0` = machine `T`/`TB`/`TC` (H7), `1` = readable multi-line dump |
-| `MACHINE` / `H7` | Alias for `HUMAN 0` |
-| `STATUS` | One human snapshot (even in machine mode) |
+| `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame |
+| `BMS` | Re-init BQ76922 4S + ALL_FETS_ON (RAM; **no OTP**) |
+| `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7) |
 
 ## BMS (4S pack, skip VC4)
 
-Hardware is a **4S** Li-ion pack on the BQ76922 (5-channel AFE). `VCell Mode = 0x0017` uses cells 1/2/3/5 and **skips VC4** (the unused tap). Charger `BOARD_CHARGER_CELL_COUNT` is already 4.
+Hardware is a **4S** Li-ion pack on the BQ76922 (5-channel AFE). Firmware writes `VCell Mode = 0x0017` (cells 1/2/3/5, **skip VC4**) in **RAM on every wake**. Blank OTP defaults to “all cells”; that is why a skipped VC4 used to look like CUV and blocked FETs. **OTP burn is not required** and is not done by this firmware (OTP is one-way / production-line only).
 
-If firmware is left in 5S (`0x001F`), the empty VC4 input reads ~0/−1 mV → CUV/imbalance → CHG/DSG stay off. G4 still boots from the button or USB-C 5 V, which looks like “woke but BMS will not unlock”.
+See [HOST_TELEMETRY.md](HOST_TELEMETRY.md) for USART1 `T`/`TB`/`TC` parsing. Charger `BOARD_CHARGER_CELL_COUNT` is already 4.
 
-With `BMS_ENABLE=1`: cells 1/2/3/5 between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off (`BOARD_HAS_FRONT_BUTTONS=0`); ON/OFF is USART1. The pack-path button only wakes the AFE — firmware must `ALL_FETS_ON` after 4S config.
+With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4_mv=-1` is expected. Pack warn window is 11–17 V. Telemetry `fets=1` means CHG/DSG are on. `BOARD_BRINGUP_AUTO_ON=0` — send host `ON` after BMS comes up. Front buttons off; ON/OFF is USART1. The pack-path button only wakes the AFE — firmware must `ALL_FETS_ON` after 4S config (`BMS` command forces re-init).
 
 ## Bring-up sequence
 

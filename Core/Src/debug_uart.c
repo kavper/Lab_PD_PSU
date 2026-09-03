@@ -26,6 +26,7 @@ static volatile bool debug_tx_busy = false;
 static volatile bool debug_dma_ready = false;
 static volatile bool debug_blocking_ready = false;
 static volatile bool debug_tx_pending_session_eol = false;
+static bool debug_enabled = (DEBUG_UART_DEFAULT_ENABLED != 0U);
 
 static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length);
 
@@ -224,6 +225,7 @@ void Debug_Init(UART_HandleTypeDef *huart)
     debug_dma_ready = false;
     debug_blocking_ready = false;
     debug_tx_pending_session_eol = false;
+    debug_enabled = (DEBUG_UART_DEFAULT_ENABLED != 0U);
 
     Debug_RestoreIrq(primask);
 
@@ -231,11 +233,21 @@ void Debug_Init(UART_HandleTypeDef *huart)
     debug_blocking_ready = (!debug_dma_ready) && (huart != NULL);
 }
 
+void Debug_SetEnabled(bool enabled)
+{
+    debug_enabled = enabled;
+}
+
+bool Debug_IsEnabled(void)
+{
+    return debug_enabled;
+}
+
 void Debug_Write(const char *text)
 {
     size_t length;
 
-    if ((debug_uart == NULL) || (text == NULL)) {
+    if ((!debug_enabled) || (debug_uart == NULL) || (text == NULL)) {
         return;
     }
 
@@ -256,24 +268,9 @@ void Debug_Printf(const char *fmt, ...)
     int length;
     uint32_t tx_length;
 
-    if ((debug_uart == NULL) || (fmt == NULL)) {
+    if ((!debug_enabled) || (debug_uart == NULL) || (fmt == NULL)) {
         return;
     }
-
-#if (DEBUG_LOG_NON_BQ == 0U)
-    if ((strncmp(fmt, "[BQ", 3U) != 0) &&
-        (strncmp(fmt, "[TPS", 4U) != 0) &&
-        (strncmp(fmt, "[PD", 3U) != 0) &&
-        (strncmp(fmt, "[PM", 3U) != 0) &&
-        (strncmp(fmt, "[MON", 4U) != 0) &&
-        (strncmp(fmt, "[APP", 4U) != 0) &&
-        (strncmp(fmt, "[UART", 5U) != 0) &&
-        (strncmp(fmt, "[LDO", 4U) != 0) &&
-        (strncmp(fmt, "[PRE", 4U) != 0) &&
-        (strncmp(fmt, "[FAULT", 6U) != 0)) {
-        return;
-    }
-#endif
 
     va_start(args, fmt);
     length = vsnprintf(buffer, sizeof(buffer), fmt, args);

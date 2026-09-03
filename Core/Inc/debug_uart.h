@@ -6,12 +6,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 0: during BQ bring-up only messages whose format starts with "[BQ" pass. */
-#ifndef DEBUG_LOG_NON_BQ
-#define DEBUG_LOG_NON_BQ 0U
+/*
+ * USART1 is the H7 / host telemetry port (T/TB/TC).
+ * Debug_Printf is OFF by default so it does not corrupt machine frames.
+ * Enable with host command VERBOSE 1 (or Debug_SetEnabled(true)).
+ */
+#ifndef DEBUG_UART_DEFAULT_ENABLED
+#define DEBUG_UART_DEFAULT_ENABLED       0U
 #endif
 
 void Debug_Init(UART_HandleTypeDef *huart);
+void Debug_SetEnabled(bool enabled);
+bool Debug_IsEnabled(void);
 void Debug_Write(const char *text);
 void Debug_Printf(const char *fmt, ...);
 void Debug_BlankLine(void);

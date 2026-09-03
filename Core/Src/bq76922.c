@@ -23,6 +23,7 @@
 #define BQ76922_SUBCMD_EXIT_CFGUPDATE    0x0092U
 #define BQ76922_SUBCMD_FET_ENABLE        0x0022U
 #define BQ76922_SUBCMD_ALL_FETS_ON       0x0096U
+#define BQ76922_SUBCMD_SLEEP_DISABLE     0x009AU
 #define BQ76922_SUBCMD_MANUF_STATUS      0x0057U
 
 #define BQ76922_RAM_VCELL_MODE           0x9304U
@@ -31,12 +32,12 @@
 #define BQ76922_RAM_CUV_THRESHOLD        0x9275U
 #define BQ76922_RAM_COV_THRESHOLD        0x9278U
 
-#define BQ76922_I2C_TIMEOUT_MS           8U
+#define BQ76922_I2C_TIMEOUT_MS           20U
 #define BQ76922_SCAN_PERIOD_MS           50U
-#define BQ76922_PROBE_RETRY_MS           500U
-#define BQ76922_INIT_STEP_DELAY_MS       5U
-#define BQ76922_POST_CFG_DELAY_MS        80U
-#define BQ76922_FET_RETRY_MS             500U
+#define BQ76922_PROBE_RETRY_MS           200U
+#define BQ76922_INIT_STEP_DELAY_MS       10U
+#define BQ76922_POST_CFG_DELAY_MS        120U
+#define BQ76922_FET_RETRY_MS             250U
 #define BQ76922_CC2_CHARGE_MA            50
 #define BQ76922_CC2_DISCHARGE_MA         (-50)
 #define BQ76922_MANUF_FET_EN             (1U << 4)
@@ -57,6 +58,9 @@ typedef enum {
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
     BQ76922_INIT_EXIT_CFG,
+    BQ76922_INIT_READ_VCELL,
+    BQ76922_INIT_SLEEP_DISABLE,
+    BQ76922_INIT_CLR_ALARM,
     BQ76922_INIT_MANUF_ISSUE,
     BQ76922_INIT_MANUF_READ,
     BQ76922_INIT_FET_ENABLE,
@@ -267,8 +271,13 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
     if ((flags & (BQ76922_FAULT_CELL_OV |
                   BQ76922_FAULT_CELL_UV |
                   BQ76922_FAULT_SAFETY)) != 0U) {
-        dev->snapshot.shutdown_request = true;
-        dev->snapshot.state = BQ76922_STATE_FAULT;
+        /* Do not kill the rail until 4S config stuck and FETs were attempted.
+         * Blank OTP boots as "all cells" — a skipped VC4 looks like CUV and
+         * would otherwise latch FAULT_BMS before VCell Mode is applied. */
+        if (dev->snapshot.configured) {
+            dev->snapshot.shutdown_request = true;
+            dev->snapshot.state = BQ76922_STATE_FAULT;
+        }
     }
 }
 
@@ -362,10 +371,12 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
     BQ76922_Status_t status = BQ76922_OK;
     uint32_t delay_ms = BQ76922_INIT_STEP_DELAY_MS;
     uint8_t buf[2];
+    uint16_t vcell_mode = 0U;
 
     switch ((BQ76922_InitStep_t)dev->init_step) {
         case BQ76922_INIT_ENTER_CFG:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SET_CFGUPDATE);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_VCELL_MODE:
@@ -397,8 +408,49 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             delay_ms = BQ76922_POST_CFG_DELAY_MS;
             break;
 
+        case BQ76922_INIT_READ_VCELL:
+            /* Issue address then read 0x40 on the next step delay. */
+            buf[0] = (uint8_t)(BQ76922_RAM_VCELL_MODE & 0xFFU);
+            buf[1] = (uint8_t)((BQ76922_RAM_VCELL_MODE >> 8) & 0xFFU);
+            status = BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, buf, 2U);
+            delay_ms = 15U;
+            break;
+
+        case BQ76922_INIT_SLEEP_DISABLE:
+            /* Completes VCELL readback first (data still in 0x40), then sleep off. */
+            status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 2U);
+            if (status == BQ76922_OK) {
+                vcell_mode = (uint16_t)BQ76922_Le16(buf);
+                if (vcell_mode != BMS_VCELL_MODE) {
+                    /* Config did not stick — retry whole sequence (no OTP needed). */
+                    dev->snapshot.fault_flags |= BQ76922_FAULT_I2C;
+                    dev->init_step = BQ76922_INIT_ENTER_CFG;
+                    dev->next_action_ms = HAL_GetTick() + BQ76922_PROBE_RETRY_MS;
+                    return false;
+                }
+            } else if (status == BQ76922_BUSY) {
+                return false;
+            }
+            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SLEEP_DISABLE);
+            break;
+
+        case BQ76922_INIT_CLR_ALARM:
+            status = BQ76922_ReadDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+            if (status == BQ76922_OK) {
+                (void)BQ76922_WriteDirect(dev, BQ76922_CMD_ALARM_STATUS, buf, 2U);
+                (void)BQ76922_ReadSafetyStatus(dev);
+                dev->snapshot.alert_latched = false;
+                /* Clear stale CUV from blank-OTP 5S view of unused VC4. */
+                if ((dev->snapshot.safety_status_a &
+                     (BQ76922_SAFETY_A_CUV | BQ76922_SAFETY_A_COV)) != 0U) {
+                    /* Re-read after sleep disable; FETs still attempted below. */
+                }
+            }
+            break;
+
         case BQ76922_INIT_MANUF_ISSUE:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
+            delay_ms = 15U;
             break;
 
         case BQ76922_INIT_MANUF_READ:
@@ -416,18 +468,25 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 
         case BQ76922_INIT_FET_ENABLE:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_FET_ENABLE);
+            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_ALL_FETS_ON:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
             dev->last_fet_cmd_ms = HAL_GetTick();
+            delay_ms = 30U;
             break;
 
         case BQ76922_INIT_DONE:
         default:
             dev->snapshot.configured = true;
             dev->snapshot.fault_flags &= (uint32_t)~BQ76922_FAULT_I2C;
-            dev->snapshot.state = BQ76922_STATE_READY;
+            dev->snapshot.shutdown_request = false;
+            if (dev->snapshot.state == BQ76922_STATE_FAULT) {
+                dev->snapshot.state = BQ76922_STATE_READY;
+            } else {
+                dev->snapshot.state = BQ76922_STATE_READY;
+            }
             return true;
     }
 
@@ -441,6 +500,13 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         return false;
     }
 
+    /* CLR_ALARM may return BUSY-equivalent via read path already handled. */
+    if ((BQ76922_InitStep_t)dev->init_step == BQ76922_INIT_CLR_ALARM &&
+        status == BQ76922_OK) {
+        /* fall through */
+    }
+
+    (void)vcell_mode;
     dev->init_step++;
     dev->next_action_ms = HAL_GetTick() + delay_ms;
     return false;
@@ -547,6 +613,24 @@ void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev)
     dev->snapshot.fault_flags &= (uint32_t)~(BQ76922_FAULT_CELL_OV |
                                              BQ76922_FAULT_CELL_UV |
                                              BQ76922_FAULT_SAFETY);
+}
+
+void BQ76922_RequestReinit(BQ76922_Device_t *dev)
+{
+    if (dev == NULL) {
+        return;
+    }
+
+    dev->snapshot.configured = false;
+    dev->snapshot.fets_enabled = false;
+    dev->snapshot.chg_fet_on = false;
+    dev->snapshot.dsg_fet_on = false;
+    dev->snapshot.sample_valid = false;
+    dev->snapshot.shutdown_request = false;
+    dev->snapshot.state = BQ76922_STATE_INIT;
+    dev->init_step = BQ76922_INIT_ENTER_CFG;
+    dev->scan_index = 0U;
+    dev->next_action_ms = HAL_GetTick();
 }
 
 void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)

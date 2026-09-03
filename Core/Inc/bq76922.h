@@ -93,5 +93,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms);
 void BQ76922_AlertFromIsr(BQ76922_Device_t *dev);
 void BQ76922_GetSnapshot(const BQ76922_Device_t *dev, BQ76922_Snapshot_t *out);
 void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev);
+/* Re-run CONFIG_UPDATE + 4S VCell Mode + ALL_FETS_ON (no OTP). */
+void BQ76922_RequestReinit(BQ76922_Device_t *dev);
 
 #endif /* BQ76922_H */

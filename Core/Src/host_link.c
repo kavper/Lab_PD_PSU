@@ -4,6 +4,7 @@
 #include "board_rev.h"
 #include "bms_board.h"
 #include "bq76922.h"
+#include "debug_uart.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "power_manager.h"
@@ -26,8 +27,6 @@ static volatile bool s_line_ready;
 static volatile bool s_rx_overflow;
 static uint32_t s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
 static uint32_t s_last_tel_ms;
-/* 0 = machine T/TB/TC for H7, 1 = multi-line human dump */
-static uint8_t s_human_mode = 0U;
 
 static void HostLink_ArmRx(void)
 {
@@ -69,38 +68,6 @@ static const char *HostLink_ModeName(void)
             return "CV";
         default:
             return "IDLE";
-    }
-}
-
-static const char *HostLink_BmsStateName(BQ76922_State_t st)
-{
-    switch (st) {
-        case BQ76922_STATE_ABSENT: return "ABSENT";
-        case BQ76922_STATE_INIT: return "INIT";
-        case BQ76922_STATE_READY: return "READY";
-        case BQ76922_STATE_DISCHARGING: return "DSG";
-        case BQ76922_STATE_CHARGING: return "CHG";
-        case BQ76922_STATE_WARN: return "WARN";
-        case BQ76922_STATE_FAULT: return "FAULT";
-        default: return "?";
-    }
-}
-
-static const char *HostLink_PdRoleName(PowerManager_PdPowerRole_t role)
-{
-    switch (role) {
-        case POWER_MANAGER_PD_ROLE_SINK: return "SINK";
-        case POWER_MANAGER_PD_ROLE_SOURCE: return "SOURCE";
-        default: return "NONE";
-    }
-}
-
-static void HostLink_FmtCell(char *out, size_t out_sz, int16_t mv, uint8_t idx)
-{
-    if (!BMS_CELL_USED(idx)) {
-        (void)snprintf(out, out_sz, "skip");
-    } else {
-        (void)snprintf(out, out_sz, "%d", (int)mv);
     }
 }
 
@@ -273,162 +240,9 @@ static void HostLink_SendMachineTelemetry(void)
     }
 }
 
-static void HostLink_PrintMv(char *out, size_t out_sz, int32_t mv)
-{
-    int32_t abs_mv = (mv < 0) ? -mv : mv;
-    (void)snprintf(out, out_sz, "%s%ld.%03ld",
-                   (mv < 0) ? "-" : "",
-                   (long)(abs_mv / 1000),
-                   (long)(abs_mv % 1000));
-}
-
-static void HostLink_SendHumanTelemetry(void)
-{
-    char line[HOST_LINK_TX_MAX];
-    char c1[12], c2[12], c3[12], c4[12], c5[12];
-    char s_vin[16], s_vout[16], s_iout[16], s_set[16], s_ilim[16];
-    char s_pdv[16], s_pda[16], s_pdw[16];
-    BQ76922_Snapshot_t bms;
-    LdoPrereg_Status_t prereg;
-    LdoLink_Status_t ldo;
-    PowerManager_Status_t pm;
-    float pd_v = 0.0f;
-    float pd_a = 0.0f;
-    float pd_w = 0.0f;
-    uint8_t pd_ok;
-    int16_t dV;
-    const char *bq_phase;
-
-    BQ76922_GetSnapshot(&g_bq76922, &bms);
-    pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
-    LdoPrereg_GetStatus(&prereg);
-    LdoLink_GetStatus(&ldo);
-    PowerManager_GetStatus(&pm);
-    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
-
-    HostLink_FmtCell(c1, sizeof(c1), bms.cell_mv[0], 0U);
-    HostLink_FmtCell(c2, sizeof(c2), bms.cell_mv[1], 1U);
-    HostLink_FmtCell(c3, sizeof(c3), bms.cell_mv[2], 2U);
-    HostLink_FmtCell(c4, sizeof(c4), bms.cell_mv[3], 3U);
-    HostLink_FmtCell(c5, sizeof(c5), bms.cell_mv[4], 4U);
-
-    HostLink_PrintMv(s_vin, sizeof(s_vin), HostLink_Mv(App_GetInputVoltage()));
-    HostLink_PrintMv(s_vout, sizeof(s_vout), HostLink_Mv(App_GetOutputVoltage()));
-    HostLink_PrintMv(s_iout, sizeof(s_iout), HostLink_Ma(App_GetOutputCurrent()));
-    HostLink_PrintMv(s_set, sizeof(s_set), HostLink_Mv(LdoLink_GetG0Voltage()));
-    HostLink_PrintMv(s_ilim, sizeof(s_ilim), HostLink_Ma(LdoLink_GetG0Current()));
-    HostLink_PrintMv(s_pdv, sizeof(s_pdv), HostLink_Mv(pd_v));
-    HostLink_PrintMv(s_pda, sizeof(s_pda), HostLink_Ma(pd_a));
-    HostLink_PrintMv(s_pdw, sizeof(s_pdw), HostLink_Ma(pd_w));
-
-    if (pm.bq.in_fast_charge) {
-        bq_phase = "FAST";
-    } else if (pm.bq.in_precharge) {
-        bq_phase = "PRE";
-    } else if (pm.bq.in_otg) {
-        bq_phase = "OTG";
-    } else if (pm.bq.input_present) {
-        bq_phase = "IDLE_IN";
-    } else {
-        bq_phase = "NO_IN";
-    }
-
-    (void)snprintf(line, sizeof(line),
-                   "\r\n======== TEL t=%lu ms (HUMAN) ========\r\n",
-                   (unsigned long)HAL_GetTick());
-    HostLink_Tx(line);
-
-    (void)snprintf(line, sizeof(line),
-                   "PSU   VIN=%s V  VOUT=%s V  IOUT=%s A\r\n"
-                   "      SET=%s V  ILIM=%s A  MODE=%s  RUN=%u  FAULT=0x%lX\r\n",
-                   s_vin, s_vout, s_iout, s_set, s_ilim,
-                   HostLink_ModeName(),
-                   (unsigned int)PSU_IsRunning(),
-                   (unsigned long)App_GetFaultFlags());
-    HostLink_Tx(line);
-
-    (void)snprintf(line, sizeof(line),
-                   "PD    %s  contract=%s V / %s A / %s W  ok=%u\r\n"
-                   "      TPS_VBUS=%lu mV  CC1=%u CC2=%u  conn=%u\r\n",
-                   HostLink_PdRoleName(pm.pd_snapshot.power_role),
-                   s_pdv, s_pda, s_pdw,
-                   (unsigned int)pd_ok,
-                   (unsigned long)pm.tps.vbus_mv,
-                   (unsigned int)pm.tps.cc1_state,
-                   (unsigned int)pm.tps.cc2_state,
-                   (unsigned int)pm.tps.connection_state);
-    HostLink_Tx(line);
-
-    (void)snprintf(line, sizeof(line),
-                   "BMS   %uS %s  FETs CHG=%s DSG=%s  alert=%u\r\n"
-                   "      pack=%d mV  stack=%d mV  I_pack=%d mA  sum_cells=%d mV\r\n"
-                   "      C1=%s C2=%s C3=%s C4=%s C5=%s mV\r\n"
-                   "      min=%d max=%d dV=%d  SA=0x%02X SB=0x%02X SC=0x%02X "
-                   "alarm=0x%04X fault=0x%08lX\r\n",
-                   (unsigned int)BMS_SERIES_COUNT,
-                   HostLink_BmsStateName(bms.state),
-                   bms.chg_fet_on ? "ON" : "off",
-                   bms.dsg_fet_on ? "ON" : "off",
-                   (unsigned int)(bms.alert_latched || bms.alert_pin),
-                   (int)bms.pack_mv,
-                   (int)bms.stack_mv,
-                   (int)bms.cc2_ma,
-                   (int)bms.cell_sum_mv,
-                   c1, c2, c3, c4, c5,
-                   (int)bms.min_cell_mv,
-                   (int)bms.max_cell_mv,
-                   (int)dV,
-                   (unsigned int)bms.safety_status_a,
-                   (unsigned int)bms.safety_status_b,
-                   (unsigned int)bms.safety_status_c,
-                   (unsigned int)bms.alarm_status,
-                   (unsigned long)bms.fault_flags);
-    HostLink_Tx(line);
-
-    (void)snprintf(line, sizeof(line),
-                   "BQ    VBAT=%lu mV  IBAT=%ld mA  VSYS=%lu mV  phase=%s\r\n"
-                   "      VBUS=%lu mV  IIN=%lu mA  VREG=%lu mV  ICHG_SET=%lu mA\r\n"
-                   "      status=0x%04X fault=0x%02X  IINDPM=%u VINDPM=%u\r\n",
-                   (unsigned long)pm.bq.adc_vbat_mv,
-                   (long)pm.bq.battery_current_ma,
-                   (unsigned long)pm.bq.adc_vsys_mv,
-                   bq_phase,
-                   (unsigned long)pm.bq.adc_vbus_mv,
-                   (unsigned long)pm.bq.adc_iin_ma,
-                   (unsigned long)pm.bq.charge_voltage_mv,
-                   (unsigned long)pm.bq.charge_current_ma,
-                   (unsigned int)pm.bq.charger_status,
-                   (unsigned int)pm.bq.fault_flags,
-                   (unsigned int)(pm.bq.in_iin_dpm ? 1U : 0U),
-                   (unsigned int)(pm.bq.in_vindpm ? 1U : 0U));
-    HostLink_Tx(line);
-
-    (void)snprintf(line, sizeof(line),
-                   "G0    link=%u out=%u want=%u ctrl=%u kill=%u outoff=%u "
-                   "vout=%lu mV\r\n"
-                   "PRE   req=%ld mV cmd=%ld mV permit=%u reg_ok=%u\r\n"
-                   "========================================\r\n",
-                   (unsigned int)(prereg.g0_active ? 1U : 0U),
-                   (unsigned int)(ldo.output_on ? 1U : 0U),
-                   (unsigned int)(LdoLink_IsOutputWanted() ? 1U : 0U),
-                   (unsigned int)LdoLink_GetCtrlState(),
-                   (unsigned int)ldo.kill_reported,
-                   (unsigned int)ldo.outoff_reported,
-                   (unsigned long)ldo.vout_mv,
-                   (long)(prereg.vpre_request_v * 1000.0f),
-                   (long)(prereg.vpre_command_v * 1000.0f),
-                   (unsigned int)LdoPrereg_IsPermitGranted(),
-                   (unsigned int)(prereg.regulation_ok ? 1U : 0U));
-    HostLink_Tx(line);
-}
-
 static void HostLink_SendTelemetry(void)
 {
-    if (s_human_mode != 0U) {
-        HostLink_SendHumanTelemetry();
-    } else {
-        HostLink_SendMachineTelemetry();
-    }
+    HostLink_SendMachineTelemetry();
 }
 
 static bool HostLink_EqToken(const char *s, const char *token)
@@ -525,26 +339,22 @@ static bool HostLink_ParseU32(const char *s, uint32_t *out)
 static void HostLink_SendHelp(void)
 {
     HostLink_Tx(
-        "HELP G4 host USART1 115200\r\n"
+        "HELP G4 USART1 115200 — machine T/TB/TC for H7/parser\r\n"
         "  ON / OFF        start/stop DCDC + G0 LDO\r\n"
-        "  SET <V>         G0 voltage e.g. SET 5.0\r\n"
-        "  ILIM <A>        G0 current e.g. ILIM 0.1\r\n"
-        "  PERMIT 0|1      hard kill / allow PB7\r\n"
+        "  SET <V> / ILIM <A>\r\n"
+        "  PERMIT 0|1      PB7 kill / allow\r\n"
         "  REMOTE ON|OFF   sense path\r\n"
-        "  HUMAN 0|1       0=machine T/TB/TC (H7), 1=human dump\r\n"
-        "  MACHINE         alias HUMAN 0\r\n"
-        "  STATUS          one human snapshot (even in MACHINE)\r\n"
-        "  TEL [ms]        periodic telemetry (0=off, default 500)\r\n"
-        "  ?               one telemetry frame now\r\n"
-        "  G0DIAG / G0SWAP USART2 diag / TX-RX swap\r\n"
-        "  CLR             clear fault latch\r\n"
-        "H7: parse lines T (PSU), TB (BMS), TC (BQ/TPS); key=value ints.\r\n");
+        "  TEL [ms]        periodic T/TB/TC (0=off, default 500)\r\n"
+        "  ? / STATUS      one T/TB/TC frame now\r\n"
+        "  BMS             re-init BQ76922 4S + ALL_FETS_ON (no OTP)\r\n"
+        "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
+        "  G0DIAG / G0SWAP / CLR\r\n"
+        "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
 }
 
 static void HostLink_SendStatus(void)
 {
-    /* Always human-readable, regardless of HUMAN mode. */
-    HostLink_SendHumanTelemetry();
+    HostLink_SendTelemetry();
 }
 
 static void HostLink_HandleLine(char *line)
@@ -689,26 +499,25 @@ static void HostLink_HandleLine(char *line)
         HostLink_Tx("ERR REMOTE\r\n");
         return;
     }
-    if (HostLink_EqToken(line, "HUMAN") || HostLink_EqToken(line, "FMT")) {
-        if ((*arg == '\0') || HostLink_EqToken(arg, "ON") || HostLink_EqToken(arg, "1") ||
-            HostLink_EqToken(arg, "HUMAN")) {
-            s_human_mode = 1U;
-            HostLink_Tx("OK HUMAN 1 (readable dump; STATUS/?/TEL use human)\r\n");
-            HostLink_SendHumanTelemetry();
+    if (HostLink_EqToken(line, "VERBOSE")) {
+        if ((*arg == '\0') || HostLink_EqToken(arg, "1") || HostLink_EqToken(arg, "ON")) {
+            Debug_SetEnabled(true);
+            HostLink_Tx("OK VERBOSE 1 (debug logs on USART1 — may break parsers)\r\n");
             return;
         }
-        if (HostLink_EqToken(arg, "OFF") || HostLink_EqToken(arg, "0") ||
-            HostLink_EqToken(arg, "MACHINE") || HostLink_EqToken(arg, "H7")) {
-            s_human_mode = 0U;
-            HostLink_Tx("OK HUMAN 0 (machine T/TB/TC for H7)\r\n");
+        if (HostLink_EqToken(arg, "0") || HostLink_EqToken(arg, "OFF")) {
+            Debug_SetEnabled(false);
+            HostLink_Tx("OK VERBOSE 0\r\n");
             return;
         }
-        HostLink_Tx("ERR HUMAN use: HUMAN 0|1  (or MACHINE)\r\n");
+        HostLink_Tx("ERR VERBOSE use: VERBOSE 0|1\r\n");
         return;
     }
-    if (HostLink_EqToken(line, "MACHINE") || HostLink_EqToken(line, "H7")) {
-        s_human_mode = 0U;
-        HostLink_Tx("OK HUMAN 0 (machine T/TB/TC for H7)\r\n");
+    if (HostLink_EqToken(line, "BMS") || HostLink_EqToken(line, "BMSREINIT")) {
+        BQ76922_RequestReinit(&g_bq76922);
+        BQ76922_ClearShutdownRequest(&g_bq76922);
+        App_ClearFaults();
+        HostLink_Tx("OK BMS reinit (4S VCell Mode + ALL_FETS_ON, no OTP)\r\n");
         return;
     }
     if (HostLink_EqToken(line, "TEL")) {
@@ -718,9 +527,8 @@ static void HostLink_HandleLine(char *line)
             HostLink_Tx("ERR TEL\r\n");
             return;
         }
-        (void)snprintf(reply, sizeof(reply), "OK TEL %lu ms human=%u\r\n",
-                       (unsigned long)s_tel_period_ms,
-                       (unsigned int)s_human_mode);
+        (void)snprintf(reply, sizeof(reply), "OK TEL %lu ms\r\n",
+                       (unsigned long)s_tel_period_ms);
         HostLink_Tx(reply);
         return;
     }
@@ -738,12 +546,11 @@ void HostLink_Init(UART_HandleTypeDef *huart)
     s_rx_len = 0U;
     s_line_ready = false;
     s_rx_overflow = false;
-    s_human_mode = 0U;
     s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
     s_last_tel_ms = HAL_GetTick();
     HostLink_ArmRx();
     HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
-    HostLink_Tx("Hint: HUMAN 1 for readable telemetry; MACHINE for H7 T/TB/TC\r\n");
+    HostLink_Tx("USART1 = T/TB/TC telemetry only (VERBOSE 0). Send HELP.\r\n");
     HostLink_SendHelp();
 }
 
