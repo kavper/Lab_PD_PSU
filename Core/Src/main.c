@@ -667,8 +667,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-  /* BQ25731 OTG/VAP/FRS is held HIGH, matching TI PMP41013. */
-  HAL_GPIO_WritePin(STM_OTG_EN_GPIO_Port, STM_OTG_EN_Pin, GPIO_PIN_SET);
+  /* BQ25731 OTG/VAP/FRS stays LOW until USB SOURCE mode.  Holding it high
+   * let TPS enable EN_OTG whenever an iPad accepted our source PDOs. */
+  HAL_GPIO_WritePin(STM_OTG_EN_GPIO_Port, STM_OTG_EN_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOC, BUCK_TR_EN_Pin|BOOST_TR_EN_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, BLEED_ON_Pin|REMOTE_ON_Pin|POWER_PERMIT_G4_Pin, GPIO_PIN_RESET);
 

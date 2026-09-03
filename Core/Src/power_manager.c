@@ -289,7 +289,9 @@ static TPS25751_PortMode_t PowerManager_MapPortMode(
         case POWER_MANAGER_USER_SINK_ONLY: return TPS25751_PORT_SINK_ONLY;
         case POWER_MANAGER_USER_SOURCE_ONLY: return TPS25751_PORT_SOURCE_ONLY;
         case POWER_MANAGER_USER_OFF: return TPS25751_PORT_DISABLED;
-        default: return TPS25751_PORT_DRP;
+        /* AUTO: sink-only so TX_SOURCE_CAPS are not advertised.  Use
+         * `USB SOURCE` for pack-powered USB-C output. */
+        default: return TPS25751_PORT_SINK_ONLY;
     }
 }
 
@@ -306,16 +308,16 @@ static void PowerManager_MaintainOtgPermissionPin(void)
 {
     if ((!g_pm.status.tps.attached) ||
         (g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF)) {
+        (g_pm.status.requested_mode != POWER_MANAGER_USER_SOURCE_ONLY)) {
         g_pm.status.source_fault_latched = false;
     }
 
-    /* TI PMP41013 straps BQ25731 OTG/VAP/FRS high and lets the PD
-     * controller own the actual EN_OTG register over I2C.  Keep PA4 high
-     * as the equivalent hardware permission; it must not follow attach,
-     * role or telemetry timing.  BQ IN_OTG is the authoritative run state. */
-    PowerManager_SetOtgPin(true);
+    /* PA4 is the BQ25731 OTG/VAP/FRS permission strap.  Only raise it in
+     * explicit USB SOURCE / power-out mode.  AUTO and SINK keep it low so
+     * TPS cannot reverse-boost the pack into a tablet that requested our
+     * source PDOs. */
+    PowerManager_SetOtgPin(
+        g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY);
 }
 
 static void PowerManager_UpdatePdSnapshot(void)
@@ -452,9 +454,10 @@ static void PowerManager_LogPd(uint32_t now_ms)
     (void)snprintf(value, sizeof(value), "%s  desired=%s", role,
                    PowerManager_RoleToString(g_pm.policy_desired_role));
     (void)snprintf(details, sizeof(details),
-                   "mode=%s  conn=%u  EN_PIN=HIGH",
+                   "mode=%s  conn=%u  EN_PIN=%s",
                    PowerManager_UserModeToString(g_pm.status.requested_mode),
-                   tps->connection_state);
+                   tps->connection_state,
+                   g_pm.status.otg_pin_high ? "HIGH" : "LOW");
     PowerManager_LogMonitorRow("ROLE", value, details);
 
     (void)snprintf(value, sizeof(value), "PDO%u  %lu mV  %lu mA",
@@ -754,34 +757,22 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.pdo_report_pending = attached;
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
+        /* Charge-first: AUTO never stays Source.  An iPad DRP that accepted
+         * our TX_SOURCE_CAPS is a gadget taking pack power, not a charger. */
+        g_pm.policy_desired_role = TPS25751_ROLE_SINK;
         if ((g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
             (g_pm.status.tps.connection_state >= 6U)) {
-            /* Attached.SRC means that TPS detected Rd on CC.  That is direct
-             * Type-C evidence that the partner is a power sink; a PD
-             * Get_Sink_Cap response is optional and must never gate VBUS. */
             g_pm.partner_sink_observed = true;
-            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-            /* TPS25751 Source Policy automatically advertises the PDOs from
-             * TX_SOURCE_CAPS. SSrC is only required after the host changes
-             * that register. Issuing SSrC on every attach can occupy the 4CC
-             * interface until its timeout and starve STATUS telemetry long
-             * enough for the external OTG safety gate to drop VBUS. */
-            g_pm.policy_phase = PM_POLICY_DONE;
-            g_pm.policy_next_ms = 0U;
+            g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_ROLE_DRIFT_MS;
             if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
-                Debug_Printf("[PD-POLICY] attach role=SOURCE partner=Sink(Rd); VBUS enabled, TPS Source Policy owns automatic PDO advertisement");
+                Debug_Printf("[PD-POLICY] attach role=SOURCE; AUTO charge-first, requesting PR_SWAP to Sink");
             }
         } else {
-            /* Do not issue Get_Sink_Cap or a role swap while TPS is still
-             * establishing the first contract.  A strict source may reject
-             * that optional message, and the 4CC timeout would delay ACTIVE
-             * PDO/RDO telemetry and the matching BQ input-current update.
-             * Once a contract is valid, MaintainPolicy uses its voltage and
-             * the standard Dual-Role Power bit from the active Source PDO. */
             g_pm.policy_phase = PM_POLICY_DONE;
             g_pm.policy_next_ms = 0U;
             if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
-                Debug_Printf("[PD-POLICY] attach role=%s; TPS owns initial negotiation, policy waits for stable PDO/RDO",
+                Debug_Printf("[PD-POLICY] attach role=%s; AUTO charge-first, wait for Sink PDO/RDO",
                              PowerManager_RoleToString(g_pm.status.tps.role));
             }
         }
@@ -830,22 +821,20 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         }
     }
 
+    /* AUTO is charge-first.  Partner sink PDOs / Rd must not flip us to
+     * Source — that is how an iPad gadget drained the pack over OTG. */
+    desired = TPS25751_ROLE_SINK;
+    action = "DRAW_FROM_PARTNER";
     if (source_max_mv > 5000U) {
-        desired = TPS25751_ROLE_SINK;
-        action = "DRAW_FROM_PARTNER";
         reason = "PARTNER_SOURCE_ABOVE_5V";
+    } else if (current_sink_contract ||
+               (g_pm.partner_source_caps.count > 0U)) {
+        reason = "AUTO_CHARGE_FIRST_SINK";
     } else if ((g_pm.partner_sink_caps.count > 0U) ||
                g_pm.partner_sink_observed) {
-        desired = TPS25751_ROLE_SOURCE;
-        action = "CHARGE_PARTNER";
-        reason = g_pm.partner_sink_observed ?
-                 "PARTNER_SINK_CONFIRMED_IN_THIS_ATTACH" :
-                 "PARTNER_DRP_SINK_WITH_ONLY_5V_SOURCE";
-    } else if ((g_pm.partner_source_caps.count > 0U) ||
-               current_sink_contract) {
-        desired = TPS25751_ROLE_SINK;
-        action = "DRAW_FROM_PARTNER";
-        reason = "PARTNER_SOURCE_ONLY";
+        reason = "AUTO_REFUSE_SOURCE_TO_PARTNER_SINK";
+    } else {
+        reason = "AUTO_DEFAULT_SINK";
     }
 
     g_pm.policy_desired_role = desired;
@@ -859,23 +848,9 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
                  g_pm.policy_cap_attempts,
                  PM_POLICY_MAX_CAP_ATTEMPTS);
 
-    if (!g_pm.partner_sink_observed && current_sink_contract &&
-        (source_max_mv <= 5000U) &&
-        (g_pm.policy_cap_attempts < PM_POLICY_MAX_CAP_ATTEMPTS)) {
-        g_pm.policy_desired_role = desired;
-        g_pm.policy_swap_attempted = false;
-        g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
-        g_pm.policy_next_ms = now_ms + PM_POLICY_CAP_RETRY_MS;
-        Debug_Printf("[PD-POLICY] Sink capability not confirmed at 5V; retrying probe in %lums",
-                     (unsigned long)PM_POLICY_CAP_RETRY_MS);
-        return;
-    }
-
     if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN) ||
         g_pm.policy_swap_attempted) {
         g_pm.policy_phase = PM_POLICY_DONE;
-    } else if (desired == TPS25751_ROLE_SOURCE) {
-        g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
     } else {
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     }
@@ -903,45 +878,36 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         (((g_pm.status.tps.active_pdo_raw >> 30) & 0x03U) == 0U) &&
         ((g_pm.status.tps.active_pdo_raw & (1UL << 29)) != 0U);
 
-    if ((current == TPS25751_ROLE_SOURCE) && !contract_valid &&
-        (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN)) {
+    if ((current == TPS25751_ROLE_SOURCE) &&
+        (g_pm.policy_desired_role != TPS25751_ROLE_SINK)) {
         g_pm.partner_sink_observed = true;
-        g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-        Debug_Printf("[PD-POLICY] desired=SOURCE established from Type-C Rd attach");
+        g_pm.policy_desired_role = TPS25751_ROLE_SINK;
+        Debug_Printf("[PD-POLICY] desired=SINK: AUTO will not remain Source (Rd/OTG)");
     }
 
     if (active_source_pdo_is_drp && !g_pm.partner_sink_observed) {
         g_pm.partner_sink_observed = true;
-        Debug_Printf("[PD-POLICY] partner Sink capability confirmed by DRP bit in active Source PDO=0x%08lX",
+        Debug_Printf("[PD-POLICY] partner Sink capability noted by DRP bit in active PDO=0x%08lX (AUTO stays Sink)",
                      (unsigned long)g_pm.status.tps.active_pdo_raw);
     }
 
     if (contract_valid && (current == TPS25751_ROLE_SOURCE)) {
         if (!g_pm.partner_sink_observed) {
             g_pm.partner_sink_observed = true;
-            Debug_Printf("[PD-POLICY] partner Sink confirmed by active Source contract PDO=0x%08lX RDO=0x%08lX",
+            Debug_Printf("[PD-POLICY] partner Sink seen on our Source contract PDO=0x%08lX RDO=0x%08lX",
                          (unsigned long)g_pm.status.tps.active_pdo_raw,
                          (unsigned long)g_pm.status.tps.active_rdo_raw);
         }
-        if (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN) {
-            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-            Debug_Printf("[PD-POLICY] desired=SOURCE established from active partner Sink contract");
+        if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
+            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
+            Debug_Printf("[PD-POLICY] desired=SINK: refuse Source contract in AUTO");
         }
     } else if (contract_valid && (current == TPS25751_ROLE_SINK)) {
-        uint32_t source_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
-
-        if (source_mv > 5000U) {
-            if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
-                Debug_Printf("[PD-POLICY] desired=SINK updated: partner contract is %lumV (>5V)",
-                             (unsigned long)source_mv);
-            }
-            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
-        } else if (g_pm.partner_sink_observed &&
-                   (g_pm.policy_desired_role != TPS25751_ROLE_SOURCE)) {
-            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-            Debug_Printf("[PD-POLICY] desired=SOURCE restored: partner Sink was confirmed and now offers only %lumV",
-                         (unsigned long)source_mv);
+        if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
+            Debug_Printf("[PD-POLICY] desired=SINK: partner contract is %lumV",
+                         (unsigned long)g_pm.status.tps.active_pdo.max_voltage_mv);
         }
+        g_pm.policy_desired_role = TPS25751_ROLE_SINK;
     }
 
     if (!contract_valid ||
@@ -968,13 +934,10 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     }
 
     g_pm.policy_swap_attempted = false;
-    g_pm.policy_phase =
-        (g_pm.policy_desired_role == TPS25751_ROLE_SOURCE) ?
-        PM_POLICY_SWAP_TO_SOURCE : PM_POLICY_SWAP_TO_SINK;
+    g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     g_pm.policy_next_ms = now_ms;
     g_pm.policy_role_mismatch_since_ms = 0U;
-    Debug_Printf("[PD-POLICY] enforcing maintained role target=%s",
-                 PowerManager_RoleToString(g_pm.policy_desired_role));
+    Debug_Printf("[PD-POLICY] enforcing maintained role target=SINK (AUTO charge-first)");
 }
 
 static void PowerManager_HandleTpsError(TPS25751_Status_t status,
@@ -1972,7 +1935,10 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         case PM_POLICY_GET_SINK_CAPS: return PM_JOB_GET_SINK_CAPS;
         case PM_POLICY_READ_SINK_CAPS: return PM_JOB_READ_SINK_CAPS;
         case PM_POLICY_READ_SOURCE_CAPS: return PM_JOB_READ_SOURCE_CAPS;
-        case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
+        case PM_POLICY_SWAP_TO_SOURCE:
+            /* AUTO must not PR_SWAP to Source; force Sink. */
+            g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
+            return PM_JOB_SWAP_TO_SINK;
         case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
     }
@@ -2105,8 +2071,8 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     g_pm.next_bq_action_ms = now_ms + PM_BQ_START_DELAY_MS;
     g_pm.bq_monitor_holdoff_until_ms =
         now_ms + PM_BQ_MONITOR_HOLDOFF_MS;
-    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_SET);
-    g_pm.status.otg_pin_high = true;
+    HAL_GPIO_WritePin(OTG_EN_GPIO_Port, OTG_EN_Pin, GPIO_PIN_RESET);
+    g_pm.status.otg_pin_high = false;
 
     if ((TPS25751_Init(&g_pm.tps, hi2c,
                        TPS25751_I2C_ADDR_DEFAULT) != TPS25751_OK) ||
@@ -2116,7 +2082,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG/VAP/FRS=HIGH TPS_OWNS_EN_OTG=1",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG/VAP/FRS=LOW unless USB SOURCE AUTO=SINK_ONLY",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);
@@ -2224,7 +2190,11 @@ bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out)
     if (out != NULL) {
         *out = g_pm.status.pd_snapshot;
     }
+    /* Host `T` pd=1 is a sink/charge contract only.  A Source/OTG 9 V/3 A
+     * contract is not input power and must not look like a charger PDO. */
     return g_pm.status.pd_snapshot.attached &&
+           (g_pm.status.pd_snapshot.power_role == POWER_MANAGER_PD_ROLE_SINK) &&
+           (!g_pm.status.bq.in_otg) &&
            (g_pm.status.pd_snapshot.active_rdo_raw != 0U) &&
            (g_pm.status.pd_snapshot.contract_voltage_mv != 0U) &&
            (g_pm.status.pd_snapshot.contract_power_mw != 0U);

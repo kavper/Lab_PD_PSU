@@ -11,6 +11,7 @@
 #define TPS25751_PORT_STATE_MASK       0x03U
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
 #define TPS25751_TYPEC_TRY_SRC         0x01U
+#define TPS25751_TYPEC_TRY_SNK         0x02U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -777,12 +778,12 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* AUTO remains a true DRP port, but Try.SRC biases the initial Type-C
-     * attach toward Source.  This avoids first accepting 5 V from another
-     * DRP (for example a Mac) and then performing a time-critical PR_SWAP.
+    /* DRP uses Try.SNK (TRM TypeC Support Options = 2h) so a dual-role
+     * tablet/laptop is asked to source first.  Try.SRC was advertising our
+     * TX_SOURCE_CAPS (5 V / 9 V / …) and winning against iPad DRP.
      * Optional Try states do not apply to the single-role modes. */
     typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
+                    TPS25751_TYPEC_TRY_SNK : 0U;
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
     port_config[1] = (uint8_t)(
