@@ -158,5 +158,19 @@ int main(void)
         return 1;
     }
 
+    {
+        uint8_t pc[4];
+
+        UsbC_AutoLoadDefaultPortControl(pc);
+        if ((pc[0] != 0x42U) ||
+            (pc[1] != USB_C_EEPROM_PORT_CONTROL1) ||
+            (pc[2] != USB_C_EEPROM_PORT_CONTROL2) ||
+            (pc[3] != USB_C_EEPROM_PORT_CONTROL3) ||
+            !UsbC_AutoRejectsIncomingSwapToSink(pc[0])) {
+            fprintf(stderr, "AUTO boot PORT_CONTROL seed is wrong\n");
+            return 1;
+        }
+    }
+
     return 0;
 }

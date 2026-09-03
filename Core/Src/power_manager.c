@@ -1213,6 +1213,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     g_pm.bq_init = PM_BQ_INIT_WAIT;
                     g_pm.local_source_caps_pending = true;
                     g_pm.local_source_caps_valid = false;
+                    if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
+                        UsbC_AutoLoadDefaultPortControl(g_pm.port_control);
+                        g_pm.port_control_valid = true;
+                        g_pm.port_control_write_pending = true;
+                    }
                 }
                 PowerManager_SetState(POWER_MANAGER_TPS_READY);
             } else {

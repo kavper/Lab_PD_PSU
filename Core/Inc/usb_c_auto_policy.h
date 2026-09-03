@@ -11,6 +11,13 @@
 #define USB_C_PC_INITIATE_TO_SOURCE  0x80U
 #define USB_C_PC_PR_SWAP_MASK        0xF0U
 
+/* Programmed TPS25751 EEPROM PORT_CONTROL (0x29) payload. Byte 0 reset
+ * 0x52 accepts PR_SWAP both ways; AUTO patches that to 0x42. */
+#define USB_C_EEPROM_PORT_CONTROL0   0x52U
+#define USB_C_EEPROM_PORT_CONTROL1   0x30U
+#define USB_C_EEPROM_PORT_CONTROL2   0x81U
+#define USB_C_EEPROM_PORT_CONTROL3   0xDAU
+
 /* AUTO: sink from a partner that can source more than USB 5 V; otherwise source. */
 static inline bool UsbC_AutoShouldSink(uint32_t partner_source_max_mv)
 {
@@ -111,6 +118,24 @@ static inline uint8_t UsbC_PortControlSwapBits(uint8_t current,
         bits |= USB_C_PC_PROCESS_TO_SINK;
     }
     return (uint8_t)((current & (uint8_t)~USB_C_PC_PR_SWAP_MASK) | bits);
+}
+
+/* Seed PORT_CONTROL from the EEPROM image with AUTO swap-to-sink off so
+ * the first APP I2C write can reject Apple PR_SWAP without a prior read. */
+static inline void UsbC_AutoLoadDefaultPortControl(
+    uint8_t port_control[4])
+{
+    bool accept_to_source = false;
+    bool accept_to_sink = true;
+
+    port_control[0] = USB_C_EEPROM_PORT_CONTROL0;
+    port_control[1] = USB_C_EEPROM_PORT_CONTROL1;
+    port_control[2] = USB_C_EEPROM_PORT_CONTROL2;
+    port_control[3] = USB_C_EEPROM_PORT_CONTROL3;
+    UsbC_AutoDefaultSwapAccept(&accept_to_source, &accept_to_sink);
+    port_control[0] = UsbC_PortControlSwapBits(port_control[0],
+                                               accept_to_source,
+                                               accept_to_sink);
 }
 
 #endif
