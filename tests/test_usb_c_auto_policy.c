@@ -144,10 +144,10 @@ int main(void)
     }
 
     /* Caps interrupt before STATUS says sink: do not read RX_SOURCE_CAPS. */
-    if (UsbC_AutoShouldWritePortConfig(true, false) ||
-        !UsbC_AutoShouldWritePortConfig(false, true) ||
-        UsbC_AutoShouldWritePortConfig(true, true)) {
-        fprintf(stderr, "Try.SRC must not rewrite PORT_CONFIG while attached\n");
+    if (UsbC_AutoShouldReadSourceCaps(true, false) ||
+        UsbC_AutoShouldReadSourceCaps(false, true) ||
+        !UsbC_AutoShouldReadSourceCaps(true, true)) {
+        fprintf(stderr, "Source PDO read-while-sink guard failed\n");
         return 1;
     }
 

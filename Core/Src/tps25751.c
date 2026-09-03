@@ -11,7 +11,6 @@
  * byte 1 bits 1:0 are register bits 9:8 (Type-C Support Options). */
 #define TPS25751_PORT_STATE_MASK       0x03U
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
-#define TPS25751_TYPEC_TRY_SRC         0x01U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -770,7 +769,6 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 {
     uint8_t old_state;
     uint8_t old_options;
-    uint8_t typec_options;
 
     if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
         return false;
@@ -779,18 +777,15 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* AUTO stays DRP with Try.SRC so phones/iPads attach as our sink and
-     * start charging without a PR_SWAP.  Chargers are source-only, so they
-     * still win CC and we read their Source PDOs.  Combined with rejecting
-     * ProcessSwapToSink, Apple DRP cannot yank VBUS out from under a
-     * gadget we are already charging. */
-    typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
+    /* Leave Type-C Try.* bits alone for DRP. Writing them reconnects CC
+     * and drops VBUS. AUTO uses EEPROM standard DRP plus PORT_CONTROL
+     * (reject swap-to-sink) and a capped SWSr for 5 V gadgets. */
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
-    port_config[1] = (uint8_t)(
-        (old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK) |
-        typec_options);
+    if (mode != TPS25751_PORT_DRP) {
+        port_config[1] = (uint8_t)(
+            old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK);
+    }
 
     return (port_config[0] != old_state) ||
            (port_config[1] != old_options);
