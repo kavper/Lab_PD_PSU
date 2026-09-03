@@ -1120,6 +1120,21 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     }
 }
 
+/* STATUS → EVENT → TYPEC → PATH → PWR → PD → ADC → PDO → RDO → STATUS.
+ * EVENT sits right after STATUS so Source_Capabilities can arm TRACE before
+ * the rest of the telemetry wheel. Keep this in lockstep with
+ * PowerManager_SelectTelemetryJob(). */
+#define PM_TELEMETRY_PHASE_RDO 8U
+
+static void PowerManager_AdvanceTelemetryPhase(void)
+{
+    if (g_pm.telemetry_phase >= PM_TELEMETRY_PHASE_RDO) {
+        g_pm.telemetry_phase = 0U;
+    } else {
+        g_pm.telemetry_phase++;
+    }
+}
+
 static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                                              uint32_t now_ms)
 {
@@ -1356,7 +1371,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 }
             }
             PowerManager_UpdateAttachPolicy(now_ms);
-            g_pm.telemetry_phase = 1U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
         }
 
@@ -1385,7 +1400,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                              (unsigned long)g_pm.status.tps.status_raw);
             }
             g_pm.typec_trace_valid = true;
-            g_pm.telemetry_phase = 2U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
         }
 
@@ -1395,22 +1410,22 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.status.tps.ppcable_overcurrent) {
                 g_pm.status.source_fault_latched = true;
             }
-            g_pm.telemetry_phase = 3U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
 
         case PM_JOB_READ_POWER_STATUS:
             TPS25751_DecodePowerStatus(&g_pm.status.tps, data);
-            g_pm.telemetry_phase = 4U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
 
         case PM_JOB_READ_PD_STATUS:
             TPS25751_DecodePdStatus(&g_pm.status.tps, data);
-            g_pm.telemetry_phase = 5U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
 
         case PM_JOB_READ_ADC:
             TPS25751_DecodeAdcResults(&g_pm.status.tps, data);
-            g_pm.telemetry_phase = 6U;
+            PowerManager_AdvanceTelemetryPhase();
             break;
 
         case PM_JOB_READ_ACTIVE_PDO:
@@ -1421,7 +1436,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.tps.active_pdo_raw = TPS25751_ReadLe32(data);
             g_pm.status.tps.active_pdo = TPS25751_DecodePdo(
                 g_pm.status.tps.active_pdo_raw);
-            g_pm.telemetry_phase = 7U;
+            PowerManager_AdvanceTelemetryPhase();
             PowerManager_UpdatePdSnapshot();
             break;
 
@@ -1434,14 +1449,14 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.tps.active_rdo = TPS25751_DecodeRdo(
                 g_pm.status.tps.active_rdo_raw,
                 &g_pm.status.tps.active_pdo);
-            g_pm.telemetry_phase = 8U;
+            PowerManager_AdvanceTelemetryPhase();
             PowerManager_UpdatePdSnapshot();
             PowerManager_TryLogContractPdos();
             break;
 
         case PM_JOB_READ_EVENT:
             PowerManager_HandleEvent(data, now_ms);
-            g_pm.telemetry_phase = 0U;
+            PowerManager_AdvanceTelemetryPhase();
             PowerManager_UpdatePdSnapshot();
             PowerManager_LogPd(now_ms);
             break;
@@ -1938,14 +1953,16 @@ static PowerManager_Job_t PowerManager_SelectTelemetryJob(void)
 {
     switch (g_pm.telemetry_phase) {
         case 0U: return PM_JOB_READ_STATUS;
-        case 1U: return PM_JOB_READ_TYPEC_STATE;
-        case 2U: return PM_JOB_READ_POWER_PATH;
-        case 3U: return PM_JOB_READ_POWER_STATUS;
-        case 4U: return PM_JOB_READ_PD_STATUS;
-        case 5U: return PM_JOB_READ_ADC;
-        case 6U: return PM_JOB_READ_ACTIVE_PDO;
-        case 7U: return PM_JOB_READ_ACTIVE_RDO;
-        default: return PM_JOB_READ_EVENT;
+        case 1U: return PM_JOB_READ_EVENT;
+        case 2U: return PM_JOB_READ_TYPEC_STATE;
+        case 3U: return PM_JOB_READ_POWER_PATH;
+        case 4U: return PM_JOB_READ_POWER_STATUS;
+        case 5U: return PM_JOB_READ_PD_STATUS;
+        case 6U: return PM_JOB_READ_ADC;
+        case 7U: return PM_JOB_READ_ACTIVE_PDO;
+        case PM_TELEMETRY_PHASE_RDO:
+        default:
+            return PM_JOB_READ_ACTIVE_RDO;
     }
 }
 
