@@ -888,26 +888,17 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         return;
     }
 
-    if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN)) {
-        PowerManager_LockAutoRole((desired == TPS25751_ROLE_UNKNOWN) ?
-                                  current : desired, now_ms);
-        return;
-    }
-
-    if (g_pm.policy_swap_attempts >= PM_POLICY_MAX_SWAP_ATTEMPTS) {
-        Debug_Printf("[PD-POLICY] swap budget exhausted; locking current role");
-        PowerManager_LockAutoRole(current, now_ms);
-        return;
-    }
-
-    /* AUTO never SWSk: becoming sink is Type-C + charger PDOs, not a swap. */
-    if (desired == TPS25751_ROLE_SOURCE) {
+    if (UsbC_AutoNeedSwapToSource(current == TPS25751_ROLE_SOURCE,
+                                  source_max_mv,
+                                  g_pm.policy_swap_attempts,
+                                  PM_POLICY_MAX_SWAP_ATTEMPTS)) {
         (void)PowerManager_QueuePortControlSwaps(true, false);
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
         g_pm.policy_next_ms = now_ms;
         return;
     }
-    PowerManager_LockAutoRole(TPS25751_ROLE_SINK, now_ms);
+
+    PowerManager_LockAutoRole(desired, now_ms);
 }
 
 static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
@@ -962,7 +953,7 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
             (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
             source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
         }
-        if (UsbC_AutoShouldRecoverSource(
+        if (UsbC_AutoNeedSwapToSource(
                 g_pm.status.tps.role == TPS25751_ROLE_SOURCE,
                 source_max_mv,
                 g_pm.policy_swap_attempts,

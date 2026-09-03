@@ -83,16 +83,39 @@ int main(void)
         fprintf(stderr, "sink + 5 V partner must become source\n");
         return 1;
     }
-    if (UsbC_AutoShouldRecoverSource(true, 5000U, 0U, 2U) ||
-        UsbC_AutoShouldRecoverSource(false, 20000U, 0U, 2U) ||
-        UsbC_AutoShouldRecoverSource(false, 5000U, 2U, 2U)) {
-        fprintf(stderr, "recover-source guard failed\n");
+    if (UsbC_AutoNeedSwapToSource(true, 5000U, 0U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, 20000U, 0U, 2U) ||
+        UsbC_AutoNeedSwapToSource(false, 5000U, 2U, 2U)) {
+        fprintf(stderr, "swap-to-source guard failed\n");
         return 1;
     }
-    if (!UsbC_AutoShouldRecoverSource(false, 5000U, 0U, 2U) ||
-        !UsbC_AutoShouldRecoverSource(false, 0U, 1U, 2U)) {
-        fprintf(stderr, "must recover source after Apple stole 5 V contract\n");
+    if (!UsbC_AutoNeedSwapToSource(false, 5000U, 0U, 2U) ||
+        !UsbC_AutoNeedSwapToSource(false, 0U, 1U, 2U)) {
+        fprintf(stderr, "must SWSr a 5 V-only sink partner\n");
         return 1;
+    }
+
+    /* Mac refuses SWSr: at most two attempts, then lock. Never SWSk. */
+    {
+        uint8_t attempts = 0U;
+        unsigned swsr = 0U;
+        unsigned i;
+
+        for (i = 0U; i < 8U; ++i) {
+            if (UsbC_AutoNeedSwapToSource(false, 5000U, attempts, 2U)) {
+                ++swsr;
+                ++attempts;
+            }
+        }
+        if (swsr != 2U) {
+            fprintf(stderr, "Mac 5 V loop must stop after 2 SWSr, got %u\n", swsr);
+            return 1;
+        }
+        if (UsbC_AutoDesiredSink(true, 9000U) ||
+            UsbC_AutoNeedSwapToSource(true, 9000U, 0U, 2U)) {
+            fprintf(stderr, "ping-pong: source gadget must not SWSk\n");
+            return 1;
+        }
     }
     if ((UsbC_PortControlSwapBits(0x53U, true, false) & 0x0FU) != 0x03U) {
         fprintf(stderr, "TypeC current nibble was overwritten\n");

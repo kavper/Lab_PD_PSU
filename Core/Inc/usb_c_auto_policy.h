@@ -43,11 +43,11 @@ static inline bool UsbC_AutoDesiredSink(bool we_are_source,
     return UsbC_AutoShouldSink(partner_source_max_mv);
 }
 
-/* Locked as source but the port is now sink on a 5 V-only partner: recover. */
-static inline bool UsbC_AutoShouldRecoverSource(bool we_are_source,
-                                                uint32_t partner_source_max_mv,
-                                                uint8_t swap_attempts,
-                                                uint8_t max_attempts)
+/* Sink on a 5 V-only partner: SWSr, up to max_attempts. Never SWSk. */
+static inline bool UsbC_AutoNeedSwapToSource(bool we_are_source,
+                                             uint32_t partner_source_max_mv,
+                                             uint8_t swap_attempts,
+                                             uint8_t max_attempts)
 {
     if (we_are_source || UsbC_AutoShouldSink(partner_source_max_mv)) {
         return false;
