@@ -43,6 +43,18 @@ static inline bool UsbC_AutoDesiredSink(bool we_are_source,
     return UsbC_AutoShouldSink(partner_source_max_mv);
 }
 
+/* Locked as source but the port is now sink on a 5 V-only partner: recover. */
+static inline bool UsbC_AutoShouldRecoverSource(bool we_are_source,
+                                                uint32_t partner_source_max_mv,
+                                                uint8_t swap_attempts,
+                                                uint8_t max_attempts)
+{
+    if (we_are_source || UsbC_AutoShouldSink(partner_source_max_mv)) {
+        return false;
+    }
+    return swap_attempts < max_attempts;
+}
+
 /* Clear both Initiate bits. Keep TypeC Current in the low nibble. */
 static inline uint8_t UsbC_PortControlSwapBits(uint8_t current,
                                                bool accept_to_source,

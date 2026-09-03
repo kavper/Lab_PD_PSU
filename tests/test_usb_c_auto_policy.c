@@ -83,6 +83,17 @@ int main(void)
         fprintf(stderr, "sink + 5 V partner must become source\n");
         return 1;
     }
+    if (UsbC_AutoShouldRecoverSource(true, 5000U, 0U, 2U) ||
+        UsbC_AutoShouldRecoverSource(false, 20000U, 0U, 2U) ||
+        UsbC_AutoShouldRecoverSource(false, 5000U, 2U, 2U)) {
+        fprintf(stderr, "recover-source guard failed\n");
+        return 1;
+    }
+    if (!UsbC_AutoShouldRecoverSource(false, 5000U, 0U, 2U) ||
+        !UsbC_AutoShouldRecoverSource(false, 0U, 1U, 2U)) {
+        fprintf(stderr, "must recover source after Apple stole 5 V contract\n");
+        return 1;
+    }
     if ((UsbC_PortControlSwapBits(0x53U, true, false) & 0x0FU) != 0x03U) {
         fprintf(stderr, "TypeC current nibble was overwritten\n");
         return 1;

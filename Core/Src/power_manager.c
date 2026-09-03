@@ -20,6 +20,7 @@
 #define PM_ERROR_LOG_MS             1000U
 #define PM_POLICY_STEP_MS             20U
 #define PM_POLICY_CAPS_WAIT_MS        800U
+#define PM_POLICY_RECOVER_MS          400U
 #define PM_POLICY_MAX_SWAP_ATTEMPTS     2U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
@@ -780,12 +781,13 @@ static void PowerManager_QueuePortControlForUserMode(void)
     }
 }
 
-static void PowerManager_LockAutoRole(TPS25751_PowerRole_t role)
+static void PowerManager_LockAutoRole(TPS25751_PowerRole_t role,
+                                      uint32_t now_ms)
 {
     g_pm.policy_desired_role = role;
     g_pm.policy_locked = true;
     g_pm.policy_phase = PM_POLICY_DONE;
-    g_pm.policy_next_ms = 0U;
+    g_pm.policy_next_ms = now_ms + PM_POLICY_RECOVER_MS;
     if (role == TPS25751_ROLE_SOURCE) {
         (void)PowerManager_QueuePortControlSwaps(true, false);
         Debug_Printf("[PD-POLICY] lock=SOURCE; reject partner PR_SWAP to sink");
@@ -888,25 +890,24 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
 
     if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN)) {
         PowerManager_LockAutoRole((desired == TPS25751_ROLE_UNKNOWN) ?
-                                  current : desired);
+                                  current : desired, now_ms);
         return;
     }
 
     if (g_pm.policy_swap_attempts >= PM_POLICY_MAX_SWAP_ATTEMPTS) {
         Debug_Printf("[PD-POLICY] swap budget exhausted; locking current role");
-        PowerManager_LockAutoRole(current);
+        PowerManager_LockAutoRole(current, now_ms);
         return;
     }
 
-    /* Reject the reverse swap before asking for the one we want. */
+    /* AUTO never SWSk: becoming sink is Type-C + charger PDOs, not a swap. */
     if (desired == TPS25751_ROLE_SOURCE) {
         (void)PowerManager_QueuePortControlSwaps(true, false);
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
-    } else {
-        (void)PowerManager_QueuePortControlSwaps(false, true);
-        g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
+        g_pm.policy_next_ms = now_ms;
+        return;
     }
-    g_pm.policy_next_ms = now_ms;
+    PowerManager_LockAutoRole(TPS25751_ROLE_SINK, now_ms);
 }
 
 static bool PowerManager_AutoPolicyReadyToDecide(uint32_t now_ms)
@@ -950,8 +951,31 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         !PowerManager_HasTypecPowerConnection()) {
         return;
     }
-    if (g_pm.policy_locked ||
-        (g_pm.policy_phase == PM_POLICY_SWAP_TO_SOURCE) ||
+    if (g_pm.policy_locked) {
+        uint32_t source_max_mv = 0U;
+
+        if (g_pm.partner_source_caps_current) {
+            source_max_mv = g_pm.partner_source_caps.max_voltage_mv;
+        }
+        if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+            g_pm.status.tps.active_pdo.valid &&
+            (g_pm.status.tps.active_pdo.max_voltage_mv > source_max_mv)) {
+            source_max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
+        }
+        if (UsbC_AutoShouldRecoverSource(
+                g_pm.status.tps.role == TPS25751_ROLE_SOURCE,
+                source_max_mv,
+                g_pm.policy_swap_attempts,
+                PM_POLICY_MAX_SWAP_ATTEMPTS) &&
+            PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
+            Debug_Printf("[PD-POLICY] lost source role on 5V partner; recovering");
+            g_pm.policy_locked = false;
+            g_pm.policy_phase = PM_POLICY_DECIDE;
+            PowerManager_DecidePolicy(now_ms);
+        }
+        return;
+    }
+    if ((g_pm.policy_phase == PM_POLICY_SWAP_TO_SOURCE) ||
         (g_pm.policy_phase == PM_POLICY_SWAP_TO_SINK) ||
         g_pm.port_control_write_pending) {
         return;
@@ -1178,7 +1202,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                          g_pm.policy_swap_attempts,
                          PM_POLICY_MAX_SWAP_ATTEMPTS);
             if (g_pm.policy_swap_attempts >= PM_POLICY_MAX_SWAP_ATTEMPTS) {
-                PowerManager_LockAutoRole(g_pm.status.tps.role);
+                PowerManager_LockAutoRole(g_pm.status.tps.role, now_ms);
             } else {
                 g_pm.policy_phase = PM_POLICY_WAIT;
                 g_pm.policy_next_ms = now_ms + PM_POLICY_CAPS_WAIT_MS;
@@ -1531,7 +1555,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         case PM_JOB_SWAP_TO_SINK:
             Debug_Printf("[PD-POLICY] role swap accepted target=%s",
                          PowerManager_RoleToString(g_pm.policy_desired_role));
-            PowerManager_LockAutoRole(g_pm.policy_desired_role);
+            PowerManager_LockAutoRole(g_pm.policy_desired_role, now_ms);
             break;
 
         case PM_JOB_BQ_TRACE_IIN_HOST:
