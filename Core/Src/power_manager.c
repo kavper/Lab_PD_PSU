@@ -2027,6 +2027,11 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         return policy_job;
     }
 
+    if (PowerManager_TickReached(now_ms, g_pm.next_tps_step_ms)) {
+        g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+        return PowerManager_SelectTelemetryJob();
+    }
+
     if (g_pm.local_source_caps_pending) {
         return PM_JOB_READ_LOCAL_SOURCE_CAPS;
     }
@@ -2068,10 +2073,6 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
             case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
             default: break;
         }
-    }
-    if (PowerManager_TickReached(now_ms, g_pm.next_tps_step_ms)) {
-        g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
-        return PowerManager_SelectTelemetryJob();
     }
 
     if ((g_pm.bq_init == PM_BQ_INIT_DONE) &&
