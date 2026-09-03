@@ -1984,16 +1984,16 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
                PM_JOB_READ_MODE : PM_JOB_NONE;
     }
 
-    if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
-        return PM_JOB_READ_MODE;
-    }
-    /* Reject Apple PR_SWAP to sink before PORT_CONFIG / telemetry.
-     * EEPROM reset accepts both swaps (0x52); that window is the iPad blink. */
+    /* PORT_CONTROL before MODE poll. A due MODE read would leave EEPROM
+     * 0x52 accepting Apple PR_SWAP to sink. */
     if (g_pm.port_control_write_pending) {
         return PM_JOB_WRITE_PORT_CONTROL;
     }
     if (!g_pm.port_control_valid) {
         return PM_JOB_READ_PORT_CONTROL;
+    }
+    if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
+        return PM_JOB_READ_MODE;
     }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
