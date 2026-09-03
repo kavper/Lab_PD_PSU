@@ -1086,9 +1086,16 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  TPS25751_REG_INT_EVENT,
                                  now_ms);
     }
-    if (event.source_caps_received &&
-        (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
+    if (event.source_caps_received) {
+        /* Role in this EVENT job can still be pre-attach. Keep the
+         * pending bit; SelectJob only reads RX_SOURCE_CAPS as sink. */
         g_pm.source_caps_trace_pending = true;
+    }
+    if (event.power_swap_requested) {
+        Debug_Printf("[PD-POLICY] partner PR_SWAP request PSnk=%u PSrc=%u role=%s",
+                     (g_pm.port_control[0] & USB_C_PC_PROCESS_TO_SINK) ? 1U : 0U,
+                     (g_pm.port_control[0] & USB_C_PC_PROCESS_TO_SOURCE) ? 1U : 0U,
+                     PowerManager_RoleToString(g_pm.status.tps.role));
     }
     if (event.plug_changed || event.source_caps_received ||
         event.new_contract_consumer || event.hard_reset) {
@@ -1313,6 +1320,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             if (g_pm.status.tps.attached &&
                 (g_pm.status.tps.role != old_role)) {
                 g_pm.pdo_report_pending = true;
+                if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) {
+                    g_pm.source_caps_trace_pending = false;
+                    g_pm.partner_source_caps_current = false;
+                    memset(&g_pm.partner_source_caps, 0,
+                           sizeof(g_pm.partner_source_caps));
+                }
                 if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
                     Debug_Printf("[PD-ROLE] %s -> %s conn=%u STATUS=0x%02lX%08lX",
                                  PowerManager_RoleToString(old_role),
@@ -1453,6 +1466,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             if (!g_pm.partner_source_caps_current) {
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
+                /* STATUS may catch up next cycle; keep pending unless we
+                 * are already sourcing (those PDOs would be stale). */
+                g_pm.source_caps_trace_pending =
+                    g_pm.status.tps.attached &&
+                    (g_pm.status.tps.role != TPS25751_ROLE_SOURCE);
                 Debug_Printf("[PD-TRACE t=%lu] ignoring Source PDOs while we are not Sink",
                              (unsigned long)now_ms);
                 break;
@@ -1462,6 +1480,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
             PowerManager_TryLogContractPdos();
+            if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+                !g_pm.policy_locked) {
+                g_pm.policy_phase = PM_POLICY_DECIDE;
+                g_pm.policy_next_ms = now_ms;
+            }
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
@@ -1963,7 +1986,8 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.local_source_caps_pending) {
         return PM_JOB_READ_LOCAL_SOURCE_CAPS;
     }
-    if (g_pm.source_caps_trace_pending) {
+    if (g_pm.source_caps_trace_pending &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
         return PM_JOB_TRACE_SOURCE_CAPS;
     }
     if (g_pm.bq_iin_trace_pending) {
