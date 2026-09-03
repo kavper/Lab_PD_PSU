@@ -34,20 +34,13 @@
 #define PM_POLICY_SETTLE_MS            300U
 /* AUTO role from the partner's Source PDOs (not sticky Try.SRC / leftover).
  *
- * User examples: 5 V/~15 W phone, tablet, or weak/sink-only gadget → we SOURCE
- * and charge them.  45 W charger / Mac / brick → we SINK and charge the pack.
- *
- * SOURCE when:
- *   - partner advertised no Source PDOs (SNK-only, or Get_Source_Cap empty), or
- *   - partner_max_mw <= 15000 && partner_max_mv <= 5000
- * SINK when:
- *   - partner_max_mw >= 27000 (9 V/3 A and up), or
- *   - partner_max_mv > 5000 with a real current/power PDO (typical 9–20 V brick)
- * 5 V between 15 W and 27 W (rare): still weak USB default → SOURCE.
+ * SOURCE (we charge them): phone/tablet / sink-only gadget — only 5 V at
+ * typical USB default power, or no Source PDOs at all.
+ * SINK (we charge the pack): partner offers anything above 5 V (9 V/12 V/…
+ * including a 20 W brick), or more than 15 W even at 5 V (5 V/4 A).
  */
 #define PM_AUTO_WEAK_SRC_MAX_MW        15000U
 #define PM_AUTO_WEAK_SRC_MAX_MV         5000U
-#define PM_AUTO_STRONG_SRC_MIN_MW      27000U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
 typedef enum {
@@ -963,7 +956,7 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
         g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
         g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
         g_pm.policy_decided = false;
-        Debug_Printf("[PD-POLICY] attach role=%s conn=%u; wait PDOs then 15W/5V SOURCE vs 27W+/9V SINK",
+        Debug_Printf("[PD-POLICY] attach role=%s conn=%u; wait PDOs then 5V/15W SOURCE vs above-5V SINK",
                      PowerManager_RoleToString(g_pm.status.tps.role),
                      g_pm.status.tps.connection_state);
     } else {
@@ -1165,7 +1158,7 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
         (g_pm.partner_source_caps.count == 0U)) {
         /* Empty Get_Source_Cap: partner is SNK → we SOURCE.
          * Attached as SNK with a live contract but no decoded PDO list:
-         * stay SINK (do not SWSr into an unread 45 W brick). */
+         * stay SINK (do not SWSr into an unread charger). */
         if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
             g_pm.status.tps.active_pdo.valid &&
             g_pm.status.tps.active_rdo.valid) {
@@ -1177,17 +1170,13 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
     max_mw = g_pm.partner_source_caps.max_power_mw;
     max_mv = g_pm.partner_source_caps.max_voltage_mv;
 
-    /* 5 V and ≤15 W: typical phone/tablet / weak source. */
+    /* Only 5 V at ≤15 W: typical phone/tablet / weak source. */
     if ((max_mv <= PM_AUTO_WEAK_SRC_MAX_MV) &&
         (max_mw <= PM_AUTO_WEAK_SRC_MAX_MW)) {
         return TPS25751_ROLE_SOURCE;
     }
-    /* ≥27 W (9 V/3 A class, 45 W brick) or any PDO above 5 V. */
-    if ((max_mw >= PM_AUTO_STRONG_SRC_MIN_MW) ||
-        (max_mv > PM_AUTO_WEAK_SRC_MAX_MV)) {
-        return TPS25751_ROLE_SINK;
-    }
-    return TPS25751_ROLE_SOURCE;
+    /* Anything above 5 V (20 W / 9 V brick, laptop, …) or >15 W at 5 V. */
+    return TPS25751_ROLE_SINK;
 }
 
 static void PowerManager_DecidePolicy(uint32_t now_ms)
@@ -1216,19 +1205,17 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     } else if ((max_mv <= PM_AUTO_WEAK_SRC_MAX_MV) &&
                (max_mw <= PM_AUTO_WEAK_SRC_MAX_MW)) {
         reason = "PARTNER_LE_15W_5V_WE_SOURCE";
-    } else if (max_mw >= PM_AUTO_STRONG_SRC_MIN_MW) {
-        reason = "PARTNER_GE_27W_WE_SINK";
     } else if (max_mv > PM_AUTO_WEAK_SRC_MAX_MV) {
         reason = "PARTNER_ABOVE_5V_WE_SINK";
     } else {
-        reason = "PARTNER_WEAK_DEFAULT_WE_SOURCE";
+        reason = "PARTNER_ABOVE_15W_5V_WE_SINK";
     }
 
     g_pm.policy_desired_role = desired;
     g_pm.policy_decided = true;
     PowerManager_QueueAutoSwapControl(desired);
 
-    Debug_Printf("[PD-POLICY] AUTO PDO heuristic source_pdos=%u max=%lumW %lumV current=%s decision=%s reason=%s (SOURCE if <=15W@5V or no caps; SINK if >=27W or V>5V)",
+    Debug_Printf("[PD-POLICY] AUTO PDO heuristic source_pdos=%u max=%lumW %lumV current=%s decision=%s reason=%s (SOURCE if <=15W@5V or no caps; SINK if V>5V or >15W)",
                  g_pm.partner_source_caps.count,
                  (unsigned long)max_mw,
                  (unsigned long)max_mv,
@@ -2641,7 +2628,7 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
         return;
     }
     g_pm.initialized = true;
-    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG after Source contract; AUTO=DRP+Try.SRC PDO heuristic 15W/5V vs 27W; unplug-reset=0x28-hold-vSafe0V",
+    Debug_Printf("[PM] transport=I2C4-IT TPS=0x%02X BQ=0x%02X port_config_len=%u OTG after Source contract; AUTO=DRP+Try.SRC PDO heuristic 5V/15W SOURCE else SINK; unplug-reset=0x28-hold-vSafe0V",
                  TPS25751_I2C_ADDR_DEFAULT,
                  BQ25731_I2C_ADDR_7BIT,
                  TPS25751_PORT_CONFIG_LEN);

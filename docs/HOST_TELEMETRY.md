@@ -60,7 +60,7 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 Default USB-C: **AUTO = DRP + Try.SRC**, then **one role decision from the partner's Source PDOs**:
 
 - `partner_max_mw <= 15000` **and** `partner_max_mv <= 5000` (phone/tablet / 5 V ~15 W), or no partner Source PDOs (sink-only gadget) → **we SOURCE** and charge them.
-- `partner_max_mw >= 27000` (9 V/3 A class, e.g. 45 W brick) **or** any PDO `V > 5 V` → **we SINK** and charge the pack.
+- Any partner Source PDO **above 5 V** (9 V/12 V/… — a 20 W brick counts) **or** more than 15 W even at 5 V → **we SINK** and charge the pack.
 
 `USB SOURCE` is source-only (`0x28` Source SM, `0x29` reject swap to sink). `USB SINK` is sink-only (`0x28` Sink SM, `0x29` reject swap to source). 9 V source PDOs stay in the TPS image.
 
@@ -71,7 +71,7 @@ Expected `TC` after flash:
 - **iPhone (good, keep)**: later `conn=6/7`, `typec=0x60`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`), `bq_otg=1` only after that contract.
 - **iPad + USB SOURCE**: must leave `conn=0 typec=0x64` + VBUS 5↔0. Next log: `typec=0x60`, `conn=6/7`, `pd_role=2`, `pd_mv=5000` or `9000`, `bq_otg=1` only after the contract. `[PD-RESET]` on unplug/mode change restores **source-only** (`sm=1`), not DRP.
 - **iPad + AUTO**: same Source attach if partner PDOs are ≤15 W @ 5 V (or no Source PDOs).
-- **45 W brick + AUTO**: `typec=0x61`, `conn=6/7`, `pd_role=1`, `bq_otg=0`, charge current on `bq_ichg_ma` / `bq_ibat_ma`.
+- **Charger with V>5 V (e.g. 20 W) + AUTO**: `typec=0x61`, `conn=6/7`, `pd_role=1`, `bq_otg=0`, charge current on `bq_ichg_ma` / `bq_ibat_ma`.
 - Accidental OTG: PA4 stays low until Source contract.
 
 Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption3` EN_HIZ=1 EN_OTG=0, `0x28` Disabled until TPS VBUS `<0.8 V` and `tSrcRecover` 800 ms, then `0x28` for **that** mode (DRP+Try.SRC / Source-only / Sink-only), `0x29` swap bits for that mode. Do not treat `AttachWait.SRC` (`typec=0x64`) with vSafe0V as leftover — that is the iPad SOURCE attach. Kick only if CC is live in Unattached, or AttachWait with VBUS still high for 1.5 s.
@@ -88,7 +88,7 @@ Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption
 | `BMS FORCE` / `BMSREINIT` | full CONFIG_UPDATE + `ALL_FETS_ON` (RAM only, **no OTP**). Can hold I2C4 (starve BQ/TPS) and PACK inrush may PIN/POR-reboot the G4 — do not click casually while running. |
 | `VERBOSE 0\|1` | debug logs on same UART (keep `0` for parsers) |
 | `ON` / `OFF` / `SET` / `ILIM` / `PERMIT` / `REMOTE` | power / LDO |
-| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. **AUTO** = DRP+Try.SRC, then PDO heuristic (≤15 W @ 5 V → source the gadget; ≥27 W or V>5 V → sink/charge pack). `USB SOURCE` / `USB SINK` are true single-role (reject the opposite PR_Swap). |
+| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. **AUTO** = DRP+Try.SRC, then PDO heuristic (only 5 V ≤15 W → source the gadget; any PDO above 5 V or >15 W → sink/charge pack). `USB SOURCE` / `USB SINK` are true single-role (reject the opposite PR_Swap). |
 | `CLR` | clear sticky PSU fault latch |
 
 ---
