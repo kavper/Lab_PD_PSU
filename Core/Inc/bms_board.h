@@ -55,6 +55,16 @@
 #define BMS_WARN_PACK_LOW_MV             11000U
 #define BMS_WARN_PACK_HIGH_MV            17000U
 
+/* BQ76922 SRP/SRN sense resistor (pack current). Not the DCDC INA296 shunt. */
+#define BMS_SENSE_MOHM                   5U
+/*
+ * CC Gain = 7.4768 / Rsense_mOhm (TI calib guide). Default OTP is for ~1 mOhm
+ * (CC Gain 7.4768) — with a 5 mOhm shunt CC2/i_pack reads ~5× too high until
+ * this is written in CONFIG_UPDATE.
+ */
+#define BMS_CC_GAIN                      (7.4768f / (float)BMS_SENSE_MOHM)
+#define BMS_CAPACITY_GAIN                (BMS_CC_GAIN * 298261.6178f)
+
 /*
  * Prot A bits: SCD|OCD2|OCD1|OCC|COV|CUV (bit0..5).
  * 0xFD = all of those except OCD2 (still covered by SCD for hard shorts).
@@ -75,12 +85,11 @@
 #define BMS_PDSG_TIMEOUT                 0x32U  /* ~500 ms max predischarge */
 #define BMS_PDSG_STOP_DELTA              50U    /* exit PDSG when |stack-pack| < 500 mV */
 /*
- * SCD Threshold 0x9286 index — higher = less sensitive. Capacitive PACK wake
- * needs headroom even with PDSG; 0x05 ≈ TI 100 mV example.
+ * SCD Threshold 0x9286 index — hardware mV on sense, independent of CC Gain.
+ * 0x05 ≈ 100 mV → ~20 A across 5 mOhm.
  */
 #define BMS_SCD_THRESHOLD                0x05U
-/* Body Diode Threshold 0x9273 (mA). Default 50 mA kills DSG when CHG is off
- * and the charger/load pushes current through the DSG body diode. */
+/* Body Diode Threshold 0x9273 (mA after CC Gain). */
 #define BMS_BODY_DIODE_THRESHOLD_MA      2000U
 
 #define BMS_CELL_USED(i)                 (((BMS_VCELL_MODE >> (i)) & 1U) != 0U)

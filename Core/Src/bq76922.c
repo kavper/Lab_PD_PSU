@@ -34,6 +34,8 @@
 #define BQ76922_RAM_CUV_THRESHOLD        0x9275U
 #define BQ76922_RAM_COV_THRESHOLD        0x9278U
 #define BQ76922_RAM_SCD_THRESHOLD        0x9286U
+#define BQ76922_RAM_CC_GAIN              0x91A8U
+#define BQ76922_RAM_CAPACITY_GAIN        0x91ACU
 #define BQ76922_RAM_FET_OPTIONS          0x9308U
 #define BQ76922_RAM_PDSG_TIMEOUT         0x930EU
 #define BQ76922_RAM_PDSG_STOP_DELTA      0x930FU
@@ -87,6 +89,8 @@ typedef enum {
     BQ76922_INIT_PROT_B,
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
+    BQ76922_INIT_CC_GAIN,
+    BQ76922_INIT_CAPACITY_GAIN,
     BQ76922_INIT_FET_OPTIONS,
     BQ76922_INIT_PDSG_TIMEOUT,
     BQ76922_INIT_PDSG_STOP_DELTA,
@@ -289,6 +293,24 @@ static BQ76922_Status_t BQ76922_WriteRamU2(BQ76922_Device_t *dev,
     data[0] = (uint8_t)(value & 0xFFU);
     data[1] = (uint8_t)((value >> 8) & 0xFFU);
     return BQ76922_WriteRamBlock(dev, address, data, 2U);
+}
+
+static BQ76922_Status_t BQ76922_WriteRamF4(BQ76922_Device_t *dev,
+                                           uint16_t address,
+                                           float value)
+{
+    uint8_t data[4];
+    union {
+        float f;
+        uint32_t u;
+    } conv;
+
+    conv.f = value;
+    data[0] = (uint8_t)(conv.u & 0xFFU);
+    data[1] = (uint8_t)((conv.u >> 8) & 0xFFU);
+    data[2] = (uint8_t)((conv.u >> 16) & 0xFFU);
+    data[3] = (uint8_t)((conv.u >> 24) & 0xFFU);
+    return BQ76922_WriteRamBlock(dev, address, data, 4U);
 }
 
 static bool BQ76922_CellUsed(uint8_t index)
@@ -617,6 +639,18 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_COV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
                                         BMS_COV_THRESHOLD_CODE);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_CC_GAIN:
+            /* 5 mOhm pack shunt — without this, CC2/i_pack is ~5× high. */
+            status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_CAPACITY_GAIN:
+            status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CAPACITY_GAIN,
+                                        BMS_CAPACITY_GAIN);
             delay_ms = 20U;
             break;
 
