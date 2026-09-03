@@ -109,6 +109,8 @@ typedef struct {
     bool port_write_pending;
     bool port_control_valid;
     bool port_control_write_pending;
+    bool plug_present_known;
+    bool port_config_deferred;
     bool event_mask_ready;
     bool event_mask_write_pending;
     bool event_clear_pending;
@@ -845,6 +847,11 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
             g_pm.attach_count++;
         } else {
             g_pm.detach_count++;
+            if (g_pm.port_config_deferred) {
+                g_pm.port_config_deferred = false;
+                g_pm.mode_update_pending = true;
+                Debug_Printf("[PD-POLICY] unplug; applying deferred Try.SRC");
+            }
         }
         PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
         if ((PM_VERBOSE_TRANSITION_LOGS != 0U) &&
@@ -1225,6 +1232,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                        sizeof(g_pm.local_source_caps));
                 g_pm.port_control_valid = false;
                 g_pm.port_control_write_pending = false;
+                g_pm.plug_present_known = false;
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
             }
             break;
@@ -1345,6 +1353,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 }
             }
             PowerManager_UpdateAttachPolicy(now_ms);
+            g_pm.plug_present_known = true;
             g_pm.telemetry_phase = 1U;
             break;
         }
@@ -1977,8 +1986,24 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (!g_pm.port_control_valid) {
         return PM_JOB_READ_PORT_CONTROL;
     }
+    if (g_pm.port_write_pending || g_pm.mode_update_pending) {
+        if (!g_pm.plug_present_known) {
+            return PM_JOB_READ_STATUS;
+        }
+    }
     if (g_pm.port_write_pending) {
-        return PM_JOB_WRITE_PORT_CONFIG;
+        if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+            !UsbC_AutoShouldWritePortConfig(g_pm.status.tps.attached,
+                                            g_pm.port_write_pending)) {
+            g_pm.port_write_pending = false;
+            g_pm.port_config_deferred = true;
+            g_pm.mode_update_pending = false;
+            g_pm.status.applied_mode = g_pm.status.requested_mode;
+            g_pm.status.applied_mode_valid = true;
+            Debug_Printf("[PD-POLICY] defer Try.SRC until unplug; PORT_CONFIG reconnect would drop VBUS");
+        } else {
+            return PM_JOB_WRITE_PORT_CONFIG;
+        }
     }
     if (g_pm.mode_update_pending) {
         return PM_JOB_READ_PORT_CONFIG;
@@ -2158,6 +2183,7 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
         g_pm.port_write_pending = false;
         g_pm.port_control_valid = false;
         g_pm.port_control_write_pending = false;
+        g_pm.port_config_deferred = false;
         g_pm.status.applied_mode_valid = false;
         g_pm.status.source_fault_latched = false;
         PowerManager_ResetPolicy(HAL_GetTick(),

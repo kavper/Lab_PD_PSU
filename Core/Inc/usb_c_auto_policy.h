@@ -89,8 +89,13 @@ static inline bool UsbC_AutoNeedSwapToSource(bool we_are_source,
                            max_attempts) == USB_C_AUTO_SWAP_TO_SOURCE;
 }
 
-/* RX_SOURCE_CAPS is only trustworthy while we are sink. Keep the interrupt
- * pending until STATUS catches up; never read it while sourcing. */
+/* Changing PORT_CONFIG TypeC Try.* while a gadget is attached reconnects
+ * CC and drops VBUS. AUTO applies Try.SRC only when unplugged. */
+static inline bool UsbC_AutoShouldWritePortConfig(bool attached,
+                                                  bool write_pending)
+{
+    return write_pending && !attached;
+}
 static inline bool UsbC_AutoShouldReadSourceCaps(bool pending,
                                                  bool we_are_sink)
 {
