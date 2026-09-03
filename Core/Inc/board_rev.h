@@ -68,7 +68,7 @@
 
 /* Silk TPS2571D is TPS25751D — keep tps25751.c. */
 #define BOARD_USBPD_IS_TPS25751              1U
-/* BQ25731 CELL_BATPRESZ 4-cell strap is intentional (sheet title still says 5S). */
+/* BQ25731 CELL_BATPRESZ 4-cell strap. BQ76922 is also 4S (skip VC4). */
 #define BOARD_CHARGER_CELL_COUNT             4U
 /*
  * POWER_PERMIT_G4 PB7 → G0 opto → POWER_KILL (active-high kill on G0).

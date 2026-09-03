@@ -1,13 +1,14 @@
 #ifndef BQ76922_H
 #define BQ76922_H
 
+#include "bms_board.h"
 #include "stm32g4xx_hal.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #define BQ76922_I2C_ADDR_7BIT            0x08U
-#define BQ76922_CELL_COUNT               5U
+#define BQ76922_CELL_COUNT               BMS_AFE_CELL_CHANNELS
 
 typedef enum {
     BQ76922_OK = 0,
@@ -63,6 +64,8 @@ typedef struct {
     uint32_t sample_tick_ms;
     uint32_t alert_count;
     uint32_t i2c_error_count;
+    uint8_t fet_status;
+    uint16_t manuf_status;
 } BQ76922_Snapshot_t;
 
 typedef struct {
@@ -72,6 +75,7 @@ typedef struct {
     uint8_t scan_index;
     uint8_t init_step;
     uint32_t next_action_ms;
+    uint32_t last_fet_cmd_ms;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);

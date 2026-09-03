@@ -1703,7 +1703,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
                  (long)(BOARD_VPRE_VIN_FLOOR_V * 1000.0f));
 #if (BMS_ENABLE != 0U)
-    Debug_Printf("[APP] BMS: 5S Li-ion COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
+    Debug_Printf("[APP] BMS: %uS Li-ion skip VC4 COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
+                 (unsigned int)BMS_SERIES_COUNT,
                  (unsigned int)BMS_COV_THRESHOLD_MV,
                  (unsigned int)BMS_CUV_THRESHOLD_MV,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_A,

@@ -22,6 +22,7 @@
 #define BQ76922_SUBCMD_EXIT_CFGUPDATE    0x0092U
 #define BQ76922_SUBCMD_FET_ENABLE        0x0022U
 #define BQ76922_SUBCMD_ALL_FETS_ON       0x0096U
+#define BQ76922_SUBCMD_MANUF_STATUS      0x0057U
 
 #define BQ76922_RAM_VCELL_MODE           0x9304U
 #define BQ76922_RAM_ENABLED_PROT_A       0x9261U
@@ -33,8 +34,14 @@
 #define BQ76922_SCAN_PERIOD_MS           50U
 #define BQ76922_PROBE_RETRY_MS           500U
 #define BQ76922_INIT_STEP_DELAY_MS       5U
+#define BQ76922_POST_CFG_DELAY_MS        80U
+#define BQ76922_FET_RETRY_MS             500U
 #define BQ76922_CC2_CHARGE_MA            50
 #define BQ76922_CC2_DISCHARGE_MA         (-50)
+#define BQ76922_MANUF_FET_EN             (1U << 4)
+#define BQ76922_FET_STATUS_CHG_DSG       0x0CU
+#define BQ76922_SAFETY_A_CUV             0x04U
+#define BQ76922_SAFETY_A_COV             0x08U
 
 typedef enum {
     BQ76922_INIT_ENTER_CFG = 0,
@@ -44,6 +51,8 @@ typedef enum {
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
     BQ76922_INIT_EXIT_CFG,
+    BQ76922_INIT_MANUF_ISSUE,
+    BQ76922_INIT_MANUF_READ,
     BQ76922_INIT_FET_ENABLE,
     BQ76922_INIT_ALL_FETS_ON,
     BQ76922_INIT_DONE,
@@ -188,15 +197,28 @@ static BQ76922_Status_t BQ76922_WriteRamU2(BQ76922_Device_t *dev,
     return BQ76922_WriteRamBlock(dev, address, data, 2U);
 }
 
+static bool BQ76922_CellUsed(uint8_t index)
+{
+    return (index < BQ76922_CELL_COUNT) && BMS_CELL_USED(index);
+}
+
 static void BQ76922_UpdateCellStats(BQ76922_Device_t *dev)
 {
     int16_t min_mv = 32767;
     int16_t max_mv = -32768;
     uint8_t i;
+    uint8_t used = 0U;
 
     for (i = 0U; i < BQ76922_CELL_COUNT; i++) {
-        int16_t mv = dev->snapshot.cell_mv[i];
+        int16_t mv;
 
+        if (!BQ76922_CellUsed(i)) {
+            dev->snapshot.cell_mv[i] = (int16_t)BMS_UNUSED_CELL_MV;
+            continue;
+        }
+
+        mv = dev->snapshot.cell_mv[i];
+        used++;
         if (mv < min_mv) {
             min_mv = mv;
         }
@@ -205,7 +227,7 @@ static void BQ76922_UpdateCellStats(BQ76922_Device_t *dev)
         }
     }
 
-    if (dev->snapshot.sample_valid) {
+    if (dev->snapshot.sample_valid && (used > 0U)) {
         dev->snapshot.min_cell_mv = min_mv;
         dev->snapshot.max_cell_mv = max_mv;
     }
@@ -257,9 +279,14 @@ static void BQ76922_UpdateWarnState(BQ76922_Device_t *dev)
     }
 
     if ((dev->snapshot.min_cell_mv <= (int16_t)BMS_WARN_CELL_LOW_MV) ||
-        (dev->snapshot.max_cell_mv >= (int16_t)BMS_WARN_CELL_HIGH_MV) ||
-        (dev->snapshot.pack_mv <= (int16_t)BMS_WARN_PACK_LOW_MV) ||
-        (dev->snapshot.pack_mv >= (int16_t)BMS_WARN_PACK_HIGH_MV)) {
+        (dev->snapshot.max_cell_mv >= (int16_t)BMS_WARN_CELL_HIGH_MV)) {
+        warn = true;
+    }
+
+    /* PACK pin is ~0 with FETs off — do not treat that as a 4S undervoltage. */
+    if (dev->snapshot.fets_enabled && (dev->snapshot.pack_mv > 0) &&
+        ((dev->snapshot.pack_mv <= (int16_t)BMS_WARN_PACK_LOW_MV) ||
+         (dev->snapshot.pack_mv >= (int16_t)BMS_WARN_PACK_HIGH_MV))) {
         warn = true;
     }
 
@@ -324,6 +351,8 @@ static BQ76922_Status_t BQ76922_HandleAlert(BQ76922_Device_t *dev)
 static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 {
     BQ76922_Status_t status = BQ76922_OK;
+    uint32_t delay_ms = BQ76922_INIT_STEP_DELAY_MS;
+    uint8_t buf[2];
 
     switch ((BQ76922_InitStep_t)dev->init_step) {
         case BQ76922_INIT_ENTER_CFG:
@@ -331,7 +360,7 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             break;
 
         case BQ76922_INIT_VCELL_MODE:
-            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE_5S);
+            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
             break;
 
         case BQ76922_INIT_PROT_A:
@@ -356,6 +385,24 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 
         case BQ76922_INIT_EXIT_CFG:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
+            delay_ms = BQ76922_POST_CFG_DELAY_MS;
+            break;
+
+        case BQ76922_INIT_MANUF_ISSUE:
+            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
+            break;
+
+        case BQ76922_INIT_MANUF_READ:
+            status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 2U);
+            if (status == BQ76922_OK) {
+                dev->snapshot.manuf_status = (uint16_t)BQ76922_Le16(buf);
+                /* FET_ENABLE is a toggle — do not send it if FET_EN is already 1. */
+                if ((dev->snapshot.manuf_status & BQ76922_MANUF_FET_EN) != 0U) {
+                    dev->init_step = (uint8_t)BQ76922_INIT_ALL_FETS_ON;
+                    dev->next_action_ms = HAL_GetTick() + delay_ms;
+                    return false;
+                }
+            }
             break;
 
         case BQ76922_INIT_FET_ENABLE:
@@ -364,12 +411,13 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
 
         case BQ76922_INIT_ALL_FETS_ON:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
+            dev->last_fet_cmd_ms = HAL_GetTick();
             break;
 
         case BQ76922_INIT_DONE:
         default:
             dev->snapshot.configured = true;
-            dev->snapshot.fets_enabled = true;
+            dev->snapshot.fault_flags &= (uint32_t)~BQ76922_FAULT_I2C;
             dev->snapshot.state = BQ76922_STATE_READY;
             return true;
     }
@@ -385,7 +433,7 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
     }
 
     dev->init_step++;
-    dev->next_action_ms = HAL_GetTick() + BQ76922_INIT_STEP_DELAY_MS;
+    dev->next_action_ms = HAL_GetTick() + delay_ms;
     return false;
 }
 
@@ -399,6 +447,14 @@ void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c)
     dev->hi2c = hi2c;
     dev->address_7bit = BQ76922_I2C_ADDR_7BIT;
     dev->snapshot.state = BQ76922_STATE_ABSENT;
+    {
+        uint8_t i;
+        for (i = 0U; i < BQ76922_CELL_COUNT; i++) {
+            if (!BQ76922_CellUsed(i)) {
+                dev->snapshot.cell_mv[i] = (int16_t)BMS_UNUSED_CELL_MV;
+            }
+        }
+    }
 }
 
 BQ76922_Status_t BQ76922_Probe(BQ76922_Device_t *dev)
@@ -538,16 +594,21 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     }
 
     if (dev->scan_index < BQ76922_CELL_COUNT) {
-        status = BQ76922_ReadDirect(dev,
-                                    (uint8_t)(BQ76922_CMD_CELL1_V +
-                                              (dev->scan_index * 2U)),
-                                    buf,
-                                    2U);
-        if (status == BQ76922_OK) {
-            dev->snapshot.cell_mv[dev->scan_index] = BQ76922_Le16(buf);
+        if (!BQ76922_CellUsed(dev->scan_index)) {
+            dev->snapshot.cell_mv[dev->scan_index] = (int16_t)BMS_UNUSED_CELL_MV;
             dev->scan_index++;
-        } else if (status == BQ76922_BUSY) {
-            return;
+        } else {
+            status = BQ76922_ReadDirect(dev,
+                                        (uint8_t)(BQ76922_CMD_CELL1_V +
+                                                  (dev->scan_index * 2U)),
+                                        buf,
+                                        2U);
+            if (status == BQ76922_OK) {
+                dev->snapshot.cell_mv[dev->scan_index] = BQ76922_Le16(buf);
+                dev->scan_index++;
+            } else if (status == BQ76922_BUSY) {
+                return;
+            }
         }
     } else if (dev->scan_index == BQ76922_CELL_COUNT) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_PACK_V, buf, 2U);
@@ -568,17 +629,43 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 2U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, buf, 1U);
         if (status == BQ76922_OK) {
-            dev->snapshot.fets_enabled = ((buf[0] & 0x0CU) != 0U);
+            dev->snapshot.fet_status = buf[0];
+            dev->snapshot.fets_enabled = ((buf[0] & BQ76922_FET_STATUS_CHG_DSG) != 0U);
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 3U)) {
+        status = BQ76922_ReadSafetyStatus(dev);
+        if (status == BQ76922_OK) {
             dev->scan_index++;
         } else if (status == BQ76922_BUSY) {
             return;
         }
     } else {
+        bool hard_uv_ov;
+
         dev->snapshot.sample_valid = true;
         dev->snapshot.sample_tick_ms = now_ms;
         dev->scan_index = 0U;
         BQ76922_UpdateCellStats(dev);
         BQ76922_UpdateWarnState(dev);
+
+        /* Button / USB-C wake: AFE is up but CHG/DSG stay off until ALL_FETS_ON
+         * after 4S VCell Mode. Retry while CUV/COV are clear (unused VC4 used
+         * to latch CUV and block the pack path). */
+        hard_uv_ov = ((dev->snapshot.safety_status_a &
+                       (BQ76922_SAFETY_A_CUV | BQ76922_SAFETY_A_COV)) != 0U);
+        if (!dev->snapshot.fets_enabled && !hard_uv_ov &&
+            ((int32_t)(now_ms - dev->last_fet_cmd_ms) >= (int32_t)BQ76922_FET_RETRY_MS)) {
+            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
+            if (status == BQ76922_BUSY) {
+                return;
+            }
+            if (status == BQ76922_OK) {
+                dev->last_fet_cmd_ms = now_ms;
+            }
+        }
     }
 
     dev->next_action_ms = now_ms + BQ76922_SCAN_PERIOD_MS;

@@ -103,7 +103,7 @@ static void HostLink_SendTelemetry(void)
                  "duty_ppm=%lu run=%u mode=%s fault=%lu pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u bms=%u bms_cfg=%u bms_st=%u bms_fault=0x%08lX alert=%u alarm=0x%04X "
                  "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d min_mv=%d max_mv=%d pack_mv=%d "
-                 "i_cc2_ma=%d g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
+                 "i_cc2_ma=%d fets=%u sa=0x%02X g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
                  "g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
                  "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
@@ -141,6 +141,8 @@ static void HostLink_SendTelemetry(void)
                  (int)bms.max_cell_mv,
                  (int)bms.pack_mv,
                  (int)bms.cc2_ma,
+                 (unsigned int)(bms.fets_enabled ? 1U : 0U),
+                 (unsigned int)bms.safety_status_a,
                  (unsigned int)(prereg.g0_active ? 1U : 0U),
                  (unsigned int)(ldo.output_on ? 1U : 0U),
                  (unsigned int)(LdoLink_IsOutputWanted() ? 1U : 0U),
