@@ -1306,6 +1306,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_WRITE_PORT_CONTROL:
             g_pm.port_control_write_pending = false;
+            if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
+                /* Policy must not wait for a no-op PORT_CONFIG read.
+                 * Swap-to-sink is already off; SWSr a 5 V gadget now. */
+                g_pm.status.applied_mode = POWER_MANAGER_USER_AUTO;
+                g_pm.status.applied_mode_valid = true;
+            }
             Debug_Printf("[PD-POLICY] PORT_CONTROL=0x%02X%02X%02X%02X",
                          g_pm.port_control[3], g_pm.port_control[2],
                          g_pm.port_control[1], g_pm.port_control[0]);
