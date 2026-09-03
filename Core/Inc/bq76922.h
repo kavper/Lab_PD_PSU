@@ -105,7 +105,11 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms);
 void BQ76922_AlertFromIsr(BQ76922_Device_t *dev);
 void BQ76922_GetSnapshot(const BQ76922_Device_t *dev, BQ76922_Snapshot_t *out);
 void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev);
-/* Re-run CONFIG_UPDATE + 4S VCell Mode + FET_ENABLE + ALL_FETS_ON (no OTP). */
+/* True when RAM 4S config is applied (safe to skip host CFGUPDATE). */
+bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev);
+/* Re-run CONFIG_UPDATE + 4S VCell Mode + FET_ENABLE + ALL_FETS_ON (no OTP).
+ * While FETs are already on this can drop PACK, hold I2C4 (starve BQ/TPS), and
+ * ALL_FETS_ON inrush may brown-out the MCU (PIN/POR). Prefer host BMS soft path. */
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
 
 #endif /* BQ76922_H */

@@ -1056,12 +1056,32 @@ void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev)
                                              BQ76922_FAULT_SAFETY);
 }
 
+bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev)
+{
+    if ((dev == NULL) || !BQ76922_IsEnabled()) {
+        return false;
+    }
+    if (!dev->snapshot.present || !dev->snapshot.configured) {
+        return false;
+    }
+    if (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE) {
+        return false;
+    }
+    /* Require both charge and discharge paths — matches a good TB line. */
+    return (dev->snapshot.chg_fet_on &&
+            (dev->snapshot.dsg_fet_on ||
+             ((dev->snapshot.fet_status & BQ76922_FET_STATUS_PDSG) != 0U)));
+}
+
 void BQ76922_RequestReinit(BQ76922_Device_t *dev)
 {
     if (dev == NULL) {
         return;
     }
 
+    /* Clears configured → I2C bus-hold starves BQ25731/TPS until init finishes.
+     * EXIT_CFGUPDATE restarts AFE digital (FETs off) then ALL_FETS_ON can
+     * inrush PACK caps hard enough to dip VIN / NRST (PIN+POR). */
     dev->snapshot.configured = false;
     dev->snapshot.fets_enabled = false;
     dev->snapshot.chg_fet_on = false;

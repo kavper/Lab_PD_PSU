@@ -67,7 +67,8 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 | `REMOTE 0\|OFF` | Local sense (default) |
 | `REMOTE 1\|ON` | Enable remote sense path |
 | `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame |
-| `BMS` | Re-init BQ76922 4S + ALL_FETS_ON (RAM; **no OTP**) |
+| `BMS` | Soft: skip CFGUPDATE if already healthy; else full 4S reinit |
+| `BMS FORCE` / `BMSREINIT` | Full CFGUPDATE + ALL_FETS_ON (may bus-hold + reboot) |
 | `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7) |
 
 ## BMS (4S pack, skip VC4)

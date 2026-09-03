@@ -352,7 +352,8 @@ static void HostLink_SendHelp(void)
         "  REMOTE ON|OFF   sense path\r\n"
         "  TEL [ms]        periodic T/TB/TC (0=off, default 500)\r\n"
         "  ? / STATUS      one T/TB/TC frame now\r\n"
-        "  BMS             re-init BQ76922 4S + ALL_FETS_ON (no OTP)\r\n"
+        "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
+        "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
         "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
@@ -520,10 +521,29 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "BMS") || HostLink_EqToken(line, "BMSREINIT")) {
+        bool force = HostLink_EqToken(line, "BMSREINIT") ||
+                     HostLink_EqToken(arg, "FORCE") ||
+                     HostLink_EqToken(arg, "1") ||
+                     HostLink_EqToken(arg, "REINIT");
+
+        /* GUI "BMS config" historically sent plain BMS while FETs were already
+         * on → full CFGUPDATE, I2C bus-hold (bq_ok=0), ALL_FETS_ON inrush,
+         * VIN dip, PIN/POR reboot. Soft path skips that when healthy. */
+        if (!force && BQ76922_IsConfiguredHealthy(&g_bq76922)) {
+            BQ76922_ClearShutdownRequest(&g_bq76922);
+            App_ClearFaults();
+            HostLink_Tx(
+                "OK BMS already cfg=1 FETs on — skipped CFGUPDATE "
+                "(BMS FORCE = full reinit; may reboot)\r\n");
+            return;
+        }
+
         BQ76922_RequestReinit(&g_bq76922);
         BQ76922_ClearShutdownRequest(&g_bq76922);
         App_ClearFaults();
-        HostLink_Tx("OK BMS reinit (4S VCell Mode + ALL_FETS_ON, no OTP)\r\n");
+        HostLink_Tx(
+            "OK BMS reinit (4S CFGUPDATE + ALL_FETS_ON, no OTP; "
+            "bus-hold + FET inrush may reboot)\r\n");
         return;
     }
     if (HostLink_EqToken(line, "TEL")) {

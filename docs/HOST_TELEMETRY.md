@@ -64,7 +64,8 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 |---|---|
 | `TEL [ms]` | period; `0` = stop; default 500 |
 | `?` / `STATUS` | one `T`+`TB`+`TC` now |
-| `BMS` | re-run 4S config + `ALL_FETS_ON` (RAM only, **no OTP**) |
+| `BMS` | **soft**: if already `cfg=1` + CHG/DSG on + `vcell_rb=0x0017`, skip CFGUPDATE (clear sticky only). Otherwise full reinit. |
+| `BMS FORCE` / `BMSREINIT` | full CONFIG_UPDATE + `ALL_FETS_ON` (RAM only, **no OTP**). Can hold I2C4 (starve BQ/TPS) and PACK inrush may PIN/POR-reboot the G4 — do not click casually while running. |
 | `VERBOSE 0\|1` | debug logs on same UART (keep `0` for parsers) |
 | `ON` / `OFF` / `SET` / `ILIM` / `PERMIT` / `REMOTE` | power / LDO |
 | `CLR` | clear sticky PSU fault latch |
