@@ -1,4 +1,5 @@
 #include "tps25751.h"
+#include "usb_c_auto_policy.h"
 
 #include <string.h>
 
@@ -10,7 +11,6 @@
  * byte 1 bits 1:0 are register bits 9:8 (Type-C Support Options). */
 #define TPS25751_PORT_STATE_MASK       0x03U
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
-#define TPS25751_TYPEC_TRY_SRC         0x01U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -359,10 +359,11 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
     }
 
     if (dev->operation == TPS25751_OP_READ_REGISTER) {
-        bool active_contract_register =
+        bool flexible_length =
             (dev->register_address == TPS25751_REG_ACTIVE_PDO) ||
-            (dev->register_address == TPS25751_REG_ACTIVE_RDO);
-        status = TPS25751_CheckRead(dev, !active_contract_register);
+            (dev->register_address == TPS25751_REG_ACTIVE_RDO) ||
+            (dev->register_address == TPS25751_REG_PORT_CONTROL);
+        status = TPS25751_CheckRead(dev, !flexible_length);
         TPS25751_Finish(dev, status);
         return status;
     }
@@ -768,7 +769,6 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 {
     uint8_t old_state;
     uint8_t old_options;
-    uint8_t typec_options;
 
     if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
         return false;
@@ -777,20 +777,38 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     old_state = port_config[0];
     old_options = port_config[1];
 
-    /* AUTO remains a true DRP port, but Try.SRC biases the initial Type-C
-     * attach toward Source.  This avoids first accepting 5 V from another
-     * DRP (for example a Mac) and then performing a time-critical PR_SWAP.
-     * Optional Try states do not apply to the single-role modes. */
-    typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
+    /* Leave Type-C Try.* bits alone for DRP. Writing them reconnects CC
+     * and drops VBUS. AUTO uses EEPROM standard DRP plus PORT_CONTROL
+     * (reject swap-to-sink) and a capped SWSr for 5 V gadgets. */
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
-    port_config[1] = (uint8_t)(
-        (old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK) |
-        typec_options);
+    if (mode != TPS25751_PORT_DRP) {
+        port_config[1] = (uint8_t)(
+            old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK);
+    }
 
     return (port_config[0] != old_state) ||
            (port_config[1] != old_options);
+}
+
+bool TPS25751_PatchPortControlSwaps(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    bool accept_swap_to_source,
+    bool accept_swap_to_sink)
+{
+    uint8_t old_value;
+
+    if (port_control == NULL) {
+        return false;
+    }
+
+    /* Never auto-initiate PR_SWAP; AUTO decides once from Source PDOs.
+     * Process bits accept or reject the partner's swap request. */
+    old_value = port_control[0];
+    port_control[0] = UsbC_PortControlSwapBits(old_value,
+                                               accept_swap_to_source,
+                                               accept_swap_to_sink);
+    return port_control[0] != old_value;
 }
 
 const char *TPS25751_StatusToString(TPS25751_Status_t status)
