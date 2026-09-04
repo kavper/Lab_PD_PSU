@@ -38,6 +38,8 @@
 #define PM_CAPS_RETRY_MS              300U
 #define PM_SWAP_MAX_ATTEMPTS            2U
 #define PM_SWAP_BACKOFF_MS           5000U
+#define PM_STUCK_MS                  8000U
+#define PM_PORT_RESTART_MS          30000U
 
 /* BQ25731 access through the TPS25751 I2C controller tunnel. */
 #define PM_ENABLE_BQ_ACCESS             1U
@@ -54,6 +56,7 @@ typedef enum {
     PM_JOB_READ_BOOT_FLAGS,
     PM_JOB_READ_PORT_CONFIG,
     PM_JOB_WRITE_PORT_CONFIG,
+    PM_JOB_RESTART_PORT,
     PM_JOB_READ_PORT_CONTROL,
     PM_JOB_WRITE_PORT_CONTROL,
     PM_JOB_READ_INT_MASK,
@@ -119,7 +122,6 @@ typedef struct {
     uint8_t port_control_length;
     uint8_t int_mask[TPS_INT_EVENT_BYTES];
     uint8_t event_to_clear[TPS_INT_EVENT_BYTES];
-    uint8_t event_seen[TPS_INT_EVENT_BYTES];
     uint8_t sink_caps[TPS25751_TX_SINK_CAPS_LEN];
     uint8_t sink_caps_length;
     uint8_t telemetry_phase;
@@ -137,7 +139,10 @@ typedef struct {
     bool int_mask_ready;
     bool sink_caps_checked;
     bool local_caps_done;
+    bool port_config_valid;
+    bool port_restart_pending;
     uint32_t setup_retry_ms;
+    uint32_t port_restart_next_ms;
 
     /* Role policy, valid for one attach session. */
     PowerManager_RoleTarget_t role_target;
@@ -151,6 +156,8 @@ typedef struct {
     uint32_t swap_next_ms;
     uint32_t partner_caps_next_ms;
     bool partner_caps_valid;
+    bool partner_caps_fresh;
+    bool contract_fresh;
     bool local_caps_valid;
     TPS25751_Capabilities_t partner_caps;
     TPS25751_Capabilities_t local_caps;
@@ -264,6 +271,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_READ_BOOT_FLAGS: return "READ_BOOT_FLAGS";
         case PM_JOB_READ_PORT_CONFIG: return "READ_PORT_CONFIG";
         case PM_JOB_WRITE_PORT_CONFIG: return "WRITE_PORT_CONFIG";
+        case PM_JOB_RESTART_PORT: return "RESTART_PORT";
         case PM_JOB_READ_PORT_CONTROL: return "READ_PORT_CONTROL";
         case PM_JOB_WRITE_PORT_CONTROL: return "WRITE_PORT_CONTROL";
         case PM_JOB_READ_INT_MASK: return "READ_INT_MASK";
@@ -324,8 +332,11 @@ static void PowerManager_ClearPendingJobs(void)
     g_pm.sink_caps_write_pending = false;
     g_pm.local_caps_pending = false;
     g_pm.partner_caps_pending = false;
-    g_pm.event_clear_pending = false;
     g_pm.swap_job_pending = false;
+    g_pm.port_restart_pending = false;
+    /* event_clear_pending is deliberately kept: an uncleared INT_EVENT bit
+     * stays asserted forever and would keep the port from reporting the next
+     * attach, so that write is retried until it succeeds. */
 }
 
 /* Everything the port needs once, re-armed slowly for as long as it has not
@@ -500,9 +511,21 @@ static void PowerManager_ResetSession(uint32_t now_ms)
     g_pm.swap_next_ms = now_ms;
     g_pm.attach_ms = now_ms;
     g_pm.partner_caps_valid = false;
+    g_pm.partner_caps_fresh = false;
+    g_pm.contract_fresh = false;
     g_pm.partner_caps_pending = false;
     g_pm.partner_caps_next_ms = now_ms;
     memset(&g_pm.partner_caps, 0, sizeof(g_pm.partner_caps));
+
+    /* The contract belongs to the partner that has just left. Drop it here
+     * too, so nothing downstream can mistake it for the new partner's. */
+    g_pm.status.tps.active_pdo_raw = 0U;
+    g_pm.status.tps.active_rdo_raw = 0U;
+    memset(&g_pm.status.tps.active_pdo, 0,
+           sizeof(g_pm.status.tps.active_pdo));
+    memset(&g_pm.status.tps.active_rdo, 0,
+           sizeof(g_pm.status.tps.active_rdo));
+
     g_pm.status.source_fault_latched = false;
     PowerManager_UpdateSwapPolicy();
 }
@@ -511,22 +534,44 @@ static void PowerManager_SetRoleTarget(PowerManager_RoleTarget_t target,
                                        const char *reason)
 {
     g_pm.role_target = target;
-    Debug_Printf("[PD] decision=%s reason=%s current=%s",
+    Debug_Printf("[PD] decision=%s reason=%s current=%s caps_fresh=%u caps_max=%lumV contract=%lumV vbus=%lumV",
                  PowerManager_TargetToString(target), reason,
-                 PowerManager_RoleToString(g_pm.status.tps.role));
+                 PowerManager_RoleToString(g_pm.status.tps.role),
+                 g_pm.partner_caps_valid ? 1U : 0U,
+                 (unsigned long)(g_pm.partner_caps_valid ?
+                                 g_pm.partner_caps.max_voltage_mv : 0U),
+                 (unsigned long)g_pm.status.tps.active_pdo.max_voltage_mv,
+                 (unsigned long)g_pm.status.tps.vbus_mv);
     PowerManager_UpdateSwapPolicy();
+}
+
+/* The TPS25751 does not clear its PD mirror registers when a partner is
+ * unplugged, so every one of them may still describe the previous partner.
+ * A register only counts once an event from this attach has produced it. */
+static bool PowerManager_ConsumerContractUsable(void)
+{
+    return g_pm.contract_fresh &&
+           (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+           g_pm.status.tps.active_pdo.valid &&
+           g_pm.status.tps.active_rdo.valid;
+}
+
+/* A consumer contract cannot exist without a Source_Capabilities from the
+ * partner attached now, so it vouches for RX_SOURCE_CAPS as well. */
+static bool PowerManager_PartnerCapsUsable(void)
+{
+    return g_pm.partner_caps_fresh || PowerManager_ConsumerContractUsable();
 }
 
 /* Highest voltage the attached partner is able to supply, taken from its
  * Source_Capabilities when this attach produced them and otherwise from the
- * active contract. Zero means "nothing observed yet". */
+ * active contract. Zero means "nothing observed from this partner yet". */
 static uint32_t PowerManager_PartnerSourceMaxMv(void)
 {
     uint32_t max_mv = g_pm.partner_caps_valid ?
                       g_pm.partner_caps.max_voltage_mv : 0U;
 
-    if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-        g_pm.status.tps.active_pdo.valid &&
+    if (PowerManager_ConsumerContractUsable() &&
         (g_pm.status.tps.active_pdo.max_voltage_mv > max_mv)) {
         max_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
     }
@@ -554,17 +599,14 @@ static void PowerManager_DecideRole(uint32_t now_ms)
     }
 
     if (!g_pm.partner_caps_valid) {
-        /* RX_SOURCE_CAPS is normally pulled in by the Source_Capabilities
-         * event, but that event is missed if it lands between two INT_EVENT
-         * reads, so re-request it while the decision is open. */
-        if (!g_pm.partner_caps_pending &&
+        if (PowerManager_PartnerCapsUsable() && !g_pm.partner_caps_pending &&
             PowerManager_TickReached(now_ms, g_pm.partner_caps_next_ms)) {
             g_pm.partner_caps_next_ms = now_ms + PM_CAPS_RETRY_MS;
             g_pm.partner_caps_pending = true;
         }
-        /* Until the full offer is known, wait. The first contract after an
-         * attach is the 5 V PDO even from a 100 W charger, so deciding from
-         * it would classify every PD source as 5 V-only. */
+        /* Wait for the full offer before deciding: the first contract after
+         * an attach is the 5 V PDO even from a 100 W charger, so deciding
+         * from it would classify every PD source as 5 V-only. */
         if (!PowerManager_TickReached(now_ms,
                                       g_pm.attach_ms + PM_CAPS_GRACE_MS)) {
             return;
@@ -579,7 +621,7 @@ static void PowerManager_DecideRole(uint32_t now_ms)
 
     PowerManager_SetRoleTarget(PM_ROLE_WANT_SOURCE,
                                g_pm.partner_caps_valid ? "partner is 5V only" :
-                                                         "no PD source caps");
+                                                         "no PD from partner");
 }
 
 static void PowerManager_MaintainRole(uint32_t now_ms)
@@ -606,6 +648,17 @@ static void PowerManager_MaintainRole(uint32_t now_ms)
             Debug_Printf("[PD] partner keeps role %s after %u swap requests; accepting it",
                          PowerManager_RoleToString(g_pm.status.tps.role),
                          g_pm.swap_attempts);
+        }
+        /* Last resort. A partner that refuses every PR_Swap may still take
+         * the wanted role after a fresh Type-C attach, and a write to
+         * PORT_CONFIG is what makes the TPS25751 re-run that attach. Rate
+         * limited by wall time because the restart looks like a replug and
+         * would otherwise re-arm itself. */
+        if (g_pm.port_config_valid && !g_pm.port_restart_pending &&
+            PowerManager_TickReached(now_ms, g_pm.attach_ms + PM_STUCK_MS) &&
+            PowerManager_TickReached(now_ms, g_pm.port_restart_next_ms)) {
+            g_pm.port_restart_next_ms = now_ms + PM_PORT_RESTART_MS;
+            g_pm.port_restart_pending = true;
         }
         return;
     }
@@ -695,19 +748,9 @@ static void PowerManager_LogStatus(uint32_t now_ms)
 
 static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
 {
-    uint8_t fresh[TPS_INT_EVENT_BYTES];
     TPS_IntEvent_t event;
-    uint8_t i;
 
-    /* Act only on bits that were not already handled. A failed INT_CLEAR
-     * would otherwise replay the same hard reset or attach on every poll and
-     * keep restarting the role decision. */
-    for (i = 0U; i < TPS_INT_EVENT_BYTES; ++i) {
-        fresh[i] = (uint8_t)(data[i] & (uint8_t)~g_pm.event_seen[i]);
-        g_pm.event_seen[i] = data[i];
-    }
-
-    TPS_IntEventDecode(&event, fresh);
+    TPS_IntEventDecode(&event, data);
     if (!event.any) {
         return;
     }
@@ -739,7 +782,12 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     }
 
     if (event.source_caps_received) {
+        /* Only now does RX_SOURCE_CAPS describe the partner attached today. */
+        g_pm.partner_caps_fresh = true;
         g_pm.partner_caps_pending = true;
+    }
+    if (event.new_contract_consumer || event.new_contract_provider) {
+        g_pm.contract_fresh = true;
     }
     if (event.hard_reset) {
         /* A hard reset restarts PD from scratch, so the previous role
@@ -847,7 +895,6 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
     const uint8_t *data;
     uint8_t length = 0U;
     uint16_t value;
-    uint8_t index;
     bool valid;
     bool dual_role;
 
@@ -922,7 +969,6 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                 g_pm.int_mask_ready = false;
                 g_pm.sink_caps_checked = false;
                 g_pm.swap_policy_applied = false;
-                memset(g_pm.event_seen, 0, sizeof(g_pm.event_seen));
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
             }
             break;
@@ -951,6 +997,7 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                 break;
             }
             memcpy(g_pm.port_config, data, sizeof(g_pm.port_config));
+            g_pm.port_config_valid = true;
             if (TPS25751_PatchPortMode(
                     g_pm.port_config,
                     PowerManager_MapPortMode(g_pm.status.requested_mode))) {
@@ -966,6 +1013,12 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
         case PM_JOB_WRITE_PORT_CONFIG:
             PowerManager_ApplyPortMode();
             PowerManager_ResetSession(now_ms);
+            break;
+
+        case PM_JOB_RESTART_PORT:
+            g_pm.port_restart_pending = false;
+            PowerManager_ResetSession(now_ms);
+            Debug_Printf("[PD] port restarted to retry the Type-C attach");
             break;
 
         case PM_JOB_READ_PORT_CONTROL:
@@ -1010,10 +1063,6 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
 
         case PM_JOB_CLEAR_EVENT:
             g_pm.event_clear_pending = false;
-            for (index = 0U; index < TPS_INT_EVENT_BYTES; ++index) {
-                g_pm.event_seen[index] &=
-                    (uint8_t)~g_pm.event_to_clear[index];
-            }
             memset(g_pm.event_to_clear, 0, sizeof(g_pm.event_to_clear));
             break;
 
@@ -1279,6 +1328,7 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                                               TPS25751_REG_PORT_CONFIG,
                                               TPS25751_PORT_CONFIG_LEN);
         case PM_JOB_WRITE_PORT_CONFIG:
+        case PM_JOB_RESTART_PORT:
             return TPS25751_StartWriteRegister(&g_pm.tps,
                                                TPS25751_REG_PORT_CONFIG,
                                                g_pm.port_config,
@@ -1474,6 +1524,9 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     }
     if (g_pm.port_config_read_pending) {
         return PM_JOB_READ_PORT_CONFIG;
+    }
+    if (g_pm.port_restart_pending) {
+        return PM_JOB_RESTART_PORT;
     }
     if (g_pm.int_mask_write_pending) {
         return PM_JOB_WRITE_INT_MASK;
