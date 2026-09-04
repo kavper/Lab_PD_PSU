@@ -140,6 +140,8 @@ typedef struct {
     bool sink_caps_checked;
     bool local_caps_done;
     bool port_config_valid;
+    bool port_config_logged;
+    bool port_control_logged;
     bool port_restart_pending;
     uint32_t setup_retry_ms;
     uint32_t port_restart_next_ms;
@@ -675,6 +677,17 @@ static void PowerManager_MaintainRole(uint32_t now_ms)
  * Logging
  * --------------------------------------------------------------------- */
 
+static const char *PowerManager_PortModeToString(TPS25751_PortMode_t mode)
+{
+    switch (mode) {
+        case TPS25751_PORT_SINK_ONLY: return "SINK_ONLY";
+        case TPS25751_PORT_SOURCE_ONLY: return "SOURCE_ONLY";
+        case TPS25751_PORT_DRP: return "DRP";
+        case TPS25751_PORT_DISABLED: return "DISABLED";
+        default: return "?";
+    }
+}
+
 static void PowerManager_LogCapabilities(const char *name,
                                          const TPS25751_Capabilities_t *caps)
 {
@@ -968,6 +981,8 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                 g_pm.local_caps_done = false;
                 g_pm.int_mask_ready = false;
                 g_pm.sink_caps_checked = false;
+                g_pm.port_config_logged = false;
+                g_pm.port_control_logged = false;
                 g_pm.swap_policy_applied = false;
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
             }
@@ -998,6 +1013,14 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
             }
             memcpy(g_pm.port_config, data, sizeof(g_pm.port_config));
             g_pm.port_config_valid = true;
+            if (!g_pm.port_config_logged) {
+                g_pm.port_config_logged = true;
+                Debug_Printf("[PD-CFG] PORT_CONFIG raw=%02X%02X%02X%02X statemachine=%s try=%u",
+                             data[3], data[2], data[1], data[0],
+                             PowerManager_PortModeToString(
+                                 (TPS25751_PortMode_t)(data[0] & 0x03U)),
+                             (unsigned int)(data[1] & 0x03U));
+            }
             if (TPS25751_PatchPortMode(
                     g_pm.port_config,
                     PowerManager_MapPortMode(g_pm.status.requested_mode))) {
@@ -1031,6 +1054,15 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                 TPS25751_PORT_CONTROL_LEN : length;
             memcpy(g_pm.port_control, data, g_pm.port_control_length);
             g_pm.port_control_read_pending = false;
+            if (!g_pm.port_control_logged) {
+                g_pm.port_control_logged = true;
+                Debug_Printf("[PD-CFG] PORT_CONTROL raw=%02X typec_current=%u process_swap_to_sink=%u process_swap_to_source=%u initiate_to_sink=%u initiate_to_source=%u",
+                             data[0], (unsigned int)(data[0] & 0x03U),
+                             (data[0] & 0x10U) ? 1U : 0U,
+                             (data[0] & 0x40U) ? 1U : 0U,
+                             (data[0] & 0x20U) ? 1U : 0U,
+                             (data[0] & 0x80U) ? 1U : 0U);
+            }
             g_pm.port_control_write_pending = TPS25751_PatchSwapPolicy(
                 g_pm.port_control, g_pm.accept_swap_to_source,
                 g_pm.accept_swap_to_sink);
