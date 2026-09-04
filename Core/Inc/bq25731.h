@@ -10,6 +10,7 @@
 #define BQ25731_I2C_ADDR_7BIT           0x6BU
 
 #define BQ25731_REG_CHARGE_OPTION0      0x00U
+#define BQ25731_REG_OTG_VOLTAGE         0x06U
 #define BQ25731_REG_IIN_HOST            0x0EU
 #define BQ25731_REG_CHARGER_STATUS      0x20U
 #define BQ25731_REG_ADC_VBUS_PSYS       0x26U
@@ -24,14 +25,28 @@
 #define BQ25731_STATUS_BLOCK_LEN         6U
 #define BQ25731_ADC_BLOCK_LEN            8U
 
-/* Option fields inspected by the power-manager startup verification. */
+/*
+ * ChargeOption0 (01/00h) — SLUSE66A Table 9-8:
+ *   EN_OOA    bit2 of 01h → 0x0400 (PFM floor ~25 kHz, out-of-audio)
+ *   PWM_FREQ  bit1 of 01h → 0x0200 (1b = 400 kHz for 4.7 µH)
+ *   EN_LWPWR  bit7 of 01h → 0x8000 (clear for performance / OTG / ADC)
+ */
+#define BQ25731_CHARGE_OPTION0_EN_LWPWR 0x8000U
 #define BQ25731_CHARGE_OPTION0_EN_OOA   0x0400U
 #define BQ25731_CHARGE_OPTION0_PWM_FREQ 0x0200U
+/*
+ * ChargeOption4 (3D/3Ch) EN_DITHER[1:0] at bits 12:11:
+ *   00 disable, 01 ±2%, 10 ±4%, 11 ±6% → mask/value 0x1800 for ±6%.
+ */
 #define BQ25731_CHARGE_OPTION4_DITHER_MASK 0x1800U
+#define BQ25731_CHARGE_OPTION4_DITHER_6PCT 0x1800U
 #define BQ25731_CHARGE_OPTION1_5MOHM_MASK  0x0D00U
-/* ChargeOption3 (I2C 35/34h): high byte EN_HIZ bit7, EN_OTG bit4. */
-#define BQ25731_CHARGE_OPTION3_EN_HIZ   0x8000U
-#define BQ25731_CHARGE_OPTION3_EN_OTG   0x1000U
+/* ChargeOption3 (I2C 35/34h): high byte EN_HIZ bit7, EN_OTG bit4;
+ * low byte EN_OTG_BIGCAP bit0 — OTG loop for VBUS Ceff > 33 µF. */
+#define BQ25731_CHARGE_OPTION3_EN_HIZ      0x8000U
+#define BQ25731_CHARGE_OPTION3_EN_OTG      0x1000U
+#define BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP 0x0001U
+#define BQ25731_OTG_VOLTAGE_MV_PER_LSB       8U
 /* Monitoring ADC configuration shared with startup verification. */
 #define BQ25731_ADC_OPTION_MONITORING   0xE05FU
 /* ADC_START (bit 14) is a trigger and may read back as zero. Verify the
@@ -113,6 +128,8 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption4(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartWriteStartupOption1(
     BQ25731_Device_t *dev, uint16_t value);
+BQ25731_Status_t BQ25731_StartWriteStartupOption3(
+    BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartWriteOption3(
     BQ25731_Device_t *dev, uint16_t value);
@@ -123,10 +140,12 @@ BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
 uint16_t BQ25731_BuildStartupOption0(uint16_t current);
 uint16_t BQ25731_BuildStartupOption4(uint16_t current);
 uint16_t BQ25731_BuildStartupOption1(uint16_t current);
+uint16_t BQ25731_BuildStartupOption3(uint16_t current);
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0);
 uint32_t BQ25731_DecodeDitherPercent(uint16_t option4);
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw);
 uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw);
+uint16_t BQ25731_EncodeOtgVoltageMv(uint32_t voltage_mv);
 uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw);
 uint32_t BQ25731_DecodeInputCurrentMa(uint16_t raw);
 bool BQ25731_DecodeConfigBlock(BQ25731_Telemetry_t *telemetry,

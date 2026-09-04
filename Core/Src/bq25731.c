@@ -34,7 +34,8 @@
  * this profile (the former 8.16 V offset was only valid for 5 cells). */
 #define BQ25731_ADC_VBAT_VSYS_BASE_MV     2880U
 #define BQ25731_ADC_VBAT_VSYS_MV_PER_LSB  64U
-#define BQ25731_OTG_VOLTAGE_MV_PER_LSB        8U
+#define BQ25731_OTG_VOLTAGE_MIN_MV        3000U
+#define BQ25731_OTG_VOLTAGE_MAX_MV       24000U
 
 static BQ25731_Status_t BQ25731_StartWriteFixed16(
     BQ25731_Device_t *dev, uint8_t reg, uint16_t value);
@@ -147,6 +148,13 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption1(
         dev, BQ25731_REG_CHARGE_OPTION1, value);
 }
 
+BQ25731_Status_t BQ25731_StartWriteStartupOption3(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION3, value);
+}
+
 BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev)
 {
     return BQ25731_StartRead16(dev, BQ25731_REG_CHARGE_OPTION3);
@@ -177,24 +185,27 @@ BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
 
 uint16_t BQ25731_BuildStartupOption0(uint16_t current)
 {
-    current &= (uint16_t)~(BQ25731_CHARGE_OPTION0_EN_OOA |
+    /* Force performance mode: low-power kills ADC/OTG readiness. */
+    current &= (uint16_t)~(BQ25731_CHARGE_OPTION0_EN_LWPWR |
+                           BQ25731_CHARGE_OPTION0_EN_OOA |
                            BQ25731_CHARGE_OPTION0_PWM_FREQ);
 #if (BQ25731_INIT_OUT_OF_AUDIO_ENABLE != 0U)
-    current |= BQ25731_CHARGE_OPTION0_EN_OOA;
+    current |= BQ25731_CHARGE_OPTION0_EN_OOA;       /* 0x0400 */
 #endif
 #if (BQ25731_INIT_PWM_FREQUENCY_KHZ == 400U)
-    current |= BQ25731_CHARGE_OPTION0_PWM_FREQ;
+    current |= BQ25731_CHARGE_OPTION0_PWM_FREQ;     /* 0x0200 = 400 kHz */
 #endif
     return current;
 }
 
 uint16_t BQ25731_BuildStartupOption4(uint16_t current)
 {
-    const uint16_t dither_code =
-        (uint16_t)(BQ25731_INIT_DITHER_PERCENT / 2U);
-
     current &= (uint16_t)~BQ25731_CHARGE_OPTION4_DITHER_MASK;
-    current |= (uint16_t)(dither_code << 11);
+#if (BQ25731_INIT_DITHER_PERCENT == 6U)
+    current |= BQ25731_CHARGE_OPTION4_DITHER_6PCT;  /* 0x1800 = ±6% */
+#elif (BQ25731_INIT_DITHER_PERCENT != 0U)
+    current |= (uint16_t)((BQ25731_INIT_DITHER_PERCENT / 2U) << 11);
+#endif
     return current;
 }
 
@@ -203,6 +214,18 @@ uint16_t BQ25731_BuildStartupOption1(uint16_t current)
     /* Match the physical board population: RAC=5 mOhm, RSR=5 mOhm, with
      * the BQ25731 compensation mode intended for a 5 mOhm input shunt. */
     return current | BQ25731_CHARGE_OPTION1_5MOHM_MASK;
+}
+
+uint16_t BQ25731_BuildStartupOption3(uint16_t current)
+{
+    /*
+     * BQ25731 has no OTG VBUS slew-rate register (PPS "slew" = host steps
+     * OTGVoltage 8 mV LSB; TPS owns those writes). Soft-start in the
+     * datasheet is charge-current only. EN_OTG_BIGCAP is the register
+     * lever against OTG ringing/overshoot into TPS OVP when VBUS Ceff
+     * is typically >33 µF on a PD power path.
+     */
+    return (uint16_t)(current | BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP);
 }
 
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0)
@@ -226,6 +249,20 @@ uint32_t BQ25731_DecodeOtgVoltageMv(uint16_t raw)
 {
     return (uint32_t)((raw >> 2) & 0x0FFFU) *
            BQ25731_OTG_VOLTAGE_MV_PER_LSB;
+}
+
+uint16_t BQ25731_EncodeOtgVoltageMv(uint32_t voltage_mv)
+{
+    uint32_t clamped = voltage_mv;
+
+    if (clamped < BQ25731_OTG_VOLTAGE_MIN_MV) {
+        clamped = BQ25731_OTG_VOLTAGE_MIN_MV;
+    } else if (clamped > BQ25731_OTG_VOLTAGE_MAX_MV) {
+        clamped = BQ25731_OTG_VOLTAGE_MAX_MV;
+    }
+    /* REG0x07/06: 12-bit field starting at bit 2, 8 mV/LSB. */
+    return (uint16_t)(((clamped / BQ25731_OTG_VOLTAGE_MV_PER_LSB) & 0x0FFFU)
+                      << 2);
 }
 
 uint32_t BQ25731_DecodeChargeCurrentMa(uint16_t raw)

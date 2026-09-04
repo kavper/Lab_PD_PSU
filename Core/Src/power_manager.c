@@ -79,6 +79,8 @@ typedef enum {
     PM_JOB_BQ_WRITE_STARTUP_OPTION4,
     PM_JOB_BQ_READ_OPTION1,
     PM_JOB_BQ_WRITE_STARTUP_OPTION1,
+    PM_JOB_BQ_READ_STARTUP_OPTION3,
+    PM_JOB_BQ_WRITE_STARTUP_OPTION3,
     PM_JOB_BQ_READ_OPTION3,
     PM_JOB_BQ_WRITE_OPTION3,
     PM_JOB_BQ_WRITE_ADC,
@@ -101,6 +103,9 @@ typedef enum {
     PM_BQ_INIT_READ_OPTION1,
     PM_BQ_INIT_WRITE_OPTION1,
     PM_BQ_INIT_VERIFY_OPTION1,
+    PM_BQ_INIT_READ_OPTION3,
+    PM_BQ_INIT_WRITE_OPTION3,
+    PM_BQ_INIT_VERIFY_OPTION3,
     PM_BQ_INIT_WRITE_ADC,
     PM_BQ_INIT_VERIFY_ADC,
     PM_BQ_INIT_DONE
@@ -187,6 +192,7 @@ typedef struct {
     uint16_t bq_startup_option0_target;
     uint16_t bq_startup_option4_target;
     uint16_t bq_startup_option1_target;
+    uint16_t bq_startup_option3_target;
     uint8_t policy_cap_attempts;
     bool previous_attached;
     bool policy_swap_attempted;
@@ -285,6 +291,8 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_BQ_WRITE_STARTUP_OPTION4: return "BQ_WRITE_DITHER_OPTION4";
         case PM_JOB_BQ_READ_OPTION1: return "BQ_READ_5MOHM_OPTION1";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION1: return "BQ_WRITE_5MOHM_OPTION1";
+        case PM_JOB_BQ_READ_STARTUP_OPTION3: return "BQ_READ_BIGCAP_OPTION3";
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3: return "BQ_WRITE_BIGCAP_OPTION3";
         case PM_JOB_BQ_READ_OPTION3: return "BQ_READ_OPTION3";
         case PM_JOB_BQ_WRITE_OPTION3: return "BQ_WRITE_OPTION3";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
@@ -1044,7 +1052,8 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
 
     if (g_pm.bq_option3_valid) {
         g_pm.bq_option3_target =
-            (uint16_t)(g_pm.status.bq.charge_option3 &
+            (uint16_t)((g_pm.status.bq.charge_option3 |
+                        BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) &
                        (uint16_t)~BQ25731_CHARGE_OPTION3_EN_HIZ);
         g_pm.bq_option3_write_pending = true;
     }
@@ -1971,11 +1980,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.online = true;
             g_pm.status.bq_status = BQ25731_OK;
             if (g_pm.bq_init == PM_BQ_INIT_VERIFY_OPTION0) {
-                if ((raw16 & (BQ25731_CHARGE_OPTION0_EN_OOA |
-                              BQ25731_CHARGE_OPTION0_PWM_FREQ)) !=
-                    (g_pm.bq_startup_option0_target &
-                     (BQ25731_CHARGE_OPTION0_EN_OOA |
-                      BQ25731_CHARGE_OPTION0_PWM_FREQ))) {
+                if (((raw16 & (BQ25731_CHARGE_OPTION0_EN_OOA |
+                               BQ25731_CHARGE_OPTION0_PWM_FREQ)) !=
+                     (g_pm.bq_startup_option0_target &
+                      (BQ25731_CHARGE_OPTION0_EN_OOA |
+                       BQ25731_CHARGE_OPTION0_PWM_FREQ))) ||
+                    ((raw16 & BQ25731_CHARGE_OPTION0_EN_LWPWR) != 0U)) {
                     PowerManager_HandleBqError(
                         TPS25751_COMMAND_ERROR, now_ms);
                     break;
@@ -2014,7 +2024,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     break;
                 }
                 g_pm.bq_init = PM_BQ_INIT_READ_OPTION1;
-                Debug_Printf("[BQ-INIT] OOA=%u FSW=%lukHz DITHER=+/-%lu%% Option0=0x%04X Option4=0x%04X verified",
+                Debug_Printf("[BQ-INIT] OOA=%u FSW=%lukHz LWPWR=0 DITHER=+/-%lu%% Option0=0x%04X Option4=0x%04X verified",
                              (g_pm.status.bq.charge_option0 &
                               BQ25731_CHARGE_OPTION0_EN_OOA) != 0U ? 1U : 0U,
                              (unsigned long)BQ25731_DecodePwmFrequencyKhz(
@@ -2050,7 +2060,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     BQ25731_BuildStartupOption1(raw16);
                 g_pm.bq_init =
                     (g_pm.bq_startup_option1_target == raw16) ?
-                    PM_BQ_INIT_WRITE_ADC : PM_BQ_INIT_WRITE_OPTION1;
+                    PM_BQ_INIT_READ_OPTION3 : PM_BQ_INIT_WRITE_OPTION1;
             } else {
                 if ((raw16 & BQ25731_CHARGE_OPTION1_5MOHM_MASK) !=
                     BQ25731_CHARGE_OPTION1_5MOHM_MASK) {
@@ -2058,7 +2068,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                         TPS25751_COMMAND_ERROR, now_ms);
                     break;
                 }
-                g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+                g_pm.bq_init = PM_BQ_INIT_READ_OPTION3;
             }
             Debug_Printf("[BQ-INIT] RAC=5mOhm RSR=5mOhm FAST_5MOHM=1 Option1=0x%04X%s",
                          raw16,
@@ -2072,6 +2082,41 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             break;
 
+        case PM_JOB_BQ_READ_STARTUP_OPTION3:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_option3 = raw16;
+            if (g_pm.bq_init == PM_BQ_INIT_VERIFY_OPTION3) {
+                if ((raw16 & BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) == 0U) {
+                    PowerManager_HandleBqError(
+                        TPS25751_COMMAND_ERROR, now_ms);
+                    break;
+                }
+                g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+                Debug_Printf("[BQ-INIT] EN_OTG_BIGCAP=1 Option3=0x%04X verified (no HW VBUS slew reg; TPS owns OTGVoltage)",
+                             raw16);
+            } else {
+                g_pm.bq_startup_option3_target =
+                    BQ25731_BuildStartupOption3(raw16);
+                g_pm.bq_init =
+                    (g_pm.bq_startup_option3_target == raw16) ?
+                    PM_BQ_INIT_WRITE_ADC : PM_BQ_INIT_WRITE_OPTION3;
+                if (g_pm.bq_init == PM_BQ_INIT_WRITE_ADC) {
+                    Debug_Printf("[BQ-INIT] EN_OTG_BIGCAP already set Option3=0x%04X",
+                                 raw16);
+                }
+            }
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3:
+            g_pm.bq_init = PM_BQ_INIT_VERIFY_OPTION3;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
         case PM_JOB_BQ_READ_OPTION3:
             raw16 = PowerManager_ResultLe16(&valid);
             g_pm.bq_option3_read_pending = false;
@@ -2082,7 +2127,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.charge_option3 = raw16;
             g_pm.bq_option3_valid = true;
             g_pm.bq_option3_target = (uint16_t)(
-                (raw16 | BQ25731_CHARGE_OPTION3_EN_HIZ) &
+                (raw16 | BQ25731_CHARGE_OPTION3_EN_HIZ |
+                 BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) &
                 (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG);
             g_pm.bq_option3_write_pending =
                 (g_pm.bq_option3_target != raw16) || g_pm.session_reset_busy;
@@ -2356,6 +2402,17 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_BQ_READ_STARTUP_OPTION3:
+            bq_status = BQ25731_StartReadOption3(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3:
+            bq_status = BQ25731_StartWriteStartupOption3(
+                &g_pm.bq, g_pm.bq_startup_option3_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
         case PM_JOB_BQ_READ_OPTION3:
             bq_status = BQ25731_StartReadOption3(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
@@ -2572,6 +2629,11 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
                 return PM_JOB_BQ_READ_OPTION1;
             case PM_BQ_INIT_WRITE_OPTION1:
                 return PM_JOB_BQ_WRITE_STARTUP_OPTION1;
+            case PM_BQ_INIT_READ_OPTION3:
+            case PM_BQ_INIT_VERIFY_OPTION3:
+                return PM_JOB_BQ_READ_STARTUP_OPTION3;
+            case PM_BQ_INIT_WRITE_OPTION3:
+                return PM_JOB_BQ_WRITE_STARTUP_OPTION3;
             case PM_BQ_INIT_WRITE_ADC: return PM_JOB_BQ_WRITE_ADC;
             case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
             default: break;
