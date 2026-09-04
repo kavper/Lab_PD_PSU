@@ -20,10 +20,12 @@
 #define TPS25751_REG_STATUS             0x1AU
 #define TPS25751_REG_POWER_PATH_STATUS  0x26U
 #define TPS25751_REG_PORT_CONFIG        0x28U
+#define TPS25751_REG_PORT_CONTROL       0x29U
 #define TPS25751_REG_BOOT_FLAGS         0x2DU
 #define TPS25751_REG_RX_SOURCE_CAPS     0x30U
 #define TPS25751_REG_RX_SINK_CAPS       0x31U
 #define TPS25751_REG_TX_SOURCE_CAPS     0x32U
+#define TPS25751_REG_TX_SINK_CAPS       0x33U
 #define TPS25751_REG_ACTIVE_PDO         0x34U
 #define TPS25751_REG_ACTIVE_RDO         0x35U
 #define TPS25751_REG_POWER_STATUS       0x3FU
@@ -39,9 +41,13 @@
  * implementation byte omitted from TRM table 3-14; preserve it during the
  * read-modify-write used to change TypeCStateMachine. */
 #define TPS25751_PORT_CONFIG_LEN        17U
+/* PORT_CONTROL documents 32 bits, but the TPS25751 configuration bundle and
+ * the device both use a 5-byte payload. Byte 4 is preserved on write. */
+#define TPS25751_PORT_CONTROL_LEN        5U
 #define TPS25751_BOOT_FLAGS_LEN          5U
 #define TPS25751_RX_CAPS_LEN            53U
 #define TPS25751_TX_SOURCE_CAPS_LEN     63U
+#define TPS25751_TX_SINK_CAPS_LEN       53U
 #define TPS25751_ACTIVE_PDO_PREFIX_LEN  4U
 #define TPS25751_ACTIVE_RDO_PREFIX_LEN  4U
 #define TPS25751_POWER_STATUS_LEN       2U
@@ -243,6 +249,14 @@ bool TPS25751_DecodeTxSourceCapabilities(
     uint8_t length);
 bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode);
+bool TPS25751_PatchSwapPolicy(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    bool accept_swap_to_source,
+    bool accept_swap_to_sink);
+bool TPS25751_PatchSinkCapsDualRole(uint8_t *tx_sink_caps, uint8_t length);
+bool TPS25751_CapsFirstPdoDualRole(const uint8_t *caps,
+                                   uint8_t length,
+                                   uint8_t pdo_offset);
 
 uint16_t TPS25751_ReadLe16(const uint8_t *data);
 uint32_t TPS25751_ReadLe32(const uint8_t *data);
