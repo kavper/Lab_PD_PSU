@@ -136,6 +136,7 @@ typedef struct {
     bool partner_caps_pending;
     bool int_mask_ready;
     bool sink_caps_checked;
+    bool local_caps_done;
     uint32_t setup_retry_ms;
 
     /* Role policy, valid for one attach session. */
@@ -311,12 +312,6 @@ static bool PowerManager_PortConnected(void)
            (g_pm.status.tps.connection_state >= 6U);
 }
 
-static bool PowerManager_ContractValid(void)
-{
-    return g_pm.status.tps.active_pdo.valid &&
-           g_pm.status.tps.active_rdo.valid;
-}
-
 static void PowerManager_ClearPendingJobs(void)
 {
     g_pm.port_config_read_pending = false;
@@ -355,7 +350,7 @@ static void PowerManager_RearmSetup(uint32_t now_ms)
     if (!g_pm.swap_policy_applied && !g_pm.port_control_write_pending) {
         g_pm.port_control_read_pending = true;
     }
-    if (!g_pm.local_caps_valid) {
+    if (!g_pm.local_caps_done) {
         g_pm.local_caps_pending = true;
     }
 }
@@ -549,17 +544,6 @@ static void PowerManager_DecideRole(uint32_t now_ms)
         return;
     }
 
-    /* RX_SOURCE_CAPS is normally pulled in by the Source_Capabilities event,
-     * but the event can be missed if it lands between two INT_EVENT reads.
-     * Re-read it inside the decision window so the AUTO rule always sees the
-     * partner's full offer and not just the 5 V PDO of the first contract. */
-    if (!g_pm.partner_caps_valid && !g_pm.partner_caps_pending &&
-        (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-        PowerManager_TickReached(now_ms, g_pm.partner_caps_next_ms)) {
-        g_pm.partner_caps_next_ms = now_ms + PM_CAPS_RETRY_MS;
-        g_pm.partner_caps_pending = true;
-    }
-
     if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) {
         /* Attached.SRC means the partner presents Rd, which is direct
          * Type-C evidence that it consumes power. No swap is needed and
@@ -569,24 +553,33 @@ static void PowerManager_DecideRole(uint32_t now_ms)
         return;
     }
 
+    if (!g_pm.partner_caps_valid) {
+        /* RX_SOURCE_CAPS is normally pulled in by the Source_Capabilities
+         * event, but that event is missed if it lands between two INT_EVENT
+         * reads, so re-request it while the decision is open. */
+        if (!g_pm.partner_caps_pending &&
+            PowerManager_TickReached(now_ms, g_pm.partner_caps_next_ms)) {
+            g_pm.partner_caps_next_ms = now_ms + PM_CAPS_RETRY_MS;
+            g_pm.partner_caps_pending = true;
+        }
+        /* Until the full offer is known, wait. The first contract after an
+         * attach is the 5 V PDO even from a 100 W charger, so deciding from
+         * it would classify every PD source as 5 V-only. */
+        if (!PowerManager_TickReached(now_ms,
+                                      g_pm.attach_ms + PM_CAPS_GRACE_MS)) {
+            return;
+        }
+    }
+
     partner_mv = PowerManager_PartnerSourceMaxMv();
     if (partner_mv > PM_SOURCE_5V_MV) {
         PowerManager_SetRoleTarget(PM_ROLE_WANT_SINK, "partner offers >5V");
         return;
     }
 
-    if ((partner_mv == 0U) && !PowerManager_ContractValid()) {
-        /* Give the partner time to send Source_Capabilities before
-         * concluding that it is a plain 5 V Type-C source. */
-        if (!PowerManager_TickReached(now_ms,
-                                      g_pm.attach_ms + PM_CAPS_GRACE_MS)) {
-            return;
-        }
-        PowerManager_SetRoleTarget(PM_ROLE_WANT_SOURCE, "no PD source caps");
-        return;
-    }
-
-    PowerManager_SetRoleTarget(PM_ROLE_WANT_SOURCE, "partner is 5V only");
+    PowerManager_SetRoleTarget(PM_ROLE_WANT_SOURCE,
+                               g_pm.partner_caps_valid ? "partner is 5V only" :
+                                                         "no PD source caps");
 }
 
 static void PowerManager_MaintainRole(uint32_t now_ms)
@@ -874,12 +867,26 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                          g_pm.swap_attempts, PM_SWAP_MAX_ATTEMPTS);
             return;
         }
+        /* Keep the periodic readers on their own period instead of letting
+         * them retry at the shared backoff rate. */
+        if (job == PM_JOB_READ_MODE) {
+            g_pm.next_mode_ms = now_ms + PM_MODE_POLL_MS;
+        } else if (job == PM_JOB_READ_BOOT_FLAGS) {
+            g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
+        }
+
         /* Drop every one-shot request. None of them may hold the job queue:
          * telemetry has to keep running, and PowerManager_RearmSetup re-arms
          * whatever did not complete, at a rate that cannot flood the bus. */
         PowerManager_ClearPendingJobs();
         if (job == PM_JOB_READ_PARTNER_CAPS) {
             g_pm.partner_caps_valid = false;
+        } else if ((job == PM_JOB_READ_SINK_CAPS) ||
+                   (job == PM_JOB_WRITE_SINK_CAPS)) {
+            /* One attempt per APP session. If the device refuses to let the
+             * host touch TX_SINK_CAPS the port still works, it just keeps
+             * advertising whatever the configuration bundle contains. */
+            g_pm.sink_caps_checked = true;
         }
         PowerManager_RecordError(POWER_MANAGER_ERROR_TPS, status, "TPS",
                                  now_ms);
@@ -911,6 +918,7 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
                 g_pm.app_seen_ms = 0U;
                 g_pm.status.applied_mode_valid = false;
                 g_pm.local_caps_valid = false;
+                g_pm.local_caps_done = false;
                 g_pm.int_mask_ready = false;
                 g_pm.sink_caps_checked = false;
                 g_pm.swap_policy_applied = false;
@@ -1078,6 +1086,7 @@ static void PowerManager_ProcessJob(PowerManager_Job_t job,
 
         case PM_JOB_READ_LOCAL_CAPS:
             g_pm.local_caps_pending = false;
+            g_pm.local_caps_done = true;
             g_pm.local_caps_valid = TPS25751_DecodeTxSourceCapabilities(
                 &g_pm.local_caps, data, length);
             if (g_pm.local_caps_valid) {
