@@ -6,11 +6,17 @@
 #define TPS25751_COMMAND_TIMEOUT_MS   1000U
 #define TPS25751_COMMAND_POLL_MS      10U
 
-/* PORT_CONFIG (0x28): byte 0 bits 1:0 select the Type-C state machine;
- * byte 1 bits 1:0 are register bits 9:8 (Type-C Support Options). */
+/* PORT_CONFIG (0x28): byte 0 bits 1:0 select the Type-C state machine. */
 #define TPS25751_PORT_STATE_MASK       0x03U
-#define TPS25751_TYPEC_OPTIONS_MASK    0x03U
-#define TPS25751_TYPEC_TRY_SRC         0x01U
+
+/* Fixed Supply PDO bit 29, in both Source and Sink capabilities. */
+#define TPS25751_PDO_DUAL_ROLE_POWER   (1UL << 29)
+
+/* PORT_CONTROL (0x29) byte 0: automatic PR_Swap policy bits 7:4. */
+#define TPS25751_PC_PROCESS_SWAP_TO_SINK    0x10U
+#define TPS25751_PC_INITIATE_SWAP_TO_SINK   0x20U
+#define TPS25751_PC_PROCESS_SWAP_TO_SOURCE  0x40U
+#define TPS25751_PC_INITIATE_SWAP_TO_SOURCE 0x80U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -144,16 +150,12 @@ static TPS25751_Status_t TPS25751_StartRawWrite(TPS25751_Device_t *dev,
 }
 
 static TPS25751_Status_t TPS25751_CheckRead(TPS25751_Device_t *dev,
-                                            bool exact_length)
+                                            uint8_t minimum_length)
 {
     uint8_t copy_length;
 
     dev->reported_length = dev->rx_buffer[0];
-    if (exact_length) {
-        if (dev->reported_length != dev->requested_length) {
-            return TPS25751_BAD_LENGTH;
-        }
-    } else if (dev->reported_length < dev->requested_length) {
+    if (dev->reported_length < minimum_length) {
         return TPS25751_BAD_LENGTH;
     }
 
@@ -359,10 +361,10 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
     }
 
     if (dev->operation == TPS25751_OP_READ_REGISTER) {
-        bool active_contract_register =
-            (dev->register_address == TPS25751_REG_ACTIVE_PDO) ||
-            (dev->register_address == TPS25751_REG_ACTIVE_RDO);
-        status = TPS25751_CheckRead(dev, !active_contract_register);
+        /* Several registers report more bytes than the fields this firmware
+         * consumes. Accept any payload and let the caller validate the
+         * truncated result length. */
+        status = TPS25751_CheckRead(dev, 1U);
         TPS25751_Finish(dev, status);
         return status;
     }
@@ -383,7 +385,7 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
             return TPS25751_BUSY;
 
         case TPS_OP_STATE_WAIT_POLL:
-            status = TPS25751_CheckRead(dev, true);
+            status = TPS25751_CheckRead(dev, 4U);
             if (status != TPS25751_OK) {
                 TPS25751_Finish(dev, status);
                 return status;
@@ -410,7 +412,7 @@ static TPS25751_Status_t TPS25751_ProcessTransferComplete(
             return TPS25751_BUSY;
 
         case TPS_OP_STATE_WAIT_RESULT:
-            status = TPS25751_CheckRead(dev, false);
+            status = TPS25751_CheckRead(dev, dev->requested_length);
             if (status != TPS25751_OK) {
                 TPS25751_Finish(dev, status);
                 return status;
@@ -712,7 +714,7 @@ static bool TPS25751_DecodeCapabilitiesAt(
     if ((count > 0U) &&
         (((capabilities->pdo[0].raw >> 30) & 0x03U) == 0U)) {
         capabilities->first_pdo_dual_role_power =
-            (capabilities->pdo[0].raw & (1UL << 29)) != 0U;
+            (capabilities->pdo[0].raw & TPS25751_PDO_DUAL_ROLE_POWER) != 0U;
     }
     return true;
 }
@@ -767,30 +769,92 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode)
 {
     uint8_t old_state;
-    uint8_t old_options;
-    uint8_t typec_options;
 
     if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
         return false;
     }
 
+    /* Only TypeCStateMachine is owned by the host. Every other field, in
+     * particular the Type-C Try options in bits 9:8, stays exactly as the
+     * configuration bundle programmed it: a write to PORT_CONFIG forces a
+     * port disconnect and reconnect, so it must happen only when the user
+     * really changes the port role. */
     old_state = port_config[0];
-    old_options = port_config[1];
-
-    /* AUTO remains a true DRP port, but Try.SRC biases the initial Type-C
-     * attach toward Source.  This avoids first accepting 5 V from another
-     * DRP (for example a Mac) and then performing a time-critical PR_SWAP.
-     * Optional Try states do not apply to the single-role modes. */
-    typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
-    port_config[1] = (uint8_t)(
-        (old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK) |
-        typec_options);
 
-    return (port_config[0] != old_state) ||
-           (port_config[1] != old_options);
+    return port_config[0] != old_state;
+}
+
+bool TPS25751_PatchSwapPolicy(
+    uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
+    bool accept_swap_to_source,
+    bool accept_swap_to_sink)
+{
+    uint8_t old_value;
+    uint8_t value;
+
+    if (port_control == NULL) {
+        return false;
+    }
+
+    old_value = port_control[0];
+    value = (uint8_t)(old_value &
+                      (uint8_t)~(TPS25751_PC_PROCESS_SWAP_TO_SINK |
+                                 TPS25751_PC_INITIATE_SWAP_TO_SINK |
+                                 TPS25751_PC_PROCESS_SWAP_TO_SOURCE |
+                                 TPS25751_PC_INITIATE_SWAP_TO_SOURCE));
+    if (accept_swap_to_source) {
+        value |= TPS25751_PC_PROCESS_SWAP_TO_SOURCE;
+    }
+    if (accept_swap_to_sink) {
+        value |= TPS25751_PC_PROCESS_SWAP_TO_SINK;
+    }
+
+    port_control[0] = value;
+    return value != old_value;
+}
+
+bool TPS25751_CapsFirstPdoDualRole(const uint8_t *caps,
+                                   uint8_t length,
+                                   uint8_t pdo_offset)
+{
+    uint32_t pdo;
+
+    if ((caps == NULL) || (length < (uint8_t)(pdo_offset + 4U)) ||
+        ((caps[0] & 0x07U) == 0U)) {
+        return false;
+    }
+    pdo = TPS25751_ReadLe32(&caps[pdo_offset]);
+    return (((pdo >> 30) & 0x03U) == 0U) &&
+           ((pdo & TPS25751_PDO_DUAL_ROLE_POWER) != 0U);
+}
+
+/* PD r3.1 6.4.1.3: a Sink that can also operate as a Source shall set the
+ * Dual-Role Power bit in the first Sink Fixed Supply PDO. Port partners use
+ * Get_Sink_Cap to learn this before they offer or accept a PR_Swap, so the
+ * bit has to agree with TX_SOURCE_CAPS or the port looks sink-only. */
+bool TPS25751_PatchSinkCapsDualRole(uint8_t *tx_sink_caps, uint8_t length)
+{
+    uint32_t pdo;
+
+    if ((tx_sink_caps == NULL) || (length < 5U) ||
+        ((tx_sink_caps[0] & 0x07U) == 0U)) {
+        return false;
+    }
+
+    pdo = TPS25751_ReadLe32(&tx_sink_caps[1]);
+    if ((((pdo >> 30) & 0x03U) != 0U) ||
+        ((pdo & TPS25751_PDO_DUAL_ROLE_POWER) != 0U)) {
+        return false;
+    }
+
+    pdo |= TPS25751_PDO_DUAL_ROLE_POWER;
+    tx_sink_caps[1] = (uint8_t)pdo;
+    tx_sink_caps[2] = (uint8_t)(pdo >> 8);
+    tx_sink_caps[3] = (uint8_t)(pdo >> 16);
+    tx_sink_caps[4] = (uint8_t)(pdo >> 24);
+    return true;
 }
 
 const char *TPS25751_StatusToString(TPS25751_Status_t status)
