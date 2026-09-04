@@ -163,7 +163,16 @@ static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length)
     uint32_t free_bytes;
     uint32_t first;
 
-    if ((data == NULL) || (length == 0U) || (!debug_dma_ready)) {
+    if ((data == NULL) || (length == 0U) || (debug_uart == NULL)) {
+        return;
+    }
+
+    if (!debug_dma_ready) {
+        /* Without DMA the ring buffer is never drained, so queueing here
+         * would silently discard every line and look exactly like a dead
+         * port. Fall back to a blocking transmit: slow, but during bring-up
+         * a log that costs a few milliseconds beats no log at all. */
+        (void)HAL_UART_Transmit(debug_uart, data, (uint16_t)length, 20U);
         return;
     }
 
@@ -215,6 +224,11 @@ void Debug_Init(UART_HandleTypeDef *huart)
     Debug_RestoreIrq(primask);
 
     debug_dma_ready = Debug_UartDmaInit(huart);
+
+    /* First thing on the wire after reset. If this line is missing, the
+     * problem is the port or the wiring, not the log filter. */
+    Debug_Printf("[APP] debug uart up: USART2 PB3=TX PB4=RX 115200 8N1 tx=%s",
+                 debug_dma_ready ? "dma" : "polling");
 }
 
 void Debug_Write(const char *text)
@@ -247,15 +261,25 @@ void Debug_Printf(const char *fmt, ...)
     }
 
 #if (DEBUG_LOG_NON_BQ == 0U)
-    if ((strncmp(fmt, "[BQ", 3U) != 0) &&
-        (strncmp(fmt, "[TPS", 4U) != 0) &&
-        (strncmp(fmt, "[PD", 3U) != 0) &&
-        (strncmp(fmt, "[PM", 3U) != 0) &&
-        (strncmp(fmt, "[MON", 4U) != 0) &&
-        (strncmp(fmt, "[APP", 4U) != 0) &&
-        (strncmp(fmt, "[UART", 5U) != 0) &&
-        (strncmp(fmt, "[FAULT", 6U) != 0)) {
-        return;
+    {
+        /* Match past any leading newline used for visual spacing, otherwise
+         * a line that formats its own separator is dropped by its own tag. */
+        const char *tag = fmt;
+
+        while ((*tag == '\r') || (*tag == '\n') || (*tag == ' ')) {
+            tag++;
+        }
+
+        if ((strncmp(tag, "[BQ", 3U) != 0) &&
+            (strncmp(tag, "[TPS", 4U) != 0) &&
+            (strncmp(tag, "[PD", 3U) != 0) &&
+            (strncmp(tag, "[PM", 3U) != 0) &&
+            (strncmp(tag, "[MON", 4U) != 0) &&
+            (strncmp(tag, "[APP", 4U) != 0) &&
+            (strncmp(tag, "[UART", 5U) != 0) &&
+            (strncmp(tag, "[FAULT", 6U) != 0)) {
+            return;
+        }
     }
 #endif
 

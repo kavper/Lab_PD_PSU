@@ -1540,7 +1540,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     buck_enter_margin_x100 = App_ToFixed(REGION_BUCK_ENTER_MARGIN_V, 100);
     buck_exit_margin_x100 = App_ToFixed(REGION_BUCK_EXIT_MARGIN_V, 100);
 
-    Debug_Printf("\r\n[APP] Start. ctrl=%lu Hz hold=%lu ms reset=0x%08lX",
+    Debug_Printf("[APP] Start. ctrl=%lu Hz hold=%lu ms reset=0x%08lX",
                  (unsigned long)APP_CTRL_FREQ_HZ,
                  (unsigned long)APP_STARTUP_HOLD_MS,
                  (unsigned long)reset_flags);
