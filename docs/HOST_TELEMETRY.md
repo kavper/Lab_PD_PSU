@@ -2,6 +2,8 @@
 
 USART1 **PC4 TX / PC5 RX**, 115200 8N1. Default: machine frames only (`VERBOSE 0`).
 
+Do **not** binary-compress `T`/`TB`/`TC`. The H7 parser is ASCII `key=value`. The win is: stop duplicating G0 `TLM`, stop blocking USART1 TX, debounce live `SET`, then raise baud only if a sequencer needs <100 ms `T`.
+
 OTP on BQ76922 is **not required**. Blank OTP boots “all cells”; G4 writes **4S `VCell Mode=0x0017` (skip VC4)** in RAM on every wake, then `SLEEP_DISABLE` + `ALL_FETS_ON`. OTP is a factory option only (one-way); do not burn it from this firmware.
 
 ## Boot banner
@@ -20,11 +22,51 @@ On `TEL [ms]` or `?` / `STATUS`:
 1. `T …` — PSU / G0 / PD / pre-reg  
    Extra DCDC keys: `i_buck_ma` / `i_boost_ma` (INA296 high-side averages), `ucc_a` / `ucc_c` (UCC33420 EN, HS duty ≥ 97%).  
    `duty_a_x10` / `duty_c_x10` are switch duties in percent×10 (802 = 80.2%). `duty_a` = buck HS (TA1), `duty_c` = boost LS (TC2). There is no `duty_ppm`.  
+   `g0_vout_mv` is the G0 output (do **not** parse forwarded `TLM` — G4 no longer mirrors it).  
    On high-side OCP the G4 also emits a one-shot `E OCP …` line with both branch currents.  
-2. `TB …` — BMS  
+2. `TB …` — BMS (cell voltages, pack/stack, FETs)  
 3. `TC …` — BQ25731 + TPS  
 
-Parse: lines starting with `T` / `TB` / `TC`, then `key=value` integers.
+Parse: lines starting with `T` / `TB` / `TC`, then `key=value` integers. Ignore `TLM`, `ACK`, `NACK` (except log NACK), `OK`, `ERR`, `HELP`, and banner lines.
+
+**Period:** `TEL` sets the `T` period (default 500 ms). At 115200, a full `T`+`TB`+`TC` burst is ~1.3 kB (~135 ms on the wire). If `TEL < 200`, G4 still sends `T` at `TEL` but spaces `TB`/`TC` to **200 ms** so cell voltages stay on the wire without saturating USART1. `?` / `STATUS` always sends all three.
+
+| `TEL` | `T` | `TB` + `TC` (cells, charger) | Fits 115200? |
+|---|---|---|---|
+| 500 ms (default) | 500 | 500 | yes, lots of headroom |
+| 200 ms | 200 | 200 | yes |
+| 100 ms | 100 | 200 | yes |
+| 50 ms | 50 | 200 | tight; raise baud before a sequencer |
+
+## H7 / PC console (UI 1.8.1+)
+
+Keep every dashboard field. Change **how** you read and write the UART:
+
+1. **Parse only `T` / `TB` / `TC`.** Do not decode `TLM out=…`. G4 no longer forwards G0 TLM (unless `VERBOSE 1`). Use `g0_vout_mv`, `g0_out`, `set_mv`, `c1_mv`…`c5_mv` from machine frames.  
+2. **Do not send `SET` on every slider tick.** Debounce ≥80–100 ms, or send on release / “Wyślij oba”. Live SET while output is ON is applied on G4 without `OUT OFF`. Slider spam was shredding `SET 17.300` → `OK SET 1300 mV` and blinking the rail.  
+3. **Stay at 115200** until you bump G4 + H7 together. Next step for a sequencer is **230400 or 460800 8N1**, still ASCII, still `T`/`TB`/`TC`. Do not invent a binary frame until the parser is rewritten.  
+4. `TEL 100` is the practical floor at 115200. Sequencer at 50 ms `T` wants 460800 (or a later compact `T`).  
+5. Treat `ERR CMD` / `ERR LINE` as a lost command, not a protocol change. Re-send the last SET/ILIM once, debounce first.  
+6. `VERBOSE 0` on the G4. Verbose dumps debug ASCII onto the same USART and will break the parser.
+
+## G0 firmware (USART2, not the H7 port)
+
+G4 still **needs** G0 `TLM` on USART2 for `vout` / `pgood` / `kill` / `outoff`. Do not delete TLM. Do not echo it to the host.
+
+| Change | Why |
+|---|---|
+| Accept **live `SET V=x I=y` while `OUT=ON`** | G4 no longer drops the rail (`OUT OFF` / wait Vout≈0) for slider SET. If G0 NACK `VOUT_NOT_ZERO` on SET-while-ON, the slider will stall. |
+| Do **not** require `OUT OFF` before SET | Same. First-start zero-V wait on G4 is only for the initial `OUT ON`. |
+| TLM **10 Hz is enough** (20 Hz max) | USART2 is 115200 and only G4 listens. Faster TLM does not make the H7 UI faster. |
+| Do **not** echo the `SET` command line back | Echo + TLM + ACK was filling G4 RX. Reply **one** `ACK SET V=… I=… OUT=…`. |
+| One ACK per command, no `OK SET` plus `ACK SET` spam if you can | G4 keys off `ACK SET`. Extra `OK SET` is ignored (not `ACK` / `TLM` / `NACK`). |
+| Keep TLM ASCII `TLM out=… vset=… vout=… pgood=… kill=… fault=…` | G4 rejects shredded lines that miss those tokens. |
+
+G0↔G4 “junk” to drop: SET echo, extra OK lines, TLM faster than 10 Hz, any debug on USART2. Do **not** drop cell voltages — those are **not** on G0; they are `TB` from the G4 BQ76922.
+
+## Why not compression first
+
+A G0 `TLM` line is already on USART2. Mirroring it to USART1 doubled the host traffic and blocked `HAL_UART_Transmit` so host `SET` lost bytes (`ERR CMD`, `SET 1.300`). Binary frames would require an H7 rewrite and would hide the console. Cut the duplicate, use a TX ring, then raise baud.
 
 ## Line `TB` — BMS (BQ76922)
 

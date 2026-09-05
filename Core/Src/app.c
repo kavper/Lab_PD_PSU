@@ -100,7 +100,6 @@ BQ76922_Device_t g_bq76922;
 #define REGION_SWITCH_CONFIRM_COUNT          8U
 #define REGION_MIN_DWELL_MS                  200U
 
-#define OCP_ACTIVE_MIN_LIMIT_A               0.05f
 #define OCP_HIT_COUNT_LIMIT                  DCDC_HS_OCP_HIT_LIMIT
 
 #define OFF_RAMP_DONE_V                      0.020f
@@ -897,7 +896,7 @@ static void App_LatchOcpEvent(void)
     app.ocp_event_i_buck = app.meas.i_hs_buck;
     app.ocp_event_i_boost = app.meas.i_hs_boost;
     app.ocp_event_iout = app.meas.iout;
-    app.ocp_event_ilim = app.current_limit_a;
+    app.ocp_event_ilim = DCDC_HS_EMERGENCY_OCP_A;
     app.ocp_event_vin = app.meas.vin;
     app.ocp_event_vout = app.meas.vout;
     app.ocp_event_hits = app.ocp_hit_count;
@@ -998,9 +997,14 @@ static void App_UpdateFaultFlagsFast(bool adc_ok)
             flags |= FAULT_OVP;
         }
 
-        if (app.stage_enabled && (app.current_limit_a >= OCP_ACTIVE_MIN_LIMIT_A)) {
-            bool hs_over = (app.meas.i_hs_buck > app.current_limit_a) ||
-                           (app.meas.i_hs_boost > app.current_limit_a);
+        if (app.stage_enabled) {
+            /*
+             * The user current limit belongs to the G0 LDO, which enforces it
+             * in analogue hardware.  G4 watches only for a catastrophic DCDC
+             * overcurrent and must not move this threshold with the UI slider.
+             */
+            bool hs_over = Dcdc_HsEmergencyOvercurrent(app.meas.i_hs_buck,
+                                                       app.meas.i_hs_boost);
 
             app.ocp_hit_count = Dcdc_OcpUpdateHits(app.ocp_hit_count,
                                                    hs_over,

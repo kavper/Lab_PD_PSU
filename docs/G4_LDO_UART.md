@@ -1,6 +1,8 @@
 # G4 ↔ G0 LDO UART (G474 firmware)
 
-Canonical copy: [LDO_controller `docs/G4_LDO_UART.md`](https://github.com/kavper/LDO_controller/blob/cursor/g0-hw-rev-cubemx-19b5/docs/G4_LDO_UART.md)
+Canonical wire format: matching G0 repository
+`docs/G4_G0_UART_PROTOCOL_V2.md`. Production G4↔G0 traffic is binary with
+CRC-16, sequence matching and ACK/NACK; old ASCII `TLM` is obsolete.
 
 ## Split of roles
 
@@ -18,14 +20,14 @@ Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse 
 | G0 state | DCDC target |
 |---|---|
 | `out=0`, host idle (`g0_want=0`) | disable DCDC, ramp command → 3 V |
-| `out=0`, host wants ON | `max(host_vset, tlm_vset) + 3 V`, floored at **6 V** |
+| `out=0`, host wants ON | `max(host_vset, tlm_vset) + 1.5 V`, floored at **6 V** |
 | CV (`cccv=0`) | same floor (or `vpre=` from TLM if present) |
-| CC (`cccv=1`) | `max(vout + 3 V, vset + 3 V, 6 V)` — do **not** follow collapsed `vout` |
+| CC (`cccv=1`) | `max(vout + 1.5 V, vset + 1.5 V, 6 V)` — do **not** follow collapsed `vout` |
 | Stale TLM while `g0_want=1` | **hold** CV/VIN floor (do not dive to 3 V) |
 
 `fault=VIN_LOW` does **not** disable the pre-reg DCDC (that fault is caused by a low rail; killing DCDC worsens the spiral). Other faults still drop enable.
 
-Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 3 V, **VIN floor 6 V** (`BOARD_VPRE_VIN_FLOOR_V` = G0 `CONSOLE_MINIMUM_VIN_MV`).
+Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 1.5 V, **VIN floor 6 V**.
 
 Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, non-blocking fault, G0 `out=1` or want).
 
@@ -60,16 +62,17 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 |---|---|
 | `ON` / `OFF` | Enable / disable DCDC |
 | `CLR` / `CLEAR` | Clear sticky fault latch |
-| `SET <v>` | Set voltage |
-| `ILIM <a>` | Set current limit |
+| `SET <v>` | Legacy/manual voltage command, strict 0..27 V |
+| `ILIM <a>` | Legacy/manual current command, strict 0..5 A |
+| `SET V=<v> I=<a>` | Atomic GUI voltage/current, three decimal places |
 | `USB …` | USB PD mode |
 | `PERMIT 0\|1` | Force G0 kill assert / clear (**PB7**) |
 | `REMOTE 0\|OFF` | Local sense (default) |
 | `REMOTE 1\|ON` | Enable remote sense path |
-| `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame |
+| `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame. `TEL < 200` keeps `T` fast and `TB`/`TC` at 200 ms. |
 | `BMS` | Soft: skip CFGUPDATE if already healthy; else full 4S reinit |
 | `BMS FORCE` / `BMSREINIT` | Full CFGUPDATE + ALL_FETS_ON (may bus-hold + reboot) |
-| `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7) |
+| `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7). `VERBOSE 1` also mirrors G0 TLM/ACK onto USART1. |
 
 ## BMS (4S pack, skip VC4)
 
@@ -83,10 +86,10 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 
 1. Flash G0 + G4. Connect isolator UART (115200).
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
-3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends `SET V=… I=…` → `OUT ON` to G0.
-4. Watch forwarded `TLM` (`out=1 kill=0 outoff=0`) and host `T` (`g0_want=1 g0_ctrl=… g0_out=1`).
+3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends binary atomic SETPOINT → binary SET_OUTPUT=1.
+4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
 
-Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=5.000 I=0.100` until `SET`/`ILIM`). Host **`OFF`** / **`PERMIT 0`** sends `OUT OFF`, forces **PB7** low (LDO zabity), and stops DCDC.
+Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`** / **`PERMIT 0`** sends binary output-off, forces **PB7** low, and stops DCDC.
 
 `g0_ctrl` states: 0 idle, 1 wait link, 2 wait permit, 3 wait VIN, 4–8 SET/OUT handshake, 9 running, 10–11 OFF, 12 fault.
 
@@ -99,7 +102,7 @@ Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=
 | `vout_mv≈8000`, `mode=CV`, `g0_tlm=0` | DCDC OK; final LDO not talking / not ON |
 | `g0_rx` stuck at 1, `g0_age_ms` climbing | One noise byte then silence — isolator / TX-RX / G0 not streaming |
 | `g0_err>0`, `g0_uart=0x…` | HAL UART error latch: `0x1` PE, `0x2` NE, `0x4` FE, `0x8` ORE |
-| `g0_tlm` rising, forwarded `TLM …` lines | Link OK — check G0 LED / `kill=` / `pgood=` / `out=` |
+| `g0_tlm` rising, `g0_vout_mv` tracking | Link OK — check G0 LED / `g0_kill` / `pgood` via G0 TLM on USART2, `g0_out` on `T` |
 | `permit=1` but G0 `kill=1` | Firmware was driving PERMIT on wrong pad (was PB6/REMOTE_ON); must be **PB7** |
 
 Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
