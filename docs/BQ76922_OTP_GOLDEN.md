@@ -96,14 +96,37 @@ Alternate (bqStudio): same map in Data Memory, then Program OTP at BAT 10–12 V
 
 ## Firmware parity
 
-`Core/Inc/bms_board.h` + CFGUPDATE path write this set to **RAM every wake** while OTP is blank — that is **not** an OTP burn.
+`Core/Inc/bms_board.h` is the authoritative golden-map definition.  Before OTP
+was programmed, the normal CFGUPDATE path wrote the runtime protection/FET
+subset needed by the application.  The guarded OTP path additionally stages
+and verifies the autonomous-supply and pin fields (`REG0`, `REG1`, `TS2`, and
+disabled PCHG).  Ordinary boot never executes `OTP_WRITE`.
 
 One-shot OTP from the host UART:
 
 - `BMS OTP STATUS`
+- `BMS OTP CHECK`
 - `BMS OTP BURN I-UNDERSTAND-OTP`
 
 After a successful burn, G4 is optional for FET-on; MCU is still used for PD/PSU.
+
+## Production firmware policy
+
+The programming implementation is useful for manufacturing and service builds,
+but the final customer firmware should not expose `OTP CHECK` or `OTP BURN`.
+The confirmation string prevents accidents; it is not an authentication or
+security boundary.  Recommended split:
+
+- production: retain read-only BMS telemetry/`OTP STATUS` and normal fault
+  handling, compile out `OTP CHECK` and `OTP BURN`;
+- manufacturing/service: enable the guarded commands explicitly with a build
+  flag and keep the exact preflight/readback/reset verification sequence;
+- never call OTP programming automatically during boot, recovery, USB attach,
+  or BMS reinitialization.
+
+Removing the UART parser alone is not enough if another callable code path can
+still reach `BQ76922_OtpBurn()`.  A production build flag should compile out the
+command and the write implementation together.
 
 ## Validated HW rev2 unit (2026-09-05)
 
