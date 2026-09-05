@@ -28,7 +28,7 @@
 #endif
 
 #ifndef DCDC_HS_EMERGENCY_OCP_A
-#define DCDC_HS_EMERGENCY_OCP_A          5.50f  /* independent of the G0 user limit */
+#define DCDC_HS_EMERGENCY_OCP_A         10.00f  /* each G4 half-bridge HS sensor */
 #endif
 
 #ifndef DCDC_ADC_FULL_SCALE
