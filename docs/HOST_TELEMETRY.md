@@ -112,7 +112,7 @@ STM may program/verify static Option0/1/4/ADC (+ BIGCAP) before port activation.
 |---|---|
 | **S1** → **TS2**–**BATT-** (+R61) | Button wake from SHUTDOWN |
 | **LD** (TP27) | Charger/USB wake when LD > ~1.45 V |
-| **RST_SHUT** (**TP28**) | Must stay **LOW** in normal run. High &lt;1 s = AFE digital reset; high ≥1 s = SHUTDOWN (FETs off, REG1 off). Floating/pull-up here blocks `CFGUPDATE` and looks like a wake/reset loop. |
+| **RST_SHUT** (**TP28**) | Must stay **LOW** in normal run. To force SHUTDOWN for button tests: drive **TP28 to 3.3 V (REG1 / MCU logic — never pack VBAT)** for **≥1 s**, then release to GND. High &lt;1 s = AFE digital reset only. Floating/pull-up here blocks `CFGUPDATE` and looks like a wake/reset loop. Prefer UART `BMS SHUTDOWN` when the link is up. |
 | **CFETOFF / DFETOFF** (TP29 / TP30) | Leave floating OK now: CFGUPDATE writes Pin Config **0x00** (unused). If OTP had CFETOFF (`0x02`) and the pin floated high → `fet=0x14` (`DSG`+`DCHG_PIN`), `chg=0` forever |
 | **+VBAT** → LMR33620 → 3V3 | G4 MCU keep-alive (independent of PACK/FETs) |
 | **PACK** | After CHG/DSG; `pack_mv≈0` with FETs off is expected |

@@ -20,9 +20,11 @@
 #define BQ76922_CMD_ALARM_STATUS         0x62U
 #define BQ76922_CMD_FET_STATUS           0x7FU
 
+#define BQ76922_SUBCMD_SHUTDOWN          0x0010U
 #define BQ76922_SUBCMD_SET_CFGUPDATE     0x0090U
 #define BQ76922_SUBCMD_EXIT_CFGUPDATE    0x0092U
 #define BQ76922_SUBCMD_FET_ENABLE        0x0022U
+#define BQ76922_SUBCMD_ALL_FETS_OFF      0x0095U
 #define BQ76922_SUBCMD_ALL_FETS_ON       0x0096U
 #define BQ76922_SUBCMD_SLEEP_DISABLE     0x009AU
 #define BQ76922_SUBCMD_MANUF_STATUS      0x0057U
@@ -1037,6 +1039,39 @@ void BQ76922_AlertFromIsr(BQ76922_Device_t *dev)
     }
     dev->snapshot.alert_latched = true;
     dev->snapshot.alert_count++;
+}
+
+BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
+{
+    BQ76922_Status_t status;
+
+#if (BMS_ENABLE == 0U)
+    (void)dev;
+    return BQ76922_NOT_READY;
+#else
+    if ((dev == NULL) || (dev->hi2c == NULL)) {
+        return BQ76922_INVALID_ARG;
+    }
+
+    /* Clean FET path first, then SHUTDOWN twice to bypass command delay
+     * (TI BQ769x2: single write is ignored as accidental-shutdown guard). */
+    (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_OFF);
+    HAL_Delay(2U);
+    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    HAL_Delay(2U);
+    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
+    if (status == BQ76922_OK) {
+        dev->snapshot.fets_enabled = false;
+        dev->snapshot.chg_fet_on = false;
+        dev->snapshot.dsg_fet_on = false;
+        dev->snapshot.configured = false;
+        dev->snapshot.state = BQ76922_STATE_ABSENT;
+    }
+    return status;
+#endif
 }
 
 void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev)

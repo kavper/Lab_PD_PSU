@@ -111,5 +111,9 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev);
  * While FETs are already on this can drop PACK, hold I2C4 (starve BQ/TPS), and
  * ALL_FETS_ON inrush may brown-out the MCU (PIN/POR). Prefer host BMS soft path. */
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
+/* Enter BQ769x2 SHUTDOWN: ALL_FETS_OFF then SHUTDOWN() twice (TI).
+ * Keep balance harness connected; do not hold the TS2 button (soft-SHUTDOWN).
+ * Wake later: TS2→VSS or charger on LD. Returns I2C status of last write. */
+BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 
 #endif /* BQ76922_H */

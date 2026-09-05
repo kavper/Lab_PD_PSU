@@ -359,6 +359,7 @@ static void HostLink_SendHelp(void)
         "  ? / STATUS      one T/TB/TC frame now\r\n"
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
+        "  BMS SHUTDOWN    BQ76922 SHUTDOWN (ALL_FETS_OFF + 0x0010 x2); wake=TS2 or LD\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
         "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
@@ -530,6 +531,30 @@ static void HostLink_HandleLine(char *line)
                      HostLink_EqToken(arg, "FORCE") ||
                      HostLink_EqToken(arg, "1") ||
                      HostLink_EqToken(arg, "REINIT");
+        bool shutdown = HostLink_EqToken(arg, "SHUTDOWN") ||
+                        HostLink_EqToken(arg, "SHUT") ||
+                        HostLink_EqToken(arg, "OFF");
+
+        if (shutdown) {
+            BQ76922_Status_t st;
+
+            /* Kill PSU path first so PACK load does not fight FET-off. */
+            LdoLink_RequestOutput(false);
+            LdoPrereg_SetForceDisable(true);
+            LdoPrereg_SetPermitOverrideOff(true);
+            PSU_Stop();
+
+            HostLink_Tx(
+                "OK BMS SHUTDOWN — keep balance cable on; do not hold TS2 button "
+                "(soft-SHUTDOWN). Expect REG18~0 / TS2~5V. Wake: press TS2 or LD.\r\n");
+            /* Flush UART before AFE (and possibly REG1) dies. */
+            HAL_Delay(20U);
+            st = BQ76922_EnterShutdown(&g_bq76922);
+            if (st != BQ76922_OK) {
+                HostLink_Tx("ERR BMS SHUTDOWN I2C failed (AFE may still be awake)\r\n");
+            }
+            return;
+        }
 
         /* GUI "BMS config" historically sent plain BMS while FETs were already
          * on → full CFGUPDATE, I2C bus-hold (bq_ok=0), ALL_FETS_ON inrush,
