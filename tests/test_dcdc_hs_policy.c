@@ -61,6 +61,12 @@ int main(void)
     ExpectTrue(hits == DCDC_HS_OCP_HIT_LIMIT, "trips after consecutive hits");
     hits = Dcdc_OcpUpdateHits(hits, false, DCDC_HS_OCP_HIT_LIMIT);
     ExpectTrue(hits == (DCDC_HS_OCP_HIT_LIMIT - 1U), "under-limit decays");
+    ExpectTrue(!Dcdc_HsEmergencyOvercurrent(5.49f, 5.49f),
+               "G4 emergency OCP ignores normal G0-regulated current");
+    ExpectTrue(Dcdc_HsEmergencyOvercurrent(5.50f, 0.0f),
+               "G4 emergency OCP trips from buck sensor at 5.5 A");
+    ExpectTrue(Dcdc_HsEmergencyOvercurrent(0.0f, 5.50f),
+               "G4 emergency OCP trips from boost sensor at 5.5 A");
 
     /* ADC trigger sits in the middle of the overlapping HS-ON windows. */
     ExpectNear(Dcdc_AdcTriggerInHsOn(0.50f, 1.00f), 0.25f, 0.001f,

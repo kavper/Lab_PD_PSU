@@ -27,6 +27,10 @@
 #define DCDC_HS_OCP_HIT_LIMIT            8U     /* consecutive 4 kHz control cycles */
 #endif
 
+#ifndef DCDC_HS_EMERGENCY_OCP_A
+#define DCDC_HS_EMERGENCY_OCP_A          5.50f  /* independent of the G0 user limit */
+#endif
+
 #ifndef DCDC_ADC_FULL_SCALE
 #define DCDC_ADC_FULL_SCALE              4095.0f
 #endif
@@ -89,6 +93,12 @@ static inline uint32_t Dcdc_OcpUpdateHits(uint32_t hits, bool over_limit, uint32
 static inline bool Dcdc_OcpTripped(uint32_t hits, uint32_t limit)
 {
     return hits >= limit;
+}
+
+static inline bool Dcdc_HsEmergencyOvercurrent(float i_buck_a, float i_boost_a)
+{
+    return (i_buck_a >= DCDC_HS_EMERGENCY_OCP_A) ||
+           (i_boost_a >= DCDC_HS_EMERGENCY_OCP_A);
 }
 
 /*

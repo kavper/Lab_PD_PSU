@@ -538,7 +538,6 @@ static void HostLink_HandleLine(char *line)
                 return;
             }
             LdoLink_SetG0Setpoint(value, current_value);
-            PSU_GuiSetTargetCurrent(current_value);
             if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
                 PSU_GuiSetTargetVoltage(value + 3.0f);
             }
@@ -574,7 +573,6 @@ static void HostLink_HandleLine(char *line)
             return;
         }
         LdoLink_SetG0Current(value);
-        PSU_GuiSetTargetCurrent(value);
         i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
         (void)snprintf(reply, sizeof(reply), "OK ILIM %lu mA\r\n", (unsigned long)i_ma);
         HostLink_Tx(reply);
