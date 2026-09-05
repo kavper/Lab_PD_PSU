@@ -25,8 +25,10 @@
  * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
  * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
  */
+/* Bring-up / PD-PSU FW path: skip BQ I2C and BMS fault trips.
+ * Set to 1 when pack FETs + OTP/RAM path are proven again. */
 #ifndef BMS_ENABLE
-#define BMS_ENABLE                       1U
+#define BMS_ENABLE                       0U
 #endif
 
 #define BMS_U1_THRESHOLD_CODE_MV(mv)     ((uint8_t)((((uint32_t)(mv) * 10U) + 253U) / 506U))
