@@ -60,13 +60,18 @@ bqStudio: enter decimals. Manual I2C: IEEE-754 little-endian.
 
 Confirm in bqStudio: `Power:Shutdown:Auto Shutdown Time` = **0**.
 
-## Burn procedure
+## Burn procedure (UART — never automatic)
 
-1. Apply same map in **RAM** (CONFIG_UPDATE) — firmware already does this on every wake.
-2. `SHUTDOWN` → short TS2 (do not hold) → FETs on with MCU held in reset / no I2C.
-3. Repeat 20–30×. Check Safety Status A clear, FET Status CHG+DSG.
-4. OTP: BAT **10–12 V**, FULLACCESS, `OTP_WR_CHECK` → `0x80`, then `OTP_WRITE`.
-5. Max ~7 useful partial OTP updates after TI factory signature; bits are one-way.
+Normal boot / wake **only writes RAM**. OTP is burned **once** via USART1:
+
+1. Pack on balance cable. Apply **BAT 10–12 V** (OTP requirement).
+2. `BMS OTP STATUS` → expect `check=0x80`, `full=1`, `otpb=0`.
+3. `BMS OTP BURN I-UNDERSTAND-OTP` → one-shot; refused again this boot.
+4. `BMS SHUTDOWN` → short TS2 (MCU held in reset / no I2C) → FETs on.
+
+Do **not** re-run BURN. Bits are one-way; each write also burns a signature slot (~7 useful updates max).
+
+Alternate (bqStudio): same map in Data Memory, then Program OTP at BAT 10–12 V.
 
 ## 4S → 5S later
 
@@ -76,4 +81,11 @@ Confirm in bqStudio: `Power:Shutdown:Auto Shutdown Time` = **0**.
 
 ## Firmware parity
 
-`Core/Inc/bms_board.h` + `bq76922` CFGUPDATE path write this set to RAM every wake while OTP is blank. After a successful OTP burn, G4 is optional for FET-on; MCU is still used for PD/PSU.
+`Core/Inc/bms_board.h` + CFGUPDATE path write this set to **RAM every wake** while OTP is blank — that is **not** an OTP burn.
+
+One-shot OTP from the host UART:
+
+- `BMS OTP STATUS`
+- `BMS OTP BURN I-UNDERSTAND-OTP`
+
+After a successful burn, G4 is optional for FET-on; MCU is still used for PD/PSU.
