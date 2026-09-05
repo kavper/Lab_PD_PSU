@@ -168,7 +168,8 @@ static void HostLink_SendMachineTelemetry(bool with_bms)
                  "pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u "
                  "g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
-                 "g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
+                 "g0_fault=0x%lX g0_vout_mv=%lu g0_iout_ma=%lu "
+                 "vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
                  "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
                  "pm_st=%u fmt=0\r\n",
@@ -200,7 +201,9 @@ static void HostLink_SendMachineTelemetry(bool with_bms)
                  (unsigned int)LdoLink_GetCtrlState(),
                  (unsigned int)ldo.kill_reported,
                  (unsigned int)ldo.outoff_reported,
+                 (unsigned long)ldo.fault_flags,
                  (unsigned long)ldo.vout_mv,
+                 (unsigned long)ldo.iout_ma,
                  (long)(prereg.vpre_request_v * 1000.0f),
                  (long)(prereg.vpre_command_v * 1000.0f),
                  (unsigned int)(prereg.regulation_ok ? 1U : 0U),
@@ -423,7 +426,8 @@ static void HostLink_SendHelp(void)
     HostLink_Tx(
         "HELP G4 USART1 115200 — machine T/TB/TC for H7/parser\r\n"
         "  ON / OFF        start/stop DCDC + G0 LDO\r\n"
-        "  SET <V> / ILIM <A>\r\n"
+        "  SET V=<V> I=<A> atomic GUI setpoint (0.001 units)\r\n"
+        "  SET <V> / ILIM <A> legacy manual forms\r\n"
         "  PERMIT 0|1      PB7 kill / allow\r\n"
         "  REMOTE ON|OFF   sense path\r\n"
         "  TEL [ms]        T period (0=off, default 500; TB/TC >=200 ms)\r\n"
@@ -518,8 +522,40 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "SET")) {
-        if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR SET use: SET 5.0\r\n");
+        const char *current_arg;
+        float current_value;
+
+        if ((toupper((unsigned char)arg[0]) == 'V') && (arg[1] == '=')) {
+            current_arg = HostLink_SkipToken(arg);
+            if (!HostLink_ParseFloat(&arg[2], &value) ||
+                (toupper((unsigned char)current_arg[0]) != 'I') ||
+                (current_arg[1] != '=') ||
+                !HostLink_ParseFloat(&current_arg[2], &current_value) ||
+                (*HostLink_SkipToken(current_arg) != '\0') ||
+                (value < 0.0f) || (value > 27.0f) ||
+                (current_value < 0.0f) || (current_value > 5.0f)) {
+                HostLink_Tx("ERR SET use: SET V=0.000..27.000 I=0.000..5.000\r\n");
+                return;
+            }
+            LdoLink_SetG0Setpoint(value, current_value);
+            PSU_GuiSetTargetCurrent(current_value);
+            if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
+                PSU_GuiSetTargetVoltage(value + 3.0f);
+            }
+            v_mv = (uint32_t)((value * 1000.0f) + 0.5f);
+            i_ma = (uint32_t)((current_value * 1000.0f) + 0.5f);
+            (void)snprintf(reply, sizeof(reply),
+                           "OK SET V=%lu.%03lu I=%lu.%03lu\r\n",
+                           (unsigned long)(v_mv / 1000U),
+                           (unsigned long)(v_mv % 1000U),
+                           (unsigned long)(i_ma / 1000U),
+                           (unsigned long)(i_ma % 1000U));
+            HostLink_Tx(reply);
+            return;
+        }
+        if (!HostLink_ParseFloat(arg, &value) || (value < 0.0f) ||
+            (value > 27.0f)) {
+            HostLink_Tx("ERR SET range: 0.000..27.000 V\r\n");
             return;
         }
         LdoLink_SetG0Voltage(value);
@@ -532,8 +568,9 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "ILIM")) {
-        if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR ILIM use: ILIM 0.1\r\n");
+        if (!HostLink_ParseFloat(arg, &value) || (value < 0.0f) ||
+            (value > 5.0f)) {
+            HostLink_Tx("ERR ILIM range: 0.000..5.000 A\r\n");
             return;
         }
         LdoLink_SetG0Current(value);

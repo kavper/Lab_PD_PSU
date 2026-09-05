@@ -1,6 +1,8 @@
 # G4 ↔ G0 LDO UART (G474 firmware)
 
-Canonical copy: [LDO_controller `docs/G4_LDO_UART.md`](https://github.com/kavper/LDO_controller/blob/cursor/g0-hw-rev-cubemx-19b5/docs/G4_LDO_UART.md)
+Canonical wire format: matching G0 repository
+`docs/G4_G0_UART_PROTOCOL_V2.md`. Production G4↔G0 traffic is binary with
+CRC-16, sequence matching and ACK/NACK; old ASCII `TLM` is obsolete.
 
 ## Split of roles
 
@@ -60,8 +62,9 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 |---|---|
 | `ON` / `OFF` | Enable / disable DCDC |
 | `CLR` / `CLEAR` | Clear sticky fault latch |
-| `SET <v>` | Set voltage |
-| `ILIM <a>` | Set current limit |
+| `SET <v>` | Legacy/manual voltage command, strict 0..27 V |
+| `ILIM <a>` | Legacy/manual current command, strict 0..5 A |
+| `SET V=<v> I=<a>` | Atomic GUI voltage/current, three decimal places |
 | `USB …` | USB PD mode |
 | `PERMIT 0\|1` | Force G0 kill assert / clear (**PB7**) |
 | `REMOTE 0\|OFF` | Local sense (default) |
@@ -83,10 +86,10 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 
 1. Flash G0 + G4. Connect isolator UART (115200).
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
-3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends `SET V=… I=…` → `OUT ON` to G0.
+3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends binary atomic SETPOINT → binary SET_OUTPUT=1.
 4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
 
-Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=5.000 I=0.100` until `SET`/`ILIM`). Host **`OFF`** / **`PERMIT 0`** sends `OUT OFF`, forces **PB7** low (LDO zabity), and stops DCDC.
+Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`** / **`PERMIT 0`** sends binary output-off, forces **PB7** low, and stops DCDC.
 
 `g0_ctrl` states: 0 idle, 1 wait link, 2 wait permit, 3 wait VIN, 4–8 SET/OUT handshake, 9 running, 10–11 OFF, 12 fault.
 
