@@ -67,7 +67,12 @@ Normal boot / wake **only writes RAM**. OTP is burned **once** via USART1:
 1. Pack on balance cable. Apply **BAT 10–12 V** (OTP requirement).
 2. `BMS OTP STATUS` → expect `check=0x80`, `full=1`, `otpb=0`.
 3. `BMS OTP BURN I-UNDERSTAND-OTP` → one-shot; refused again this boot.
-4. `BMS SHUTDOWN` → short TS2 (MCU held in reset / no I2C) → FETs on.
+4. `BMS SHUTDOWN` → short TS2 release (do **not** hold — soft-SHUTDOWN) → FETs on.
+
+With OTP burned, G4 wake path **skips CFGUPDATE** when RAM already shows
+`Vcell=0x0017` + `FET Options=0x1D`, then issues `ALL_FETS_ON` (does not toggle
+`FET_ENABLE` if `FET_EN` is already set). That avoids holding MOSFETs off during
+a long host reconfig after button wake.
 
 Do **not** re-run BURN. Bits are one-way; each write also burns a signature slot (~7 useful updates max).
 

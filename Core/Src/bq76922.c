@@ -59,6 +59,7 @@
 #define BQ76922_INIT_STEP_DELAY_MS       10U
 #define BQ76922_POST_CFG_DELAY_MS        200U
 #define BQ76922_BOOT_SETTLE_MS           300U
+#define BQ76922_BOOT_SETTLE_WAKE_MS      500U
 #define BQ76922_FET_RETRY_MS             250U
 #define BQ76922_FET_VERIFY_MAX           8U
 #define BQ76922_FET_RECOVER_REINIT_MAX   12U
@@ -104,6 +105,7 @@ typedef enum {
     BQ76922_INIT_WAIT_READY = 0,
     BQ76922_INIT_SLEEP_DISABLE_PRE,
     BQ76922_INIT_CLR_ALARM_PRE,
+    BQ76922_INIT_OTP_FAST_CHECK,
     BQ76922_INIT_ENTER_CFG,
     BQ76922_INIT_WAIT_CFG,
     BQ76922_INIT_VCELL_MODE,
@@ -332,6 +334,13 @@ static BQ76922_Status_t BQ76922_WriteRamU2(BQ76922_Device_t *dev,
     data[1] = (uint8_t)((value >> 8) & 0xFFU);
     return BQ76922_WriteRamBlock(dev, address, data, 2U);
 }
+
+static BQ76922_Status_t BQ76922_ReadRamU1(BQ76922_Device_t *dev,
+                                          uint16_t address,
+                                          uint8_t *out);
+static BQ76922_Status_t BQ76922_ReadRamU2(BQ76922_Device_t *dev,
+                                          uint16_t address,
+                                          uint16_t *out);
 
 static BQ76922_Status_t BQ76922_WriteRamF4(BQ76922_Device_t *dev,
                                            uint16_t address,
@@ -594,11 +603,15 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                 if (dev->boot_settle_ms == 0U) {
                     dev->boot_settle_ms = HAL_GetTick();
                 }
-                if ((uint32_t)(HAL_GetTick() - dev->boot_settle_ms) <
-                    BQ76922_BOOT_SETTLE_MS) {
-                    delay_ms = 50U;
-                    dev->next_action_ms = HAL_GetTick() + delay_ms;
-                    return false;
+                {
+                    uint32_t settle = dev->wake_from_absent ?
+                                         BQ76922_BOOT_SETTLE_WAKE_MS :
+                                         BQ76922_BOOT_SETTLE_MS;
+                    if ((uint32_t)(HAL_GetTick() - dev->boot_settle_ms) < settle) {
+                        delay_ms = 50U;
+                        dev->next_action_ms = HAL_GetTick() + delay_ms;
+                        return false;
+                    }
                 }
             }
             break;
@@ -617,6 +630,32 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                 dev->snapshot.alert_latched = false;
             }
             delay_ms = 10U;
+            break;
+
+        case BQ76922_INIT_OTP_FAST_CHECK:
+            /* After OTP burn, SHUTDOWN wake already has golden in Data Memory.
+             * SET_CFGUPDATE would force FETs off for a long CFGUPDATE — skip it. */
+            {
+                uint16_t vcell = 0U;
+                uint8_t fet_opt = 0U;
+
+                status = BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &vcell);
+                if (status != BQ76922_OK) {
+                    break;
+                }
+                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &fet_opt);
+                if (status != BQ76922_OK) {
+                    break;
+                }
+                dev->snapshot.vcell_mode_rb = vcell;
+                if ((vcell == BMS_VCELL_MODE) && (fet_opt == BMS_FET_OPTIONS)) {
+                    dev->init_step = (uint8_t)BQ76922_INIT_MANUF_ISSUE;
+                    dev->snapshot.init_step = dev->init_step;
+                    delay_ms = 20U;
+                    dev->next_action_ms = HAL_GetTick() + delay_ms;
+                    return false;
+                }
+            }
             break;
 
         case BQ76922_INIT_ENTER_CFG:
@@ -915,13 +954,13 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_ALL_FETS_ON:
             status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_ON);
             dev->last_fet_cmd_ms = HAL_GetTick();
-            /* Let PDSG soft-start PACK caps before we decide FETs failed. */
-            delay_ms = 80U;
+            /* PDSG soft-start; after SHUTDOWN wake PACK caps are empty — wait longer. */
+            delay_ms = dev->wake_from_absent ? 200U : 80U;
             break;
 
         case BQ76922_INIT_FET_SETTLE:
             status = BQ76922_ClearAlarms(dev);
-            delay_ms = 40U;
+            delay_ms = dev->wake_from_absent ? 80U : 40U;
             break;
 
         case BQ76922_INIT_FET_VERIFY:
@@ -985,6 +1024,7 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             dev->snapshot.shutdown_request = false;
             dev->snapshot.state = BQ76922_STATE_READY;
             dev->snapshot.init_step = (uint8_t)BQ76922_INIT_DONE;
+            dev->wake_from_absent = false;
             BQ76922_UpdateBusHold(dev, HAL_GetTick());
             return true;
     }
@@ -1675,9 +1715,11 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
             return;
         }
         if (dev->snapshot.present) {
-            /* Button/LD wake: AFE just returned — full FET bring-up, no host cmd. */
+            /* Button/LD wake: AFE just returned — FET bring-up, no host cmd.
+             * Prefer OTP fast path (skip CFGUPDATE) so FETs are not held off. */
             dev->i2c_absent_streak = 0U;
             dev->boot_settle_ms = 0U;
+            dev->wake_from_absent = true;
             dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
             dev->snapshot.init_step = dev->init_step;
             dev->snapshot.configured = false;

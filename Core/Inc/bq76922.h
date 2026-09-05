@@ -93,6 +93,8 @@ typedef struct {
     uint32_t last_fet_cmd_ms;
     uint32_t bus_hold_since_ms;
     uint32_t boot_settle_ms;
+    /* Set when AFE returns after I2C loss / SHUTDOWN — longer settle + OTP fast path. */
+    bool wake_from_absent;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);
