@@ -118,4 +118,26 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev);
  * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */
 BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 
+/* Lab/production OTP — NEVER called from boot. UART: BMS OTP STATUS / BURN. */
+typedef struct {
+    uint8_t wr_check;          /* raw OTP_WR_CHECK() byte; 0x80 = OK */
+    uint16_t battery_status;
+    uint16_t mfg_status_init;  /* Data Memory 0x9343 */
+    uint16_t vcell_mode;       /* Data Memory 0x9304 */
+    uint8_t fet_options;       /* Data Memory 0x9308 */
+    bool cfgupdate;
+    bool fullaccess;
+    bool otpb_blocked;
+    bool session_already_burned;
+} BQ76922_OtpReport_t;
+
+BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
+                                      BQ76922_OtpReport_t *out);
+/* Burns current Data Memory image. Requires BAT≈10–12 V, FULLACCESS.
+ * confirm_token must be the exact string "I-UNDERSTAND-OTP". */
+BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
+                                 const char *confirm_token,
+                                 uint8_t *wr_check,
+                                 uint8_t *wr_result);
+
 #endif /* BQ76922_H */

@@ -360,6 +360,8 @@ static void HostLink_SendHelp(void)
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
         "  BMS SHUTDOWN    enter AFE SHUTDOWN; wake = TS2 button only (auto FETs)\r\n"
+        "  BMS OTP STATUS  OTP_WR_CHECK only (needs BAT 10-12V, never auto)\r\n"
+        "  BMS OTP BURN I-UNDERSTAND-OTP   one-shot OTP program (lab only)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
         "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
@@ -534,6 +536,77 @@ static void HostLink_HandleLine(char *line)
         bool shutdown = HostLink_EqToken(arg, "SHUTDOWN") ||
                         HostLink_EqToken(arg, "SHUT") ||
                         HostLink_EqToken(arg, "OFF");
+        bool otp = HostLink_EqToken(arg, "OTP");
+
+        if (otp) {
+            const char *otp_arg = HostLink_SkipToken(arg);
+            char msg[160];
+
+            if (HostLink_EqToken(otp_arg, "STATUS") || (*otp_arg == '\0')) {
+                BQ76922_OtpReport_t rep;
+                BQ76922_Status_t st = BQ76922_OtpGetReport(&g_bq76922, &rep);
+
+                if (st != BQ76922_OK) {
+                    HostLink_Tx("ERR BMS OTP STATUS I2C/CFGUPDATE failed\r\n");
+                    return;
+                }
+                (void)snprintf(msg, sizeof(msg),
+                    "OK BMS OTP STATUS check=0x%02X batt=0x%04X mfg_init=0x%04X "
+                    "vcell=0x%04X fet_opt=0x%02X full=%u otpb=%u burned=%u "
+                    "(check 0x80=ready; BAT must be 10-12V)\r\n",
+                    (unsigned)rep.wr_check,
+                    (unsigned)rep.battery_status,
+                    (unsigned)rep.mfg_status_init,
+                    (unsigned)rep.vcell_mode,
+                    (unsigned)rep.fet_options,
+                    rep.fullaccess ? 1U : 0U,
+                    rep.otpb_blocked ? 1U : 0U,
+                    rep.session_already_burned ? 1U : 0U);
+                HostLink_Tx(msg);
+                return;
+            }
+
+            if (HostLink_EqToken(otp_arg, "BURN")) {
+                const char *token = HostLink_SkipToken(otp_arg);
+                uint8_t check = 0U;
+                uint8_t result = 0U;
+                BQ76922_Status_t st;
+
+                if (!HostLink_EqToken(token, "I-UNDERSTAND-OTP")) {
+                    HostLink_Tx(
+                        "ERR BMS OTP BURN requires exact token:\r\n"
+                        "  BMS OTP BURN I-UNDERSTAND-OTP\r\n"
+                        "OTP is one-way. Boot never burns. Run BMS OTP STATUS first.\r\n");
+                    return;
+                }
+
+                HostLink_Tx(
+                    "OK BMS OTP BURN starting — writing golden + OTP_WRITE "
+                    "(BAT 10-12V required)...\r\n");
+                HAL_Delay(20U);
+                st = BQ76922_OtpBurn(&g_bq76922, "I-UNDERSTAND-OTP",
+                                     &check, &result);
+                if (st != BQ76922_OK) {
+                    (void)snprintf(msg, sizeof(msg),
+                        "ERR BMS OTP BURN failed st=%d check=0x%02X write=0x%02X "
+                        "(need FULLACCESS, OTPB=0, check=0x80, BAT 10-12V; "
+                        "or already burned this boot)\r\n",
+                        (int)st, (unsigned)check, (unsigned)result);
+                    HostLink_Tx(msg);
+                    return;
+                }
+                (void)snprintf(msg, sizeof(msg),
+                    "OK BMS OTP BURNED check=0x%02X write=0x%02X — "
+                    "do NOT repeat. Test: BMS SHUTDOWN then short TS2 "
+                    "(FETs should rise without UART).\r\n",
+                    (unsigned)check, (unsigned)result);
+                HostLink_Tx(msg);
+                return;
+            }
+
+            HostLink_Tx("ERR BMS OTP use: STATUS | BURN I-UNDERSTAND-OTP\r\n");
+            return;
+        }
 
         if (shutdown) {
             BQ76922_Status_t st;

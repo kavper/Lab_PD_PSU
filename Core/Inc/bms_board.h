@@ -86,6 +86,13 @@
  */
 #define BMS_FET_OPTIONS                  0x1DU
 /*
+ * Mfg Status Init 0x9343: default 0x0040 (PF_EN). Add FET_EN (bit4) → 0x0050
+ * so OTP wake leaves firmware FET control (not FET Test Mode).
+ */
+#define BMS_MFG_STATUS_INIT              0x0050U
+/* Power:Shutdown:Auto Shutdown Time 0x9254 — 0 = never auto-reenter SHUTDOWN. */
+#define BMS_AUTO_SHUTDOWN_TIME           0U
+/*
  * CHG/DSG FET Protections A — keep TI defaults (only legal fast-path values):
  *   CHG 0x98 = SCD|OCC|COV; DSG 0xE4 = SCD|OCD1|CUV (TRM).
  * Written explicitly so RAM bring-up and OTP golden match.
