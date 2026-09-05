@@ -147,6 +147,44 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption1(
         dev, BQ25731_REG_CHARGE_OPTION1, value);
 }
 
+BQ25731_Status_t BQ25731_StartWriteStartupOption3(
+    BQ25731_Device_t *dev, uint16_t value)
+{
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_CHARGE_OPTION3, value);
+}
+
+BQ25731_Status_t BQ25731_StartWriteOtgVoltageMv(
+    BQ25731_Device_t *dev, uint32_t voltage_mv)
+{
+    uint16_t value;
+
+    if ((voltage_mv < 3000U) || (voltage_mv > 24000U) ||
+        ((voltage_mv % BQ25731_OTG_VOLTAGE_MV_PER_LSB) != 0U)) {
+        return BQ25731_INVALID_ARG;
+    }
+    /* OTGVoltage[11:0] occupies word bits [13:2], 8 mV per LSB. */
+    value = (uint16_t)((voltage_mv /
+                        BQ25731_OTG_VOLTAGE_MV_PER_LSB) << 2);
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_OTG_VOLTAGE, value);
+}
+
+BQ25731_Status_t BQ25731_StartWriteOtgCurrentMa(
+    BQ25731_Device_t *dev, uint32_t current_ma)
+{
+    uint16_t value;
+
+    if ((current_ma > 6350U) || ((current_ma % 50U) != 0U)) {
+        return BQ25731_INVALID_ARG;
+    }
+    /* For the populated 5 mOhm RAC, OTGCurrent[6:0] is in the high byte
+     * with 50 mA per LSB. */
+    value = (uint16_t)((current_ma / 50U) << 8);
+    return BQ25731_StartWriteFixed16(
+        dev, BQ25731_REG_OTG_CURRENT, value);
+}
+
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev)
 {
@@ -191,6 +229,15 @@ uint16_t BQ25731_BuildStartupOption1(uint16_t current)
     /* Match the physical board population: RAC=5 mOhm, RSR=5 mOhm, with
      * the BQ25731 compensation mode intended for a 5 mOhm input shunt. */
     return current | BQ25731_CHARGE_OPTION1_5MOHM_MASK;
+}
+
+uint16_t BQ25731_BuildStartupOption3(uint16_t current)
+{
+#if (BQ25731_OTG_BIGCAP_REQUIRED != 0U)
+    return current | BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP;
+#else
+    return current & (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP;
+#endif
 }
 
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0)

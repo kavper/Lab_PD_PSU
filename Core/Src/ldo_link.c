@@ -516,8 +516,12 @@ static void LdoLink_HandleTlmLine(const char *line)
     }
     LdoLink_ParseFaultToken(line);
 
-    /* Same USART1 as host debug — forward once (no Debug_Write duplicate). */
-    HostLink_ForwardLine(line);
+    /* Forwarded G0 "TLM" lines flood the host UART and are unrelated to
+     * USB-C/PD debugging; emit them only at VERBOSE. State parsing above and
+     * the machine-readable "T" line (host_link) keep the G0 fields regardless. */
+    if (Debug_GetLevel() >= DEBUG_LEVEL_VERBOSE) {
+        HostLink_ForwardLine(line);
+    }
 }
 
 static void LdoLink_HandleRxLine(const char *line)

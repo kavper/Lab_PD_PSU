@@ -3,6 +3,7 @@
 #include "app.h"
 #include "board_rev.h"
 #include "bq76922.h"
+#include "debug_uart.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "power_manager.h"
@@ -15,7 +16,10 @@
 
 #define HOST_LINK_RX_LINE_MAX        96U
 #define HOST_LINK_TX_MAX             768U
-#define HOST_LINK_TEL_DEFAULT_MS     500U
+/* Bare-minimum console by default: the concise [PD] line + events are enough
+ * to read USB-C behaviour. The heavy machine-readable "T" line is off until
+ * the user asks for it with "TEL 500" (or any period in ms). */
+#define HOST_LINK_TEL_DEFAULT_MS     0U
 
 static UART_HandleTypeDef *s_huart = NULL;
 static uint8_t s_rx_byte;
@@ -278,10 +282,12 @@ static void HostLink_SendHelp(void)
         "  STATUS          human summary\r\n"
         "  G0DIAG          USART2 ISR/GPIO dump (PB3 TX / PB4 RX)\r\n"
         "  G0SWAP 0|1      runtime TX/RX swap if pads crossed\r\n"
-        "  TEL [ms]        periodic T lines (0=off, default 500)\r\n"
+        "  USB AUTO|SINK|SOURCE  USB-C: DRP+Try.SRC / sink-only / source-only\r\n"
+        "  DBG 0|1|2       debug verbosity (0=min, 1=normal, 2=verbose)\r\n"
+        "  TEL [ms]        periodic T machine line (0=off, default off)\r\n"
         "  ?               one T line\r\n"
         "  CLR             clear fault latch\r\n"
-        "Need G0 TLM on USART2 (g0_rx rising). LDO out = G0, not DCDC rail.\r\n");
+        "USB SOURCE to charge a laptop/iPad. USB SINK to only take power. AUTO decides.\r\n");
 }
 
 static void HostLink_SendStatus(void)
@@ -427,17 +433,34 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "USB")) {
+        const char *mode_name;
         if (HostLink_EqToken(arg, "AUTO")) {
             (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_AUTO);
+            mode_name = "AUTO (DRP)";
         } else if (HostLink_EqToken(arg, "SINK")) {
             (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SINK_ONLY);
+            mode_name = "SINK_ONLY";
         } else if (HostLink_EqToken(arg, "SOURCE")) {
             (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SOURCE_ONLY);
+            mode_name = "SOURCE_ONLY";
         } else {
-            HostLink_Tx("ERR USB\r\n");
+            HostLink_Tx("ERR USB use: USB AUTO|SINK|SOURCE\r\n");
             return;
         }
-        HostLink_Tx("OK USB\r\n");
+        (void)snprintf(reply, sizeof(reply),
+                       "OK USB %s (applies to TPS PORT_CONFIG)\r\n", mode_name);
+        HostLink_Tx(reply);
+        return;
+    }
+    if (HostLink_EqToken(line, "DBG")) {
+        if (!HostLink_ParseU32(arg, &u32) || (u32 > 2U)) {
+            HostLink_Tx("ERR DBG use: DBG 0|1|2\r\n");
+            return;
+        }
+        Debug_SetLevel((uint8_t)u32);
+        (void)snprintf(reply, sizeof(reply), "OK DBG %lu\r\n",
+                       (unsigned long)Debug_GetLevel());
+        HostLink_Tx(reply);
         return;
     }
     if (HostLink_EqToken(line, "PERMIT")) {

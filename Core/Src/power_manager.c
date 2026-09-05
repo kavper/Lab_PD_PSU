@@ -22,8 +22,27 @@
 #define PM_POLICY_ROLE_DRIFT_MS       750U
 #define PM_POLICY_SWAP_RETRY_MS      3000U
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
+#define PM_TX_CAPS_RETRY_MS           300U
+#define PM_TX_CAPS_MAX_TRIES            8U
+/* Full SPR source profile.  High-voltage PDOs are exposed only after the
+ * isolated BQ/PPHV rail has been pre-biased to 20 V with a controlled ramp. */
+#define PM_SOURCE_SAFE_MAX_MV        20000U
+#define PM_BQ_PRECHARGE_START_MV      5000U
+#define PM_BQ_PRECHARGE_TARGET_MV    20000U
+#define PM_BQ_PRECHARGE_STEP_MV        200U
+#define PM_BQ_PRECHARGE_STEP_MS         30U
+#define PM_BQ_PRECHARGE_SETTLE_MS       100U
+#define PM_BQ_PRECHARGE_ADC_MIN_MV    19500U
+#define PM_BQ_PRECHARGE_ADC_MAX_MV    20500U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
+/* Temporary oscilloscope diagnostic. Keep disabled for normal operation. */
+#define PM_BQ_SCOPE_TEST                 0U
+#define PM_SCOPE_HOLD_5V_MS           1000U
+#define PM_SCOPE_HOLD_15V_MS          2000U
+#define PM_SCOPE_PAUSE_MS             3000U
+#define PM_SCOPE_RAMP_STEP_MV         1000U
+#define PM_SCOPE_RAMP_STEP_MS            0U
 typedef enum {
     PM_JOB_NONE = 0,
     PM_JOB_READ_MODE,
@@ -46,23 +65,65 @@ typedef enum {
     PM_JOB_READ_SINK_CAPS,
     PM_JOB_READ_SOURCE_CAPS,
     PM_JOB_READ_LOCAL_SOURCE_CAPS,
+    PM_JOB_WRITE_LOCAL_SOURCE_CAPS,
+    PM_JOB_SEND_SSRC,
     PM_JOB_TRACE_SOURCE_CAPS,
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
     PM_JOB_BQ_TRACE_IIN_HOST,
+    PM_JOB_BQ_TRACE_OPTION3,
+    PM_JOB_BQ_WRITE_RUNTIME_OPTION3,
+    PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE,
+    PM_JOB_BQ_PRECHARGE_WRITE_OPTION3,
+    PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE,
+    PM_JOB_BQ_PRECHARGE_VERIFY_ADC,
     PM_JOB_BQ_READ_OPTION0,
     PM_JOB_BQ_WRITE_STARTUP_OPTION0,
     PM_JOB_BQ_READ_OPTION4,
     PM_JOB_BQ_WRITE_STARTUP_OPTION4,
     PM_JOB_BQ_READ_OPTION1,
     PM_JOB_BQ_WRITE_STARTUP_OPTION1,
+    PM_JOB_BQ_READ_OPTION3,
+    PM_JOB_BQ_WRITE_STARTUP_OPTION3,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
     PM_JOB_BQ_READ_ID,
     PM_JOB_BQ_READ_CONFIG_BLOCK,
     PM_JOB_BQ_READ_STATUS_BLOCK,
-    PM_JOB_BQ_READ_ADC_BLOCK
+    PM_JOB_BQ_READ_ADC_BLOCK,
+    PM_JOB_BQ_SCOPE_WRITE_CURRENT,
+    PM_JOB_BQ_SCOPE_WRITE_VOLTAGE,
+    PM_JOB_BQ_SCOPE_WRITE_OPTION3
 } PowerManager_Job_t;
+
+typedef enum {
+    PM_BQ_PRECHARGE_IDLE = 0,
+    PM_BQ_PRECHARGE_SET_5V,
+    PM_BQ_PRECHARGE_ENABLE,
+    PM_BQ_PRECHARGE_RAMP,
+    PM_BQ_PRECHARGE_VERIFY_VOLTAGE,
+    PM_BQ_PRECHARGE_VERIFY_ADC,
+    PM_BQ_PRECHARGE_DISABLE
+} PowerManager_BqPrechargePhase_t;
+
+typedef enum {
+    PM_SCOPE_IDLE = 0,
+    PM_SCOPE_SET_CURRENT,
+    PM_SCOPE_STEP_SET_5V,
+    PM_SCOPE_STEP_ENABLE,
+    PM_SCOPE_STEP_WAIT_5V,
+    PM_SCOPE_STEP_SET_15V,
+    PM_SCOPE_STEP_WAIT_15V,
+    PM_SCOPE_STEP_DISABLE,
+    PM_SCOPE_BETWEEN_TESTS,
+    PM_SCOPE_RAMP_SET_5V,
+    PM_SCOPE_RAMP_ENABLE,
+    PM_SCOPE_RAMP_WAIT_5V,
+    PM_SCOPE_RAMP_WRITE,
+    PM_SCOPE_RAMP_WAIT_15V,
+    PM_SCOPE_RAMP_DISABLE,
+    PM_SCOPE_RESTART
+} PowerManager_ScopePhase_t;
 
 typedef enum {
     PM_BQ_INIT_WAIT = 0,
@@ -76,6 +137,9 @@ typedef enum {
     PM_BQ_INIT_READ_OPTION1,
     PM_BQ_INIT_WRITE_OPTION1,
     PM_BQ_INIT_VERIFY_OPTION1,
+    PM_BQ_INIT_READ_OPTION3,
+    PM_BQ_INIT_WRITE_OPTION3,
+    PM_BQ_INIT_VERIFY_OPTION3,
     PM_BQ_INIT_WRITE_ADC,
     PM_BQ_INIT_VERIFY_ADC,
     PM_BQ_INIT_DONE
@@ -110,6 +174,7 @@ typedef struct {
     uint8_t event_to_clear[TPS_INT_EVENT_BYTES];
 
     bool initialized;
+    bool startup_auto_restore_pending;
     bool mode_update_pending;
     bool port_write_pending;
     bool event_mask_ready;
@@ -143,6 +208,16 @@ typedef struct {
     uint16_t bq_startup_option0_target;
     uint16_t bq_startup_option4_target;
     uint16_t bq_startup_option1_target;
+    uint16_t bq_startup_option3_target;
+    PowerManager_BqPrechargePhase_t bq_precharge_phase;
+    uint32_t bq_precharge_next_ms;
+    uint32_t bq_precharge_voltage_mv;
+    uint16_t bq_precharge_option3_target;
+    PowerManager_ScopePhase_t scope_phase;
+    uint32_t scope_next_ms;
+    uint32_t scope_voltage_mv;
+    uint16_t scope_option3_target;
+    uint32_t scope_cycle;
     uint8_t policy_cap_attempts;
     bool previous_attached;
     bool policy_swap_attempted;
@@ -151,8 +226,18 @@ typedef struct {
     bool pdo_report_pending;
     bool local_source_caps_pending;
     bool local_source_caps_valid;
+    bool tx_source_caps_write_pending;
+    bool tx_source_caps_ssrc_pending;
+    bool tx_source_caps_patched;
+    uint8_t tx_source_caps_len;
+    uint8_t local_source_caps_tries;
+    uint32_t local_source_caps_next_ms;
+    uint8_t tx_source_caps[TPS25751_TX_SOURCE_CAPS_LEN];
     bool source_caps_trace_pending;
     bool bq_iin_trace_pending;
+    bool bq_option3_trace_pending;
+    bool bq_option3_runtime_write_pending;
+    bool high_voltage_source_armed;
     bool typec_trace_valid;
     TPS25751_PowerRole_t policy_desired_role;
     TPS25751_Capabilities_t local_source_caps;
@@ -218,22 +303,35 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_READ_SINK_CAPS: return "READ_SINK_CAPS";
         case PM_JOB_READ_SOURCE_CAPS: return "READ_SOURCE_CAPS";
         case PM_JOB_READ_LOCAL_SOURCE_CAPS: return "READ_LOCAL_SOURCE_CAPS";
+        case PM_JOB_WRITE_LOCAL_SOURCE_CAPS: return "WRITE_LOCAL_SOURCE_CAPS";
+        case PM_JOB_SEND_SSRC: return "SEND_SSRC";
         case PM_JOB_TRACE_SOURCE_CAPS: return "TRACE_SOURCE_CAPS";
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
         case PM_JOB_BQ_TRACE_IIN_HOST: return "BQ_TRACE_IIN_HOST";
+        case PM_JOB_BQ_TRACE_OPTION3: return "BQ_TRACE_OPTION3";
+        case PM_JOB_BQ_WRITE_RUNTIME_OPTION3: return "BQ_WRITE_RUNTIME_OPTION3";
+        case PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE: return "BQ_PRECHARGE_VOLTAGE";
+        case PM_JOB_BQ_PRECHARGE_WRITE_OPTION3: return "BQ_PRECHARGE_OPTION3";
+        case PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE: return "BQ_PRECHARGE_VERIFY_VOLTAGE";
+        case PM_JOB_BQ_PRECHARGE_VERIFY_ADC: return "BQ_PRECHARGE_VERIFY_ADC";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION0: return "BQ_WRITE_QUIET_OPTION0";
         case PM_JOB_BQ_READ_OPTION4: return "BQ_READ_OPTION4";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION4: return "BQ_WRITE_DITHER_OPTION4";
         case PM_JOB_BQ_READ_OPTION1: return "BQ_READ_5MOHM_OPTION1";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION1: return "BQ_WRITE_5MOHM_OPTION1";
+        case PM_JOB_BQ_READ_OPTION3: return "BQ_READ_BIGCAP_OPTION3";
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3: return "BQ_WRITE_BIGCAP_OPTION3";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
         case PM_JOB_BQ_READ_ID: return "BQ_READ_ID";
         case PM_JOB_BQ_READ_CONFIG_BLOCK: return "BQ_READ_CONFIG";
         case PM_JOB_BQ_READ_STATUS_BLOCK: return "BQ_READ_STATUS";
         case PM_JOB_BQ_READ_ADC_BLOCK: return "BQ_READ_ADC_BLOCK";
+        case PM_JOB_BQ_SCOPE_WRITE_CURRENT: return "BQ_SCOPE_CURRENT";
+        case PM_JOB_BQ_SCOPE_WRITE_VOLTAGE: return "BQ_SCOPE_VOLTAGE";
+        case PM_JOB_BQ_SCOPE_WRITE_OPTION3: return "BQ_SCOPE_OPTION3";
         default: return "NONE";
     }
 }
@@ -422,6 +520,39 @@ static void PowerManager_LogPd(uint32_t now_ms)
         power_flow = "BAT -> VBUS";
     } else if (tps->attached) {
         power_flow = "TRANSITION";
+    }
+
+    /* Bare-minimum view (DBG 0/1): one concise line instead of the full [MON]
+     * table. Shows role, Type-C state, VBUS, contract and the event counters
+     * that reveal a flickering contract (rising HR/OC/unable/attach). */
+    if (Debug_GetLevel() < DEBUG_LEVEL_VERBOSE) {
+        Debug_Printf(
+            "[PD] mode=%s/%s role=%s want=%s typec=%s conn=%u att=%u "
+            "VBUS=%lumV C=%lumV/%lumA/%lumW flow=%s "
+            "att=%lu det=%lu HR=%lu OC=%lu unable=%lu perr=%lu nack=%lu swap=%lu%s",
+            PowerManager_UserModeToString(g_pm.status.requested_mode),
+            g_pm.status.applied_mode_valid ?
+                PowerManager_UserModeToString(g_pm.status.applied_mode) : "?",
+            role,
+            PowerManager_RoleToString(g_pm.policy_desired_role),
+            PowerManager_TypecStateToString(tps->typec_port_state),
+            tps->connection_state,
+            tps->attached ? 1U : 0U,
+            (unsigned long)tps->vbus_mv,
+            (unsigned long)g_pm.status.pd_snapshot.contract_voltage_mv,
+            (unsigned long)g_pm.status.pd_snapshot.contract_current_ma,
+            (unsigned long)g_pm.status.pd_snapshot.contract_power_mw,
+            power_flow,
+            (unsigned long)g_pm.attach_count,
+            (unsigned long)g_pm.detach_count,
+            (unsigned long)g_pm.hard_reset_count,
+            (unsigned long)g_pm.overcurrent_count,
+            (unsigned long)g_pm.unable_source_count,
+            (unsigned long)g_pm.power_error_count,
+            (unsigned long)g_pm.i2c_nack_count,
+            (unsigned long)g_pm.power_swap_count,
+            g_pm.status.source_fault_latched ? " FAULT_LATCHED" : "");
+        return;
     }
 
     uart_used = Debug_GetTxBufferUsed();
@@ -740,6 +871,95 @@ static void PowerManager_TryLogContractPdos(void)
     g_pm.pdo_report_pending = false;
 }
 
+static void PowerManager_WriteLe32(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)(value & 0xFFU);
+    data[1] = (uint8_t)((value >> 8) & 0xFFU);
+    data[2] = (uint8_t)((value >> 16) & 0xFFU);
+    data[3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+/* Canonical fixed-PDO source profile: 5 V/3 A, 9 V/3 A, 15 V/3 A,
+ * 20 V/5 A.  PDO1 keeps USB communication/data-swap capability but has
+ * Dual-Role Power cleared so a charging partner cannot PR_SWAP the supply. */
+static const uint32_t g_pm_source_fixed_pdos[] = {
+    0x0601912CUL,
+    0x0002D12CUL,
+    0x0004B12CUL,
+    0x000641F4UL
+};
+
+/*
+ * EEPROM advertises PPS/AVS APDOs plus Dual-Role Power on PDO1.  Laptops and
+ * iPads request PPS, then hard-reset when the BQ path cannot track it, and
+ * DRP-capable partners PR_SWAP us to sink (click-charge loop).  Keep the
+ * fixed PDOs up to PM_SOURCE_SAFE_MAX_MV, drop APDOs and clear the DRP bit.
+ * PDO1 stays on PP5V so the PPHV rail is physically isolated while STM uses
+ * the TPS I2C-controller bridge to pre-bias BQ from 5 V to 20 V.  Only after
+ * register and ADC verification are the 9/15/20-V PDOs advertised.  TPS still
+ * owns the actual PD transition and all runtime BQ control.
+ */
+static bool PowerManager_PrepareTxSourceCapsPatch(const uint8_t *data,
+                                                   uint8_t length)
+{
+    const uint32_t source_max_mv = g_pm.high_voltage_source_armed ?
+        PM_SOURCE_SAFE_MAX_MV : 5000U;
+    uint8_t count;
+    uint8_t wanted_count = 0U;
+    uint8_t i;
+    bool changed = false;
+
+    if ((data == NULL) || (length < 7U) ||
+        (length > TPS25751_TX_SOURCE_CAPS_LEN) ||
+        g_pm.tx_source_caps_patched) {
+        return false;
+    }
+
+    memset(g_pm.tx_source_caps, 0, sizeof(g_pm.tx_source_caps));
+    memcpy(g_pm.tx_source_caps, data, length);
+    g_pm.tx_source_caps_len = length;
+
+    /* TX_SOURCE_CAPS bits 9:8: 0=PP5V.  This isolation is the safety
+     * prerequisite for pre-biasing PPHV without changing 5-V VBUS. */
+    if ((g_pm.tx_source_caps[1] & 0x03U) != 0x00U) {
+        g_pm.tx_source_caps[1] &= (uint8_t)~0x03U;
+        changed = true;
+    }
+
+    for (i = 0U;
+         i < (uint8_t)(sizeof(g_pm_source_fixed_pdos) /
+                       sizeof(g_pm_source_fixed_pdos[0]));
+         ++i) {
+        TPS25751_Pdo_t pdo =
+            TPS25751_DecodePdo(g_pm_source_fixed_pdos[i]);
+        if (pdo.max_voltage_mv <= source_max_mv) {
+            wanted_count++;
+        }
+    }
+    if (wanted_count == 0U) {
+        return false;
+    }
+
+    count = data[0] & 0x07U;
+    if (count != wanted_count) {
+        changed = true;
+    }
+    g_pm.tx_source_caps[0] =
+        (uint8_t)((g_pm.tx_source_caps[0] & (uint8_t)~0x07U) |
+                  wanted_count);
+    for (i = 0U; i < 7U; ++i) {
+        uint32_t wanted =
+            (i < wanted_count) ? g_pm_source_fixed_pdos[i] : 0U;
+        uint32_t current = TPS25751_ReadLe32(&data[3U + (i * 4U)]);
+        if (current != wanted) {
+            changed = true;
+        }
+        PowerManager_WriteLe32(&g_pm.tx_source_caps[3U + (i * 4U)],
+                               wanted);
+    }
+    return changed;
+}
+
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
@@ -798,6 +1018,26 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
             g_pm.attach_count++;
         } else {
             g_pm.detach_count++;
+            /* Every physical reconnect makes TPS reprogram BQ and clear
+             * EN_OTG_BIGCAP.  Disarm all >5-V PDOs immediately while the
+             * port is detached.  The next attach must verify BIGCAP again
+             * before the high-voltage PDOs are restored. */
+            g_pm.high_voltage_source_armed = false;
+            g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_IDLE;
+            g_pm.bq_precharge_voltage_mv = 0U;
+            g_pm.bq_option3_trace_pending = false;
+            g_pm.bq_option3_runtime_write_pending = false;
+            g_pm.tx_source_caps_patched = false;
+            g_pm.local_source_caps_pending = true;
+            g_pm.local_source_caps_valid = false;
+            g_pm.local_source_caps_tries = 0U;
+            g_pm.local_source_caps_next_ms = now_ms;
+            g_pm.status.tps.active_pdo_raw = 0U;
+            g_pm.status.tps.active_rdo_raw = 0U;
+            memset(&g_pm.status.tps.active_pdo, 0,
+                   sizeof(g_pm.status.tps.active_pdo));
+            memset(&g_pm.status.tps.active_rdo, 0,
+                   sizeof(g_pm.status.tps.active_rdo));
         }
         PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
         if ((PM_VERBOSE_TRANSITION_LOGS != 0U) &&
@@ -805,6 +1045,40 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
             Debug_Printf("[PD-POLICY] detach; decision state cleared");
         }
     }
+}
+
+/* TPS remains the runtime owner of BQ.  The host only prepares the otherwise
+ * disconnected PPHV rail while the live 5-V contract is carried by PP5V.
+ * This converts the dangerous later 5->20-V BQ step into a no-op at 20 V.
+ * Any loss of isolation fails closed: high-voltage PDOs stay hidden and OTG
+ * is disabled by the precharge state machine. */
+static void PowerManager_MaybeStartBqPrecharge(uint32_t now_ms)
+{
+    bool safe_5v_contract =
+        g_pm.status.tps.active_pdo.valid &&
+        (g_pm.status.tps.active_pdo.max_voltage_mv <= 5000U);
+    bool pphv_isolated = (g_pm.status.tps.pphv_state == 0U);
+    bool pp5v_sourcing = (g_pm.status.tps.pp5v_state == 2U);
+
+    if ((g_pm.bq_precharge_phase != PM_BQ_PRECHARGE_IDLE) ||
+        g_pm.high_voltage_source_armed ||
+        !PowerManager_TickReached(now_ms, g_pm.bq_precharge_next_ms) ||
+        (g_pm.bq_init != PM_BQ_INIT_DONE) ||
+        !g_pm.status.tps.attached ||
+        (g_pm.status.tps.role != TPS25751_ROLE_SOURCE) ||
+        !safe_5v_contract || !pphv_isolated || !pp5v_sourcing ||
+        g_pm.status.source_fault_latched) {
+        return;
+    }
+
+    g_pm.bq_precharge_voltage_mv = PM_BQ_PRECHARGE_START_MV;
+    g_pm.bq_precharge_option3_target =
+        (uint16_t)(BQ25731_BuildStartupOption3(
+            g_pm.status.bq.charge_option3) |
+            BQ25731_CHARGE_OPTION3_EN_OTG);
+    g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_SET_5V;
+    g_pm.bq_precharge_next_ms = now_ms;
+    Debug_Printf("[BQ-RAMP] start isolated PPHV 5V->20V step=200mV; VBUS stays on PP5V");
 }
 
 static void PowerManager_DecidePolicy(uint32_t now_ms)
@@ -829,7 +1103,11 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
         }
     }
 
-    if (source_max_mv > 5000U) {
+    if (current == TPS25751_ROLE_SOURCE) {
+        desired = TPS25751_ROLE_SOURCE;
+        action = "KEEP_SOURCE";
+        reason = "ALREADY_SOURCE_DO_NOT_SWAP";
+    } else if (source_max_mv > 5000U) {
         desired = TPS25751_ROLE_SINK;
         action = "DRAW_FROM_PARTNER";
         reason = "PARTNER_SOURCE_ABOVE_5V";
@@ -902,11 +1180,16 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         (((g_pm.status.tps.active_pdo_raw >> 30) & 0x03U) == 0U) &&
         ((g_pm.status.tps.active_pdo_raw & (1UL << 29)) != 0U);
 
-    if ((current == TPS25751_ROLE_SOURCE) && !contract_valid &&
-        (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN)) {
+    /*
+     * Never PR_SWAP away from Source.  That is the laptop/iPad click loop:
+     * they start charging, we swap to sink (or accept their swap), VBUS
+     * drops, they reconnect.
+     */
+    if (current == TPS25751_ROLE_SOURCE) {
         g_pm.partner_sink_observed = true;
         g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-        Debug_Printf("[PD-POLICY] desired=SOURCE established from Type-C Rd attach");
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
     }
 
     if (active_source_pdo_is_drp && !g_pm.partner_sink_observed) {
@@ -915,31 +1198,20 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
                      (unsigned long)g_pm.status.tps.active_pdo_raw);
     }
 
-    if (contract_valid && (current == TPS25751_ROLE_SOURCE)) {
-        if (!g_pm.partner_sink_observed) {
-            g_pm.partner_sink_observed = true;
-            Debug_Printf("[PD-POLICY] partner Sink confirmed by active Source contract PDO=0x%08lX RDO=0x%08lX",
-                         (unsigned long)g_pm.status.tps.active_pdo_raw,
-                         (unsigned long)g_pm.status.tps.active_rdo_raw);
-        }
-        if (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN) {
-            g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-            Debug_Printf("[PD-POLICY] desired=SOURCE established from active partner Sink contract");
-        }
-    } else if (contract_valid && (current == TPS25751_ROLE_SINK)) {
+    if (contract_valid && (current == TPS25751_ROLE_SINK)) {
         uint32_t source_mv = g_pm.status.tps.active_pdo.max_voltage_mv;
 
         if (source_mv > 5000U) {
+            /* Dedicated HV charger / power bank: keep sinking.  Do not steal
+             * a 20 V contract just because the partner is also a DRP. */
             if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
-                Debug_Printf("[PD-POLICY] desired=SINK updated: partner contract is %lumV (>5V)",
+                Debug_Printf("[PD-POLICY] desired=SINK charger contract %lumV",
                              (unsigned long)source_mv);
             }
             g_pm.policy_desired_role = TPS25751_ROLE_SINK;
-        } else if (g_pm.partner_sink_observed &&
-                   (g_pm.policy_desired_role != TPS25751_ROLE_SOURCE)) {
+        } else if (g_pm.partner_sink_observed || active_source_pdo_is_drp) {
             g_pm.policy_desired_role = TPS25751_ROLE_SOURCE;
-            Debug_Printf("[PD-POLICY] desired=SOURCE restored: partner Sink was confirmed and now offers only %lumV",
-                         (unsigned long)source_mv);
+            Debug_Printf("[PD-POLICY] desired=SOURCE: partner is DRP at 5V");
         }
     }
 
@@ -1078,20 +1350,39 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     if (event.hard_reset || event.unable_to_source ||
         event.power_event_error || event.i2c_controller_nack ||
         event.overcurrent) {
-        Debug_Printf("[PD-WARN t=%lu] hard_reset=%u unable_source=%u power_error=%u i2cc_nack=%u overcurrent=%u raw0=0x%02X raw1=0x%02X raw2=0x%02X raw5=0x%02X raw10=0x%02X",
+        Debug_Printf("[PD-WARN t=%lu] hard_reset=%u unable_source=%u power_error=%u i2cc_nack=%u overcurrent=%u HR=%u ER=%u PD=0x%08lX",
                      (unsigned long)now_ms,
                      event.hard_reset ? 1U : 0U,
                      event.unable_to_source ? 1U : 0U,
                      event.power_event_error ? 1U : 0U,
                      event.i2c_controller_nack ? 1U : 0U,
                      event.overcurrent ? 1U : 0U,
-                     event.raw[0], event.raw[1], event.raw[2], event.raw[5],
-                     event.raw[10]);
+                     g_pm.status.tps.hard_reset_reason,
+                     g_pm.status.tps.error_recovery_reason,
+                     (unsigned long)g_pm.status.tps.pd_status_raw);
     }
 
     if (event.overcurrent || event.power_event_error ||
         event.unable_to_source) {
         g_pm.status.source_fault_latched = true;
+    }
+    if (event.hard_reset &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SOURCE)) {
+        /* A hard reset returns VBUS to the default 5-V supply.  Withdraw the
+         * high-voltage PDOs and require a fresh isolated pre-bias before a
+         * retry, otherwise a second negotiation could recreate 5->20 V. */
+        g_pm.high_voltage_source_armed = false;
+        g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_DISABLE;
+        g_pm.bq_precharge_option3_target =
+            (uint16_t)(BQ25731_BuildStartupOption3(
+                g_pm.status.bq.charge_option3) &
+                (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG);
+        g_pm.bq_precharge_next_ms = now_ms + PM_BQ_MONITOR_HOLDOFF_MS;
+        g_pm.tx_source_caps_patched = false;
+        g_pm.local_source_caps_pending = true;
+        g_pm.local_source_caps_valid = false;
+        g_pm.local_source_caps_next_ms = now_ms;
+        Debug_Printf("[BQ-RAMP] hard reset: withdrawing HV PDOs until fresh pre-bias");
     }
     if (event.i2c_controller_nack) {
         PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,
@@ -1104,12 +1395,23 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
         g_pm.source_caps_trace_pending = true;
     }
     if (event.plug_changed || event.source_caps_received ||
-        event.new_contract_consumer || event.hard_reset) {
+        event.new_contract_consumer || event.new_contract_provider ||
+        event.hard_reset) {
         /* Full BQ status/ADC reads use the TPS embedded-controller path.
          * Keep that low-priority traffic out of the time-critical attach and
          * contract window.  TPS remains the sole owner of BQ power limits. */
         g_pm.bq_monitor_holdoff_until_ms =
             now_ms + PM_BQ_MONITOR_HOLDOFF_MS;
+    }
+    if ((event.new_contract_consumer || event.new_contract_provider ||
+         event.power_swap_complete) &&
+        (g_pm.bq_init == PM_BQ_INIT_DONE)) {
+        /* TPS can update BQ settings as part of a PD transition.  Audit the
+         * host-owned static fields after the time-critical contract window,
+         * repair only mismatches, and verify every write by reading it back. */
+        g_pm.bq_init = PM_BQ_INIT_READ_OPTION0;
+        g_pm.next_bq_action_ms = g_pm.bq_monitor_holdoff_until_ms;
+        Debug_Printf("[BQ-AUDIT] scheduled after PD contract");
     }
     if (event.plug_changed || event.power_swap_complete ||
         event.source_caps_received) {
@@ -1160,12 +1462,30 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_READ_LOCAL_SOURCE_CAPS) {
             memset(&g_pm.local_source_caps, 0,
                    sizeof(g_pm.local_source_caps));
-            g_pm.local_source_caps_pending = false;
             g_pm.local_source_caps_valid = false;
-            Debug_Printf("[PD-CAPS] TPS TX_SOURCE_CAPS read failed status=%s len=%u",
+            if (g_pm.local_source_caps_tries < PM_TX_CAPS_MAX_TRIES) {
+                g_pm.local_source_caps_tries++;
+                g_pm.local_source_caps_pending = true;
+                g_pm.local_source_caps_next_ms = now_ms + PM_TX_CAPS_RETRY_MS;
+            } else {
+                g_pm.local_source_caps_pending = false;
+            }
+            Debug_Printf("[PM] TX_SOURCE_CAPS read failed status=%s len=%u try=%u/%u",
                          TPS25751_StatusToString(operation_status),
-                         g_pm.tps.reported_length);
+                         g_pm.tps.reported_length,
+                         g_pm.local_source_caps_tries,
+                         PM_TX_CAPS_MAX_TRIES);
+        } else if (completed_job == PM_JOB_WRITE_LOCAL_SOURCE_CAPS) {
+            g_pm.tx_source_caps_write_pending = false;
+            Debug_Printf("[PM] TX_SOURCE_CAPS write failed status=%s",
+                         TPS25751_StatusToString(operation_status));
             PowerManager_HandleTpsError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_SEND_SSRC) {
+            g_pm.tx_source_caps_ssrc_pending = false;
+            g_pm.tx_source_caps_patched = true;
+            Debug_Printf("[PM] SSrC failed status=%s task=%u; patched PDOs still in TX_SOURCE_CAPS",
+                         TPS25751_StatusToString(operation_status),
+                         g_pm.tps.task_return_code);
         } else if (completed_job == PM_JOB_TRACE_SOURCE_CAPS) {
             memset(&g_pm.partner_source_caps, 0,
                    sizeof(g_pm.partner_source_caps));
@@ -1178,6 +1498,26 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                          (unsigned long)now_ms,
                          TPS25751_StatusToString(operation_status),
                          g_pm.tps.task_return_code);
+        } else if (completed_job == PM_JOB_BQ_TRACE_OPTION3) {
+            g_pm.bq_option3_trace_pending = false;
+            Debug_Printf("[BQ] post-contract Option3 read failed status=%s",
+                         TPS25751_StatusToString(operation_status));
+        } else if (completed_job == PM_JOB_BQ_WRITE_RUNTIME_OPTION3) {
+            g_pm.bq_option3_runtime_write_pending = false;
+            Debug_Printf("[BQ] runtime EN_OTG_BIGCAP write failed status=%s",
+                         TPS25751_StatusToString(operation_status));
+        } else if ((completed_job == PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE) ||
+                   (completed_job == PM_JOB_BQ_PRECHARGE_WRITE_OPTION3) ||
+                   (completed_job == PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE) ||
+                   (completed_job == PM_JOB_BQ_PRECHARGE_VERIFY_ADC)) {
+            g_pm.high_voltage_source_armed = false;
+            g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_DISABLE;
+            g_pm.bq_precharge_option3_target &=
+                (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+            g_pm.bq_precharge_next_ms = now_ms;
+            Debug_Printf("[BQ-RAMP] aborted job=%s status=%s; PDOs remain 5V only",
+                         PowerManager_JobToString(completed_job),
+                         TPS25751_StatusToString(operation_status));
         } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
                    (completed_job == PM_JOB_SWAP_TO_SINK)) {
             g_pm.policy_phase = PM_POLICY_DONE;
@@ -1223,6 +1563,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     g_pm.bq_init = PM_BQ_INIT_WAIT;
                     g_pm.local_source_caps_pending = true;
                     g_pm.local_source_caps_valid = false;
+                    g_pm.local_source_caps_tries = 0U;
+                    g_pm.local_source_caps_next_ms = now_ms + PM_TX_CAPS_RETRY_MS;
+                    g_pm.tx_source_caps_write_pending = false;
+                    g_pm.tx_source_caps_ssrc_pending = false;
+                    g_pm.tx_source_caps_patched = false;
                 }
                 PowerManager_SetState(POWER_MANAGER_TPS_READY);
             } else {
@@ -1231,6 +1576,9 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.mode_update_pending = true;
                 g_pm.local_source_caps_pending = false;
                 g_pm.local_source_caps_valid = false;
+                g_pm.tx_source_caps_write_pending = false;
+                g_pm.tx_source_caps_ssrc_pending = false;
+                g_pm.tx_source_caps_patched = false;
                 memset(&g_pm.local_source_caps, 0,
                        sizeof(g_pm.local_source_caps));
                 PowerManager_SetState(POWER_MANAGER_TPS_WAIT_APP);
@@ -1286,6 +1634,10 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.applied_mode_valid = true;
             g_pm.status.source_fault_latched = false;
             g_pm.next_tps_step_ms = now_ms + PM_TPS_STEP_MS;
+            Debug_Printf("[PM] USB %s applied TypeC=%u TrySrc=%u",
+                         PowerManager_UserModeToString(g_pm.status.applied_mode),
+                         (unsigned int)(g_pm.port_config[0] & 0x03U),
+                         (unsigned int)(g_pm.port_config[1] & 0x03U));
             break;
 
         case PM_JOB_READ_INT_MASK:
@@ -1311,6 +1663,9 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             if (g_pm.status.tps.attached &&
                 (g_pm.status.tps.role != old_role)) {
                 g_pm.pdo_report_pending = true;
+                if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) {
+                    g_pm.bq_option3_trace_pending = true;
+                }
                 if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
                     Debug_Printf("[PD-ROLE] %s -> %s conn=%u STATUS=0x%02lX%08lX",
                                  PowerManager_RoleToString(old_role),
@@ -1469,14 +1824,48 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 memset(&g_pm.local_source_caps, 0,
                        sizeof(g_pm.local_source_caps));
                 g_pm.local_source_caps_valid = false;
-                Debug_Printf("[PD-CAPS] invalid TPS TX_SOURCE_CAPS payload len=%u",
-                             length);
+                if (g_pm.local_source_caps_tries < PM_TX_CAPS_MAX_TRIES) {
+                    g_pm.local_source_caps_tries++;
+                    g_pm.local_source_caps_pending = true;
+                    g_pm.local_source_caps_next_ms = now_ms + PM_TX_CAPS_RETRY_MS;
+                }
+                Debug_Printf("[PM] TX_SOURCE_CAPS invalid len=%u try=%u/%u",
+                             length,
+                             g_pm.local_source_caps_tries,
+                             PM_TX_CAPS_MAX_TRIES);
                 break;
             }
             g_pm.local_source_caps_valid = true;
+            Debug_Printf("[PM] TX_SOURCE_CAPS count=%u max=%lumV drp=%u",
+                         g_pm.local_source_caps.count,
+                         (unsigned long)g_pm.local_source_caps.max_voltage_mv,
+                         g_pm.local_source_caps.first_pdo_dual_role_power ? 1U : 0U);
             PowerManager_LogCapabilities("TPS_TX_SOURCE",
                                          &g_pm.local_source_caps);
+            if (PowerManager_PrepareTxSourceCapsPatch(data, length)) {
+                g_pm.tx_source_caps_write_pending = true;
+                Debug_Printf("[PM] TX_SOURCE_CAPS safe patch: max=%lumV PDO1=PP5V DRP=0; then SSrC",
+                             (unsigned long)(g_pm.high_voltage_source_armed ?
+                                 PM_SOURCE_SAFE_MAX_MV : 5000U));
+            } else if (!g_pm.tx_source_caps_patched) {
+                Debug_Printf("[PM] TX_SOURCE_CAPS already fixed PDOs, no patch");
+            }
             PowerManager_TryLogContractPdos();
+            break;
+
+        case PM_JOB_WRITE_LOCAL_SOURCE_CAPS:
+            g_pm.tx_source_caps_write_pending = false;
+            g_pm.tx_source_caps_ssrc_pending = true;
+            break;
+
+        case PM_JOB_SEND_SSRC:
+            g_pm.tx_source_caps_ssrc_pending = false;
+            g_pm.tx_source_caps_patched = true;
+            g_pm.local_source_caps_pending = true;
+            g_pm.local_source_caps_valid = false;
+            Debug_Printf("[PM] SSrC ok; TX_SOURCE_CAPS safe max=%lumV PDO1=PP5V",
+                         (unsigned long)(g_pm.high_voltage_source_armed ?
+                             PM_SOURCE_SAFE_MAX_MV : 5000U));
             break;
 
         case PM_JOB_TRACE_SOURCE_CAPS:
@@ -1525,6 +1914,124 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.status.bq.iin_host = raw16;
             g_pm.status.bq.input_current_ma =
                 BQ25731_DecodeInputCurrentMa(raw16);
+            g_pm.bq_option3_trace_pending = true;
+            break;
+
+        case PM_JOB_BQ_TRACE_OPTION3:
+        {
+            uint16_t previous_option3 = g_pm.status.bq.charge_option3;
+            g_pm.bq_option3_trace_pending = false;
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqTelemetryError(
+                    TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_option3 = raw16;
+            if ((PM_VERBOSE_TRANSITION_LOGS != 0U) ||
+                ((raw16 & BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) == 0U) ||
+                (raw16 != previous_option3)) {
+                Debug_Printf("[BQ] post-contract EN_OTG_BIGCAP=%u Option3=0x%04X",
+                             (raw16 & BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) != 0U ?
+                             1U : 0U,
+                             raw16);
+            }
+            if (g_pm.status.tps.attached &&
+                (g_pm.status.tps.role == TPS25751_ROLE_SOURCE)) {
+                uint16_t wanted_option3 = BQ25731_BuildStartupOption3(raw16);
+                if (wanted_option3 != raw16) {
+                    g_pm.bq_startup_option3_target = wanted_option3;
+                    g_pm.bq_option3_runtime_write_pending = true;
+                }
+            }
+            break;
+        }
+
+        case PM_JOB_BQ_WRITE_RUNTIME_OPTION3:
+            g_pm.bq_option3_runtime_write_pending = false;
+            g_pm.bq_option3_trace_pending = true;
+            break;
+
+        case PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE:
+            if (g_pm.bq_precharge_phase == PM_BQ_PRECHARGE_SET_5V) {
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_ENABLE;
+                g_pm.bq_precharge_next_ms = now_ms;
+            } else if (g_pm.bq_precharge_phase == PM_BQ_PRECHARGE_RAMP) {
+                if (g_pm.bq_precharge_voltage_mv <
+                    PM_BQ_PRECHARGE_TARGET_MV) {
+                    uint32_t next_mv = g_pm.bq_precharge_voltage_mv +
+                                       PM_BQ_PRECHARGE_STEP_MV;
+                    g_pm.bq_precharge_voltage_mv =
+                        (next_mv < PM_BQ_PRECHARGE_TARGET_MV) ?
+                        next_mv : PM_BQ_PRECHARGE_TARGET_MV;
+                    g_pm.bq_precharge_next_ms =
+                        now_ms + PM_BQ_PRECHARGE_STEP_MS;
+                } else {
+                    g_pm.bq_precharge_phase =
+                        PM_BQ_PRECHARGE_VERIFY_VOLTAGE;
+                    g_pm.bq_precharge_next_ms =
+                        now_ms + PM_BQ_PRECHARGE_SETTLE_MS;
+                }
+            }
+            break;
+
+        case PM_JOB_BQ_PRECHARGE_WRITE_OPTION3:
+            if (g_pm.bq_precharge_phase == PM_BQ_PRECHARGE_ENABLE) {
+                g_pm.bq_precharge_voltage_mv =
+                    PM_BQ_PRECHARGE_START_MV + PM_BQ_PRECHARGE_STEP_MV;
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_RAMP;
+                g_pm.bq_precharge_next_ms =
+                    now_ms + PM_BQ_PRECHARGE_SETTLE_MS;
+            } else if (g_pm.bq_precharge_phase ==
+                       PM_BQ_PRECHARGE_DISABLE) {
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_IDLE;
+                g_pm.bq_precharge_next_ms = now_ms + PM_BQ_RETRY_MS;
+            }
+            break;
+
+        case PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid ||
+                (BQ25731_DecodeOtgVoltageMv(raw16) !=
+                 PM_BQ_PRECHARGE_TARGET_MV)) {
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_DISABLE;
+                g_pm.bq_precharge_option3_target &=
+                    (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+                g_pm.bq_precharge_next_ms = now_ms;
+                Debug_Printf("[BQ-RAMP] register verify failed raw=0x%04X; PDOs remain 5V only",
+                             raw16);
+            } else {
+                g_pm.status.bq.otg_voltage = raw16;
+                g_pm.status.bq.otg_voltage_mv =
+                    BQ25731_DecodeOtgVoltageMv(raw16);
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_VERIFY_ADC;
+                g_pm.bq_precharge_next_ms =
+                    now_ms + PM_BQ_PRECHARGE_SETTLE_MS;
+            }
+            break;
+
+        case PM_JOB_BQ_PRECHARGE_VERIFY_ADC:
+            if (!BQ25731_DecodeAdcBlock(&g_pm.status.bq, data, length) ||
+                (g_pm.status.bq.adc_vbus_mv <
+                 PM_BQ_PRECHARGE_ADC_MIN_MV) ||
+                (g_pm.status.bq.adc_vbus_mv >
+                 PM_BQ_PRECHARGE_ADC_MAX_MV)) {
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_DISABLE;
+                g_pm.bq_precharge_option3_target &=
+                    (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+                g_pm.bq_precharge_next_ms = now_ms;
+                Debug_Printf("[BQ-RAMP] ADC verify failed PPHV=%lumV; PDOs remain 5V only",
+                             (unsigned long)g_pm.status.bq.adc_vbus_mv);
+            } else {
+                g_pm.high_voltage_source_armed = true;
+                g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_IDLE;
+                g_pm.tx_source_caps_patched = false;
+                g_pm.local_source_caps_pending = true;
+                g_pm.local_source_caps_valid = false;
+                g_pm.local_source_caps_next_ms = now_ms;
+                Debug_Printf("[BQ-RAMP] VERIFIED PPHV=%lumV; enabling 5/9/15/20V PDOs, TPS remains runtime owner",
+                             (unsigned long)g_pm.status.bq.adc_vbus_mv);
+            }
             break;
 
         case PM_JOB_BQ_READ_OPTION0:
@@ -1551,7 +2058,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.bq_startup_option0_target =
                     BQ25731_BuildStartupOption0(raw16);
                 g_pm.bq_init =
-                    (g_pm.bq_startup_option0_target == raw16) ?
+                    (!g_pm.startup_auto_restore_pending &&
+                     (g_pm.bq_startup_option0_target == raw16)) ?
                     PM_BQ_INIT_READ_OPTION4 :
                     PM_BQ_INIT_WRITE_OPTION0;
             }
@@ -1580,20 +2088,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     break;
                 }
                 g_pm.bq_init = PM_BQ_INIT_READ_OPTION1;
-                Debug_Printf("[BQ-INIT] OOA=%u FSW=%lukHz DITHER=+/-%lu%% Option0=0x%04X Option4=0x%04X verified",
-                             (g_pm.status.bq.charge_option0 &
-                              BQ25731_CHARGE_OPTION0_EN_OOA) != 0U ? 1U : 0U,
-                             (unsigned long)BQ25731_DecodePwmFrequencyKhz(
-                                 g_pm.status.bq.charge_option0),
-                             (unsigned long)BQ25731_DecodeDitherPercent(
-                                 g_pm.status.bq.charge_option4),
-                             g_pm.status.bq.charge_option0,
-                             g_pm.status.bq.charge_option4);
             } else {
                 g_pm.bq_startup_option4_target =
                     BQ25731_BuildStartupOption4(raw16);
                 g_pm.bq_init =
-                    (g_pm.bq_startup_option4_target == raw16) ?
+                    (!g_pm.startup_auto_restore_pending &&
+                     (g_pm.bq_startup_option4_target == raw16)) ?
                     PM_BQ_INIT_READ_OPTION1 :
                     PM_BQ_INIT_WRITE_OPTION4;
             }
@@ -1611,12 +2111,14 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
                 break;
             }
+            g_pm.status.bq.charge_option1 = raw16;
             if (g_pm.bq_init == PM_BQ_INIT_READ_OPTION1) {
                 g_pm.bq_startup_option1_target =
                     BQ25731_BuildStartupOption1(raw16);
                 g_pm.bq_init =
-                    (g_pm.bq_startup_option1_target == raw16) ?
-                    PM_BQ_INIT_WRITE_ADC : PM_BQ_INIT_WRITE_OPTION1;
+                    (!g_pm.startup_auto_restore_pending &&
+                     (g_pm.bq_startup_option1_target == raw16)) ?
+                    PM_BQ_INIT_READ_OPTION3 : PM_BQ_INIT_WRITE_OPTION1;
             } else {
                 if ((raw16 & BQ25731_CHARGE_OPTION1_5MOHM_MASK) !=
                     BQ25731_CHARGE_OPTION1_5MOHM_MASK) {
@@ -1624,7 +2126,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                         TPS25751_COMMAND_ERROR, now_ms);
                     break;
                 }
-                g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+                g_pm.bq_init = PM_BQ_INIT_READ_OPTION3;
             }
             Debug_Printf("[BQ-INIT] RAC=5mOhm RSR=5mOhm FAST_5MOHM=1 Option1=0x%04X%s",
                          raw16,
@@ -1635,6 +2137,44 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_BQ_WRITE_STARTUP_OPTION1:
             g_pm.bq_init = PM_BQ_INIT_VERIFY_OPTION1;
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_READ_OPTION3:
+            raw16 = PowerManager_ResultLe16(&valid);
+            if (!valid) {
+                PowerManager_HandleBqError(TPS25751_BAD_LENGTH, now_ms);
+                break;
+            }
+            g_pm.status.bq.charge_option3 = raw16;
+            if (g_pm.bq_init == PM_BQ_INIT_READ_OPTION3) {
+                g_pm.bq_startup_option3_target =
+                    BQ25731_BuildStartupOption3(raw16);
+                g_pm.bq_init =
+                    (!g_pm.startup_auto_restore_pending &&
+                     (g_pm.bq_startup_option3_target == raw16)) ?
+                    PM_BQ_INIT_WRITE_ADC : PM_BQ_INIT_WRITE_OPTION3;
+            } else {
+                if ((raw16 & BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) !=
+                    (g_pm.bq_startup_option3_target &
+                     BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP)) {
+                    PowerManager_HandleBqError(
+                        TPS25751_COMMAND_ERROR, now_ms);
+                    break;
+                }
+                g_pm.bq_init = PM_BQ_INIT_WRITE_ADC;
+            }
+            Debug_Printf("[BQ-INIT] reduced-cap profile EN_OTG_BIGCAP=%u Option3=0x%04X%s",
+                         (raw16 & BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) != 0U ?
+                         1U : 0U,
+                         raw16,
+                         (g_pm.bq_init == PM_BQ_INIT_WRITE_OPTION3) ?
+                         " -> programming" : " verified");
+            g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
+            break;
+
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3:
+            g_pm.bq_init = PM_BQ_INIT_VERIFY_OPTION3;
             g_pm.next_bq_action_ms = now_ms + PM_BQ_INIT_STEP_MS;
             break;
 
@@ -1659,8 +2199,87 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.bq_init = PM_BQ_INIT_DONE;
             g_pm.next_bq_telemetry_ms = now_ms;
             g_pm.next_bq_config_ms = now_ms;
+            Debug_Printf("[BQ-CONFIG] %s VERIFIED OOA=%u FSW=%lukHz DITHER=+/-%lu%% BIGCAP=%u O0=0x%04X O1=0x%04X O3=0x%04X O4=0x%04X ADC=0x%04X",
+                         g_pm.startup_auto_restore_pending ?
+                         "WRITE+READBACK" : "AUDIT",
+                         (g_pm.status.bq.charge_option0 &
+                          BQ25731_CHARGE_OPTION0_EN_OOA) != 0U ? 1U : 0U,
+                         (unsigned long)BQ25731_DecodePwmFrequencyKhz(
+                             g_pm.status.bq.charge_option0),
+                         (unsigned long)BQ25731_DecodeDitherPercent(
+                             g_pm.status.bq.charge_option4),
+                         (g_pm.status.bq.charge_option3 &
+                          BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) != 0U ? 1U : 0U,
+                         g_pm.status.bq.charge_option0,
+                         g_pm.status.bq.charge_option1,
+                         g_pm.status.bq.charge_option3,
+                         g_pm.status.bq.charge_option4,
+                         g_pm.status.bq.adc_option);
+#if (PM_BQ_SCOPE_TEST != 0U)
+            g_pm.startup_auto_restore_pending = false;
+            g_pm.scope_phase = PM_SCOPE_SET_CURRENT;
+            g_pm.scope_next_ms = now_ms;
+            g_pm.scope_voltage_mv = 5000U;
+            g_pm.scope_option3_target =
+                (uint16_t)(g_pm.bq_startup_option3_target &
+                           (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG);
+            Debug_Printf("[SCOPE] READY USB-C=OFF BIGCAP=1: STEP then FAST-RAMP");
+#else
+            if (g_pm.startup_auto_restore_pending) {
+                g_pm.startup_auto_restore_pending = false;
+                g_pm.status.requested_mode = POWER_MANAGER_USER_AUTO;
+                g_pm.status.applied_mode_valid = false;
+                g_pm.mode_update_pending = true;
+                g_pm.port_write_pending = false;
+                PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
+            }
+#endif
             PowerManager_SetState(POWER_MANAGER_RUN);
-            Debug_Printf("[BQ] TPS owns PD and runtime limits; STM only applies startup RAC=5mOhm, RSR=5mOhm, fast compensation, quiet switching and ADC fields");
+#if (PM_BQ_SCOPE_TEST == 0U)
+            Debug_Printf("[BQ] startup verified; restoring USB AUTO after safe BQ configuration");
+#endif
+            break;
+
+        case PM_JOB_BQ_SCOPE_WRITE_CURRENT:
+            g_pm.scope_phase = PM_SCOPE_STEP_SET_5V;
+            g_pm.scope_voltage_mv = 5000U;
+            g_pm.scope_next_ms = now_ms;
+            break;
+
+        case PM_JOB_BQ_SCOPE_WRITE_VOLTAGE:
+            if (g_pm.scope_phase == PM_SCOPE_STEP_SET_5V) {
+                g_pm.scope_phase = PM_SCOPE_STEP_ENABLE;
+            } else if (g_pm.scope_phase == PM_SCOPE_STEP_SET_15V) {
+                g_pm.scope_phase = PM_SCOPE_STEP_WAIT_15V;
+                g_pm.scope_next_ms = now_ms + PM_SCOPE_HOLD_15V_MS;
+            } else if (g_pm.scope_phase == PM_SCOPE_RAMP_SET_5V) {
+                g_pm.scope_phase = PM_SCOPE_RAMP_ENABLE;
+            } else if (g_pm.scope_phase == PM_SCOPE_RAMP_WRITE) {
+                if (g_pm.scope_voltage_mv < 15000U) {
+                    g_pm.scope_voltage_mv += PM_SCOPE_RAMP_STEP_MV;
+                    g_pm.scope_next_ms = now_ms + PM_SCOPE_RAMP_STEP_MS;
+                } else {
+                    Debug_Printf("[SCOPE] RAMP END 15V");
+                    g_pm.scope_phase = PM_SCOPE_RAMP_WAIT_15V;
+                    g_pm.scope_next_ms = now_ms + PM_SCOPE_HOLD_15V_MS;
+                }
+            }
+            break;
+
+        case PM_JOB_BQ_SCOPE_WRITE_OPTION3:
+            if (g_pm.scope_phase == PM_SCOPE_STEP_ENABLE) {
+                g_pm.scope_phase = PM_SCOPE_STEP_WAIT_5V;
+                g_pm.scope_next_ms = now_ms + PM_SCOPE_HOLD_5V_MS;
+            } else if (g_pm.scope_phase == PM_SCOPE_STEP_DISABLE) {
+                g_pm.scope_phase = PM_SCOPE_BETWEEN_TESTS;
+                g_pm.scope_next_ms = now_ms + PM_SCOPE_PAUSE_MS;
+            } else if (g_pm.scope_phase == PM_SCOPE_RAMP_ENABLE) {
+                g_pm.scope_phase = PM_SCOPE_RAMP_WAIT_5V;
+                g_pm.scope_next_ms = now_ms + PM_SCOPE_HOLD_5V_MS;
+            } else if (g_pm.scope_phase == PM_SCOPE_RAMP_DISABLE) {
+                g_pm.scope_phase = PM_SCOPE_RESTART;
+                g_pm.scope_next_ms = now_ms + PM_SCOPE_PAUSE_MS;
+            }
             break;
 
         case PM_JOB_BQ_READ_ID:
@@ -1823,6 +2442,18 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                 &g_pm.tps, TPS25751_REG_TX_SOURCE_CAPS,
                 TPS25751_TX_SOURCE_CAPS_LEN);
             break;
+        case PM_JOB_WRITE_LOCAL_SOURCE_CAPS:
+            status = TPS25751_StartWriteRegister(
+                &g_pm.tps, TPS25751_REG_TX_SOURCE_CAPS,
+                g_pm.tx_source_caps,
+                (g_pm.tx_source_caps_len != 0U) ?
+                    g_pm.tx_source_caps_len :
+                    (uint8_t)TPS25751_TX_SOURCE_CAPS_LEN);
+            break;
+        case PM_JOB_SEND_SSRC:
+            status = TPS25751_StartCommand(&g_pm.tps, "SSrC",
+                                           NULL, 0U, 1U);
+            break;
         case PM_JOB_SWAP_TO_SOURCE:
             status = TPS25751_StartCommand(&g_pm.tps, "SWSr",
                                            NULL, 0U, 1U);
@@ -1834,6 +2465,41 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
         case PM_JOB_BQ_TRACE_IIN_HOST:
             bq_status = BQ25731_StartRead16(&g_pm.bq,
                                             BQ25731_REG_IIN_HOST);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_TRACE_OPTION3:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGE_OPTION3);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_RUNTIME_OPTION3:
+            bq_status = BQ25731_StartWriteStartupOption3(
+                &g_pm.bq, g_pm.bq_startup_option3_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE:
+            bq_status = BQ25731_StartWriteOtgVoltageMv(
+                &g_pm.bq, g_pm.bq_precharge_voltage_mv);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_PRECHARGE_WRITE_OPTION3:
+            bq_status = BQ25731_StartWriteStartupOption3(
+                &g_pm.bq, g_pm.bq_precharge_option3_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE:
+            bq_status = BQ25731_StartRead16(
+                &g_pm.bq, BQ25731_REG_OTG_VOLTAGE);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_PRECHARGE_VERIFY_ADC:
+            bq_status = BQ25731_StartReadAdcBlock(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
@@ -1873,6 +2539,18 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_BQ_READ_OPTION3:
+            bq_status = BQ25731_StartRead16(
+                &g_pm.bq, BQ25731_REG_CHARGE_OPTION3);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_WRITE_STARTUP_OPTION3:
+            bq_status = BQ25731_StartWriteStartupOption3(
+                &g_pm.bq, g_pm.bq_startup_option3_target);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
         case PM_JOB_BQ_WRITE_ADC:
             bq_status = BQ25731_StartConfigureMonitoringAdc(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
@@ -1901,6 +2579,23 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             break;
         case PM_JOB_BQ_READ_ADC_BLOCK:
             bq_status = BQ25731_StartReadAdcBlock(&g_pm.bq);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_SCOPE_WRITE_CURRENT:
+            bq_status = BQ25731_StartWriteOtgCurrentMa(&g_pm.bq, 1000U);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_SCOPE_WRITE_VOLTAGE:
+            bq_status = BQ25731_StartWriteOtgVoltageMv(
+                &g_pm.bq, g_pm.scope_voltage_mv);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
+            break;
+        case PM_JOB_BQ_SCOPE_WRITE_OPTION3:
+            bq_status = BQ25731_StartWriteStartupOption3(
+                &g_pm.bq, g_pm.scope_option3_target);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
@@ -1947,6 +2642,112 @@ static PowerManager_Job_t PowerManager_SelectBqTelemetryJob(void)
            PM_JOB_BQ_READ_STATUS_BLOCK : PM_JOB_BQ_READ_ADC_BLOCK;
 }
 
+static PowerManager_Job_t PowerManager_SelectBqPrechargeJob(uint32_t now_ms)
+{
+    bool path_safe;
+
+    if ((g_pm.bq_precharge_phase == PM_BQ_PRECHARGE_IDLE) ||
+        !PowerManager_TickReached(now_ms, g_pm.bq_precharge_next_ms)) {
+        return PM_JOB_NONE;
+    }
+
+    path_safe = g_pm.status.tps.attached &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+        g_pm.status.tps.active_pdo.valid &&
+        (g_pm.status.tps.active_pdo.max_voltage_mv <= 5000U) &&
+        (g_pm.status.tps.pp5v_state == 2U) &&
+        (g_pm.status.tps.pphv_state == 0U) &&
+        !g_pm.status.source_fault_latched;
+
+    if (!path_safe &&
+        (g_pm.bq_precharge_phase != PM_BQ_PRECHARGE_DISABLE)) {
+        g_pm.high_voltage_source_armed = false;
+        g_pm.bq_precharge_phase = PM_BQ_PRECHARGE_DISABLE;
+        g_pm.bq_precharge_option3_target &=
+            (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+        Debug_Printf("[BQ-RAMP] isolation lost; aborting and keeping PDOs at 5V");
+    }
+
+    switch (g_pm.bq_precharge_phase) {
+        case PM_BQ_PRECHARGE_SET_5V:
+        case PM_BQ_PRECHARGE_RAMP:
+            return PM_JOB_BQ_PRECHARGE_WRITE_VOLTAGE;
+        case PM_BQ_PRECHARGE_ENABLE:
+        case PM_BQ_PRECHARGE_DISABLE:
+            return PM_JOB_BQ_PRECHARGE_WRITE_OPTION3;
+        case PM_BQ_PRECHARGE_VERIFY_VOLTAGE:
+            return PM_JOB_BQ_PRECHARGE_VERIFY_VOLTAGE;
+        case PM_BQ_PRECHARGE_VERIFY_ADC:
+            return PM_JOB_BQ_PRECHARGE_VERIFY_ADC;
+        default:
+            return PM_JOB_NONE;
+    }
+}
+
+static PowerManager_Job_t PowerManager_SelectScopeJob(uint32_t now_ms)
+{
+#if (PM_BQ_SCOPE_TEST == 0U)
+    (void)now_ms;
+    return PM_JOB_NONE;
+#else
+    if ((g_pm.bq_init != PM_BQ_INIT_DONE) ||
+        (g_pm.scope_phase == PM_SCOPE_IDLE) ||
+        !PowerManager_TickReached(now_ms, g_pm.scope_next_ms)) {
+        return PM_JOB_NONE;
+    }
+
+    switch (g_pm.scope_phase) {
+        case PM_SCOPE_SET_CURRENT:
+            return PM_JOB_BQ_SCOPE_WRITE_CURRENT;
+        case PM_SCOPE_STEP_SET_5V:
+        case PM_SCOPE_STEP_SET_15V:
+        case PM_SCOPE_RAMP_SET_5V:
+        case PM_SCOPE_RAMP_WRITE:
+            return PM_JOB_BQ_SCOPE_WRITE_VOLTAGE;
+        case PM_SCOPE_STEP_DISABLE:
+        case PM_SCOPE_RAMP_DISABLE:
+            return PM_JOB_BQ_SCOPE_WRITE_OPTION3;
+        case PM_SCOPE_STEP_ENABLE:
+        case PM_SCOPE_RAMP_ENABLE:
+            g_pm.scope_option3_target |=
+                BQ25731_CHARGE_OPTION3_EN_OTG;
+            return PM_JOB_BQ_SCOPE_WRITE_OPTION3;
+        case PM_SCOPE_STEP_WAIT_5V:
+            Debug_Printf("[SCOPE] STEP 5V->15V NOW");
+            g_pm.scope_voltage_mv = 15000U;
+            g_pm.scope_phase = PM_SCOPE_STEP_SET_15V;
+            return PM_JOB_BQ_SCOPE_WRITE_VOLTAGE;
+        case PM_SCOPE_STEP_WAIT_15V:
+            g_pm.scope_option3_target &=
+                (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+            g_pm.scope_phase = PM_SCOPE_STEP_DISABLE;
+            return PM_JOB_BQ_SCOPE_WRITE_OPTION3;
+        case PM_SCOPE_BETWEEN_TESTS:
+            g_pm.scope_voltage_mv = 5000U;
+            g_pm.scope_phase = PM_SCOPE_RAMP_SET_5V;
+            return PM_JOB_BQ_SCOPE_WRITE_VOLTAGE;
+        case PM_SCOPE_RAMP_WAIT_5V:
+            Debug_Printf("[SCOPE] RAMP 5V->15V START");
+            g_pm.scope_voltage_mv = 5200U;
+            g_pm.scope_phase = PM_SCOPE_RAMP_WRITE;
+            return PM_JOB_BQ_SCOPE_WRITE_VOLTAGE;
+        case PM_SCOPE_RAMP_WAIT_15V:
+            g_pm.scope_option3_target &=
+                (uint16_t)~BQ25731_CHARGE_OPTION3_EN_OTG;
+            g_pm.scope_phase = PM_SCOPE_RAMP_DISABLE;
+            return PM_JOB_BQ_SCOPE_WRITE_OPTION3;
+        case PM_SCOPE_RESTART:
+            ++g_pm.scope_cycle;
+            Debug_Printf("[SCOPE] CYCLE %lu", (unsigned long)g_pm.scope_cycle);
+            g_pm.scope_voltage_mv = 5000U;
+            g_pm.scope_phase = PM_SCOPE_STEP_SET_5V;
+            return PM_JOB_BQ_SCOPE_WRITE_VOLTAGE;
+        default:
+            return PM_JOB_NONE;
+    }
+#endif
+}
+
 static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
 {
     if ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
@@ -1980,6 +2781,8 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
 static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
 {
     PowerManager_Job_t policy_job;
+    PowerManager_Job_t precharge_job;
+    PowerManager_Job_t scope_job;
 
     if (g_pm.status.tps.mode != TPS25751_MODE_APP) {
         if ((g_pm.status.tps.mode == TPS25751_MODE_PTCH) &&
@@ -1990,8 +2793,35 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
                PM_JOB_READ_MODE : PM_JOB_NONE;
     }
 
+    scope_job = PowerManager_SelectScopeJob(now_ms);
+#if (PM_BQ_SCOPE_TEST != 0U)
+    if (g_pm.scope_phase != PM_SCOPE_IDLE) {
+        return scope_job;
+    }
+#endif
+    if (scope_job != PM_JOB_NONE) {
+        return scope_job;
+    }
+
+    precharge_job = PowerManager_SelectBqPrechargeJob(now_ms);
+    if (precharge_job != PM_JOB_NONE) {
+        return precharge_job;
+    }
+
     if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
         return PM_JOB_READ_MODE;
+    }
+    /* Sanitize Source PDOs before changing the boot-time port mode.  This
+     * prevents AUTO from briefly advertising a stale high-voltage profile. */
+    if (g_pm.local_source_caps_pending &&
+        PowerManager_TickReached(now_ms, g_pm.local_source_caps_next_ms)) {
+        return PM_JOB_READ_LOCAL_SOURCE_CAPS;
+    }
+    if (g_pm.tx_source_caps_write_pending) {
+        return PM_JOB_WRITE_LOCAL_SOURCE_CAPS;
+    }
+    if (g_pm.tx_source_caps_ssrc_pending) {
+        return PM_JOB_SEND_SSRC;
     }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
@@ -2008,14 +2838,17 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.event_clear_pending) {
         return PM_JOB_CLEAR_EVENT;
     }
-    if (g_pm.local_source_caps_pending) {
-        return PM_JOB_READ_LOCAL_SOURCE_CAPS;
-    }
     if (g_pm.source_caps_trace_pending) {
         return PM_JOB_TRACE_SOURCE_CAPS;
     }
     if (g_pm.bq_iin_trace_pending) {
         return PM_JOB_BQ_TRACE_IIN_HOST;
+    }
+    if (g_pm.bq_option3_trace_pending) {
+        return PM_JOB_BQ_TRACE_OPTION3;
+    }
+    if (g_pm.bq_option3_runtime_write_pending) {
+        return PM_JOB_BQ_WRITE_RUNTIME_OPTION3;
     }
 
     policy_job = PowerManager_SelectPolicyJob(now_ms);
@@ -2053,6 +2886,11 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
                 return PM_JOB_BQ_READ_OPTION1;
             case PM_BQ_INIT_WRITE_OPTION1:
                 return PM_JOB_BQ_WRITE_STARTUP_OPTION1;
+            case PM_BQ_INIT_READ_OPTION3:
+            case PM_BQ_INIT_VERIFY_OPTION3:
+                return PM_JOB_BQ_READ_OPTION3;
+            case PM_BQ_INIT_WRITE_OPTION3:
+                return PM_JOB_BQ_WRITE_STARTUP_OPTION3;
             case PM_BQ_INIT_WRITE_ADC: return PM_JOB_BQ_WRITE_ADC;
             case PM_BQ_INIT_VERIFY_ADC: return PM_JOB_BQ_VERIFY_ADC;
             default: break;
@@ -2087,8 +2925,12 @@ void PowerManager_Init(I2C_HandleTypeDef *hi2c)
     memset(&g_pm, 0, sizeof(g_pm));
     g_pm.hi2c = hi2c;
     g_pm.status.state = POWER_MANAGER_INIT;
-    g_pm.status.requested_mode = POWER_MANAGER_USER_AUTO;
+    /* Keep the port disabled until BQ startup fields (especially
+     * EN_OTG_BIGCAP) are written and verified.  This prevents changing the
+     * OTG control profile while a source contract is already active. */
+    g_pm.status.requested_mode = POWER_MANAGER_USER_OFF;
     g_pm.status.applied_mode = POWER_MANAGER_USER_OFF;
+    g_pm.startup_auto_restore_pending = true;
     g_pm.status.tps_status = TPS25751_INVALID_ARG;
     g_pm.status.bq_status = BQ25731_NOT_READY;
     g_pm.mode_update_pending = true;
@@ -2152,6 +2994,7 @@ void PowerManager_Task(void)
     }
 
     PowerManager_MaintainPolicy(now_ms);
+    PowerManager_MaybeStartBqPrecharge(now_ms);
     next_job = PowerManager_SelectJob(now_ms);
     if (next_job == PM_JOB_NONE) {
         return;
@@ -2180,6 +3023,9 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
     if (mode > POWER_MANAGER_USER_OFF) {
         return false;
     }
+    /* An explicit command always wins over the automatic boot-time AUTO
+     * restore, including an explicit request to remain OFF. */
+    g_pm.startup_auto_restore_pending = false;
     if (g_pm.status.requested_mode != mode) {
         g_pm.status.requested_mode = mode;
         g_pm.mode_update_pending = true;

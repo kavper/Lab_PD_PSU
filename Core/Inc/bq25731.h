@@ -10,11 +10,14 @@
 #define BQ25731_I2C_ADDR_7BIT           0x6BU
 
 #define BQ25731_REG_CHARGE_OPTION0      0x00U
+#define BQ25731_REG_OTG_VOLTAGE         0x06U
+#define BQ25731_REG_OTG_CURRENT         0x08U
 #define BQ25731_REG_IIN_HOST            0x0EU
 #define BQ25731_REG_CHARGER_STATUS      0x20U
 #define BQ25731_REG_ADC_VBUS_PSYS       0x26U
 #define BQ25731_REG_MANUFACTURER_ID     0x2EU
 #define BQ25731_REG_CHARGE_OPTION1      0x30U
+#define BQ25731_REG_CHARGE_OPTION3      0x34U
 #define BQ25731_REG_ADC_OPTION          0x3AU
 #define BQ25731_REG_CHARGE_OPTION4      0x3CU
 
@@ -28,6 +31,13 @@
 #define BQ25731_CHARGE_OPTION0_PWM_FREQ 0x0200U
 #define BQ25731_CHARGE_OPTION4_DITHER_MASK 0x1800U
 #define BQ25731_CHARGE_OPTION1_5MOHM_MASK  0x0D00U
+/* ChargeOption3 spans 0x34 (low byte) and 0x35 (high byte).
+ * EN_OTG_BIGCAP is REG0x35[0], hence bit 8 in our little-endian uint16_t. */
+#define BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP 0x0100U
+#define BQ25731_CHARGE_OPTION3_EN_OTG        0x1000U
+/* Three PPHV capacitors were removed for the reduced-capacitance hardware
+ * trial.  Keep this at 0 while the effective VBUS capacitance is below 33 uF. */
+#define BQ25731_OTG_BIGCAP_REQUIRED              0U
 /* Monitoring ADC configuration shared with startup verification. */
 #define BQ25731_ADC_OPTION_MONITORING   0xE05FU
 /* ADC_START (bit 14) is a trigger and may read back as zero. Verify the
@@ -57,6 +67,8 @@ typedef struct {
     uint8_t manufacturer_id;
     uint8_t device_id;
     uint16_t charge_option0;
+    uint16_t charge_option1;
+    uint16_t charge_option3;
     uint16_t charge_option4;
     uint16_t adc_option;
     uint16_t charge_voltage;
@@ -108,6 +120,12 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption4(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartWriteStartupOption1(
     BQ25731_Device_t *dev, uint16_t value);
+BQ25731_Status_t BQ25731_StartWriteStartupOption3(
+    BQ25731_Device_t *dev, uint16_t value);
+BQ25731_Status_t BQ25731_StartWriteOtgVoltageMv(
+    BQ25731_Device_t *dev, uint32_t voltage_mv);
+BQ25731_Status_t BQ25731_StartWriteOtgCurrentMa(
+    BQ25731_Device_t *dev, uint32_t current_ma);
 BQ25731_Status_t BQ25731_StartConfigureMonitoringAdc(
     BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
@@ -115,6 +133,7 @@ BQ25731_Status_t BQ25731_MapTpsStatus(TPS25751_Status_t status);
 uint16_t BQ25731_BuildStartupOption0(uint16_t current);
 uint16_t BQ25731_BuildStartupOption4(uint16_t current);
 uint16_t BQ25731_BuildStartupOption1(uint16_t current);
+uint16_t BQ25731_BuildStartupOption3(uint16_t current);
 uint32_t BQ25731_DecodePwmFrequencyKhz(uint16_t option0);
 uint32_t BQ25731_DecodeDitherPercent(uint16_t option4);
 uint32_t BQ25731_DecodeChargeVoltageMv(uint16_t raw);

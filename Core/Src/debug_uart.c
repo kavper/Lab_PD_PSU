@@ -27,7 +27,52 @@ static volatile bool debug_dma_ready = false;
 static volatile bool debug_blocking_ready = false;
 static volatile bool debug_tx_pending_session_eol = false;
 
+static volatile uint8_t debug_level = DEBUG_LEVEL_DEFAULT;
+
 static void Debug_EnqueueBytes(const uint8_t *data, uint32_t length);
+
+void Debug_SetLevel(uint8_t level)
+{
+    debug_level = (level > DEBUG_LEVEL_VERBOSE) ? DEBUG_LEVEL_VERBOSE : level;
+}
+
+uint8_t Debug_GetLevel(void)
+{
+    return debug_level;
+}
+
+/* Central verbosity filter. Returns true when a message with the given format
+ * prefix should be emitted at the current level. Command replies and the "T"
+ * telemetry line use HostLink_Tx (a separate path) and are never gated here. */
+static bool Debug_LevelAllows(const char *fmt)
+{
+    uint8_t level = debug_level;
+
+    if (level >= DEBUG_LEVEL_VERBOSE) {
+        return true;
+    }
+
+    /* Large periodic dumps: verbose only. */
+    if ((strncmp(fmt, "[MON", 4) == 0) ||
+        (strncmp(fmt, "[PD-PDO", 7) == 0) ||
+        (strncmp(fmt, "[PD-TYPEC", 9) == 0) ||
+        (strncmp(fmt, "[PD-TRACE", 9) == 0) ||
+        (strncmp(fmt, "[GUI-PD", 7) == 0)) {
+        return false;
+    }
+
+    if (level >= DEBUG_LEVEL_NORMAL) {
+        return true;
+    }
+
+    /* MIN: only concise status, faults and errors. */
+    return (strncmp(fmt, "[PD]", 4) == 0) ||
+           (strncmp(fmt, "[PD-WARN", 8) == 0) ||
+           (strncmp(fmt, "[PM]", 4) == 0) ||
+           (strncmp(fmt, "[PM-ERR", 7) == 0) ||
+           (strncmp(fmt, "[FAULT", 6) == 0) ||
+           (strncmp(fmt, "[BQ", 3) == 0);
+}
 
 static void Debug_RestoreIrq(uint32_t primask)
 {
@@ -260,20 +305,9 @@ void Debug_Printf(const char *fmt, ...)
         return;
     }
 
-#if (DEBUG_LOG_NON_BQ == 0U)
-    if ((strncmp(fmt, "[BQ", 3U) != 0) &&
-        (strncmp(fmt, "[TPS", 4U) != 0) &&
-        (strncmp(fmt, "[PD", 3U) != 0) &&
-        (strncmp(fmt, "[PM", 3U) != 0) &&
-        (strncmp(fmt, "[MON", 4U) != 0) &&
-        (strncmp(fmt, "[APP", 4U) != 0) &&
-        (strncmp(fmt, "[UART", 5U) != 0) &&
-        (strncmp(fmt, "[LDO", 4U) != 0) &&
-        (strncmp(fmt, "[PRE", 4U) != 0) &&
-        (strncmp(fmt, "[FAULT", 6U) != 0)) {
+    if (!Debug_LevelAllows(fmt)) {
         return;
     }
-#endif
 
     va_start(args, fmt);
     length = vsnprintf(buffer, sizeof(buffer), fmt, args);

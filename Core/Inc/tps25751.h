@@ -136,6 +136,7 @@ typedef struct {
     bool pp5v_overcurrent;
     bool ppcable_overcurrent;
     uint8_t hard_reset_reason;
+    uint8_t error_recovery_reason;
 
     uint32_t vbus_mv;
     uint32_t active_pdo_raw;

@@ -590,6 +590,8 @@ void TPS25751_DecodePdStatus(TPS25751_Telemetry_t *telemetry,
     telemetry->pd_status_raw = TPS25751_ReadLe32(data);
     telemetry->hard_reset_reason =
         (uint8_t)((telemetry->pd_status_raw >> 16) & 0x3FU);
+    telemetry->error_recovery_reason =
+        (uint8_t)((telemetry->pd_status_raw >> 22) & 0x3FU);
 }
 
 void TPS25751_DecodeTypecState(
