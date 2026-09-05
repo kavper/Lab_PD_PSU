@@ -480,6 +480,23 @@ static void LdoLink_HandleNackLine(const char *line)
     }
 }
 
+static bool LdoLink_LineIsAscii(const char *line)
+{
+    const unsigned char *p;
+
+    if (line == NULL) {
+        return false;
+    }
+
+    for (p = (const unsigned char *)line; *p != '\0'; p++) {
+        if ((*p < 0x20U) || (*p > 0x7EU)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static void LdoLink_HandleTlmLine(const char *line)
 {
     uint8_t value;
@@ -543,6 +560,11 @@ static void LdoLink_HandleTlmLine(const char *line)
 static void LdoLink_HandleRxLine(const char *line)
 {
     s_status.rx_lines++;
+
+    if (!LdoLink_LineIsAscii(line)) {
+        s_status.rx_errors++;
+        return;
+    }
 
     if (strncmp(line, "TLM ", 4U) == 0) {
         LdoLink_HandleTlmLine(line);

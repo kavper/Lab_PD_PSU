@@ -51,7 +51,8 @@ static bool Prereg_FaultBlocksDcdc(const char *fault)
     if (Prereg_FaultIsNone(fault)) {
         return false;
     }
-    if (strcmp(fault, "VIN_LOW") == 0) {
+    /* Keep DCDC up on VIN_LOW and on shredded UART copies of that token. */
+    if (strncmp(fault, "VIN_", 4) == 0) {
         return false;
     }
     return true;
@@ -292,9 +293,10 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
          * Do not drop DCDC on VIN_LOW — that fault is caused by a low
          * pre-reg rail; disabling DCDC makes the death spiral worse.
          */
+        /* pgood is for G0 permit/OUT, not for keeping the pre-reg alive.
+         * A garbled TLM with pgood=0 used to drop DCDC and latch VIN_LOW. */
         want_enable = (ldo.output_on || LdoLink_IsOutputWanted()) &&
                       (!Prereg_FaultBlocksDcdc(ldo.fault)) &&
-                      (ldo.pgood != 0U) &&
                       (!s_force_disable);
 
         Prereg_UpdateSlew(request_v, dt_s, Prereg_NeedVinFloor(&ldo));

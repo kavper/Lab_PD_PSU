@@ -94,6 +94,24 @@ static bool Meas_EnsureCircularDma(ADC_HandleTypeDef *hadc)
     return true;
 }
 
+/*
+ * HAL_ADC_Start_DMA() arms DMA HT/TC and ADC OVR IRQs. At 500 kHz with
+ * postscaler 0 that is ~31 kHz of priority-1 ISRs and can starve USART2
+ * (G0 link, priority 5) into ORE. Measurements already poll DMA NDTR.
+ */
+static void Meas_QuietAdcIrqs(ADC_HandleTypeDef *hadc)
+{
+    if (hadc == NULL) {
+        return;
+    }
+
+    __HAL_ADC_DISABLE_IT(hadc, ADC_IT_OVR | ADC_IT_EOC | ADC_IT_EOS);
+
+    if (hadc->DMA_Handle != NULL) {
+        __HAL_DMA_DISABLE_IT(hadc->DMA_Handle, DMA_IT_HT | DMA_IT_TC);
+    }
+}
+
 static bool Meas_LatestSlot(ADC_HandleTypeDef *hadc,
                             uint32_t dma_length,
                             uint32_t channels,
@@ -266,6 +284,9 @@ void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2)
         g_meas_ctx.last_error = MEAS_ERR_DMA_START_ADC2;
         return;
     }
+
+    Meas_QuietAdcIrqs(hadc1);
+    Meas_QuietAdcIrqs(hadc2);
 
     g_meas_ctx.dma_running = true;
     g_meas_ctx.initialized = true;

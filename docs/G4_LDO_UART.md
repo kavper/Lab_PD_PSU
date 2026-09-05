@@ -98,7 +98,7 @@ Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=
 |---|---|
 | `vout_mv≈8000`, `mode=CV`, `g0_tlm=0` | DCDC OK; final LDO not talking / not ON |
 | `g0_rx` stuck at 1, `g0_age_ms` climbing | One noise byte then silence — isolator / TX-RX / G0 not streaming |
-| `g0_err>0`, `g0_uart=0x…` | Framing/noise (`0x4` FE, `0x8` NE, `0x1` ORE) |
+| `g0_err>0`, `g0_uart=0x…` | HAL UART error latch: `0x1` PE, `0x2` NE, `0x4` FE, `0x8` ORE |
 | `g0_tlm` rising, forwarded `TLM …` lines | Link OK — check G0 LED / `kill=` / `pgood=` / `out=` |
 | `permit=1` but G0 `kill=1` | Firmware was driving PERMIT on wrong pad (was PB6/REMOTE_ON); must be **PB7** |
 
