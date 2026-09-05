@@ -4,6 +4,7 @@
 #include "debug_uart.h"
 #include "fan_pwm.h"
 #include "host_link.h"
+#include "ldo_ctrl_policy.h"
 #include "ldo_prereg.h"
 #include "ldo_tlm_parse.h"
 
@@ -20,6 +21,7 @@
 #define LDO_CMD_RETRY_MAX            8U
 #define LDO_VIN_MIN_MV               4500U
 #define LDO_VOUT_ZERO_MV             250U
+#define LDO_LIVE_SET_MIN_MS          80U
 #define LDO_V_MIN                    0.0f
 #define LDO_V_MAX                    27.0f
 #define LDO_I_MIN                    0.0f
@@ -54,6 +56,7 @@ static bool s_output_wanted;
 static float s_g0_volts = LDO_DEFAULT_V;
 static float s_g0_amps = LDO_DEFAULT_I;
 static bool s_setpoint_dirty;
+static uint32_t s_last_live_set_ms;
 static LdoLink_CtrlState_t s_ctrl;
 static LdoPendingCmd_t s_pending;
 static uint32_t s_pending_since_ms;
@@ -426,8 +429,8 @@ static bool LdoLink_SendOutOff(uint32_t now_ms)
 
 static void LdoLink_HandleAckLine(const char *line)
 {
-    /* USART1 is host+debug — forward once via host link only. */
-    HostLink_ForwardLine(line);
+    /* USART1 is host telemetry — G0 ACK stays on USART2 unless VERBOSE. */
+    HostLink_ForwardG0Line(line);
     s_status.ack_ok_count++;
 
     if (strstr(line, "ACK SET") != NULL) {
@@ -452,7 +455,7 @@ static void LdoLink_HandleNackLine(const char *line)
 {
     size_t len;
 
-    HostLink_ForwardLine(line);
+    HostLink_ForwardG0Line(line);
 
     s_status.nack_count++;
     s_nack_seen = true;
@@ -581,8 +584,8 @@ static void LdoLink_HandleTlmLine(const char *line)
     }
     LdoLink_ParseFaultToken(line);
 
-    /* Same USART1 as host debug — forward once (no Debug_Write duplicate). */
-    HostLink_ForwardLine(line);
+    /* Do not mirror TLM onto USART1; H7 already has g0_vout_mv on T. */
+    HostLink_ForwardG0Line(line);
 }
 
 static void LdoLink_HandleRxLine(const char *line)
@@ -736,7 +739,8 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
     case LDO_G0_CTRL_WAIT_SET_ACK:
         if (s_ack_set_ok) {
             s_retry_count = 0U;
-            if (s_status.vout_mv > LDO_VOUT_ZERO_MV) {
+            if (Ldo_SetAckRequiresVoutZero(false) &&
+                (s_status.vout_mv > LDO_VOUT_ZERO_MV)) {
                 LdoLink_EnterState(LDO_G0_CTRL_WAIT_VOUT_ZERO, now_ms);
             } else {
                 LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
@@ -831,9 +835,24 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
             LdoLink_HardKillFromFault("TLM kill=1");
             break;
         }
-        if (s_setpoint_dirty) {
-            s_retry_count = 0U;
-            LdoLink_EnterState(LDO_G0_CTRL_SEND_SET, now_ms);
+        if (s_nack_seen && (s_pending == LDO_PENDING_SET)) {
+            s_nack_seen = false;
+            s_pending = LDO_PENDING_NONE;
+            s_setpoint_dirty = true;
+        }
+        if ((s_pending == LDO_PENDING_SET) && LdoLink_PendingTimedOut(now_ms)) {
+            s_status.cmd_timeout_count++;
+            s_pending = LDO_PENDING_NONE;
+            s_setpoint_dirty = true;
+        }
+        if (s_setpoint_dirty &&
+            (s_pending == LDO_PENDING_NONE) &&
+            Ldo_LiveSetIntervalElapsed(now_ms, s_last_live_set_ms,
+                                       LDO_LIVE_SET_MIN_MS)) {
+            if (LdoLink_SendSet(now_ms)) {
+                s_last_live_set_ms = now_ms;
+                s_retry_count = 0U;
+            }
         }
         break;
 
@@ -888,6 +907,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_g0_volts = LDO_DEFAULT_V;
     s_g0_amps = LDO_DEFAULT_I;
     s_setpoint_dirty = false;
+    s_last_live_set_ms = 0U;
     s_ctrl = LDO_G0_CTRL_IDLE;
     s_retry_count = 0U;
     s_state_since_ms = HAL_GetTick();
@@ -904,7 +924,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
     LdoLink_ArmRx();
-    Debug_Printf("[LDO] USART2 G0 link ready (TLM forward + SET/OUT control)\r\n");
+    Debug_Printf("[LDO] USART2 G0 link ready (TLM parsed; not forwarded to host)\r\n");
 #if (BOARD_USART2_G0_PIN_SWAP != 0U)
     Debug_Printf("[LDO] USART2 TX/RX SWAP=1 at boot (G0SWAP 0|1 to change)\r\n");
 #else

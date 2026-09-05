@@ -66,10 +66,10 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 | `PERMIT 0\|1` | Force G0 kill assert / clear (**PB7**) |
 | `REMOTE 0\|OFF` | Local sense (default) |
 | `REMOTE 1\|ON` | Enable remote sense path |
-| `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame |
+| `TEL` / `?` / `STATUS` | One or periodic `T`/`TB`/`TC` machine frame. `TEL < 200` keeps `T` fast and `TB`/`TC` at 200 ms. |
 | `BMS` | Soft: skip CFGUPDATE if already healthy; else full 4S reinit |
 | `BMS FORCE` / `BMSREINIT` | Full CFGUPDATE + ALL_FETS_ON (may bus-hold + reboot) |
-| `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7) |
+| `VERBOSE 0\|1` | Debug spam on USART1 (default **0** — keep clean for H7). `VERBOSE 1` also mirrors G0 TLM/ACK onto USART1. |
 
 ## BMS (4S pack, skip VC4)
 
@@ -84,7 +84,7 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 1. Flash G0 + G4. Connect isolator UART (115200).
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
 3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends `SET V=… I=…` → `OUT ON` to G0.
-4. Watch forwarded `TLM` (`out=1 kill=0 outoff=0`) and host `T` (`g0_want=1 g0_ctrl=… g0_out=1`).
+4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
 
 Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=5.000 I=0.100` until `SET`/`ILIM`). Host **`OFF`** / **`PERMIT 0`** sends `OUT OFF`, forces **PB7** low (LDO zabity), and stops DCDC.
 
@@ -99,7 +99,7 @@ Host **`ON`** starts G4 DCDC pre-reg **and** the G0 ASCII sequencer (default `V=
 | `vout_mv≈8000`, `mode=CV`, `g0_tlm=0` | DCDC OK; final LDO not talking / not ON |
 | `g0_rx` stuck at 1, `g0_age_ms` climbing | One noise byte then silence — isolator / TX-RX / G0 not streaming |
 | `g0_err>0`, `g0_uart=0x…` | HAL UART error latch: `0x1` PE, `0x2` NE, `0x4` FE, `0x8` ORE |
-| `g0_tlm` rising, forwarded `TLM …` lines | Link OK — check G0 LED / `kill=` / `pgood=` / `out=` |
+| `g0_tlm` rising, `g0_vout_mv` tracking | Link OK — check G0 LED / `g0_kill` / `pgood` via G0 TLM on USART2, `g0_out` on `T` |
 | `permit=1` but G0 `kill=1` | Firmware was driving PERMIT on wrong pad (was PB6/REMOTE_ON); must be **PB7** |
 
 Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).

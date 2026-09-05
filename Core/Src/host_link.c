@@ -10,13 +10,16 @@
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
+#include "host_link_policy.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
+#define HOST_LINK_RX_Q               4U
 #define HOST_LINK_TX_MAX             768U
+#define HOST_LINK_TX_RING            2048U
 #define HOST_LINK_TEL_DEFAULT_MS     500U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -24,10 +27,18 @@ static uint32_t s_boot_reset_flags;
 static uint8_t s_rx_byte;
 static char s_rx_line[HOST_LINK_RX_LINE_MAX];
 static volatile uint8_t s_rx_len;
-static volatile bool s_line_ready;
 static volatile bool s_rx_overflow;
+static char s_rx_q[HOST_LINK_RX_Q][HOST_LINK_RX_LINE_MAX];
+static volatile uint8_t s_rx_q_head;
+static volatile uint8_t s_rx_q_tail;
+static volatile uint8_t s_rx_q_count;
+static uint8_t s_tx_ring[HOST_LINK_TX_RING];
+static volatile uint16_t s_tx_head;
+static volatile uint16_t s_tx_tail;
+static volatile uint16_t s_tx_used;
 static uint32_t s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
 static uint32_t s_last_tel_ms;
+static uint32_t s_last_tb_ms;
 
 static void HostLink_ArmRx(void)
 {
@@ -36,9 +47,27 @@ static void HostLink_ArmRx(void)
     }
 }
 
+static void HostLink_TxPump(void)
+{
+    if (s_huart == NULL) {
+        return;
+    }
+
+    while (s_tx_used > 0U) {
+        if (__HAL_UART_GET_FLAG(s_huart, UART_FLAG_TXE) == RESET) {
+            break;
+        }
+        s_huart->Instance->TDR = s_tx_ring[s_tx_tail];
+        s_tx_tail = (uint16_t)((s_tx_tail + 1U) % HOST_LINK_TX_RING);
+        s_tx_used--;
+    }
+}
+
 static void HostLink_Tx(const char *text)
 {
     size_t len;
+    size_t i;
+    uint32_t primask;
 
     if ((s_huart == NULL) || (text == NULL)) {
         return;
@@ -47,7 +76,24 @@ static void HostLink_Tx(const char *text)
     if (len == 0U) {
         return;
     }
-    (void)HAL_UART_Transmit(s_huart, (uint8_t *)text, (uint16_t)len, 80U);
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (((uint32_t)s_tx_used + (uint32_t)len) >= HOST_LINK_TX_RING) {
+        if (primask == 0U) {
+            __enable_irq();
+        }
+        return;
+    }
+    for (i = 0U; i < len; i++) {
+        s_tx_ring[s_tx_head] = (uint8_t)text[i];
+        s_tx_head = (uint16_t)((s_tx_head + 1U) % HOST_LINK_TX_RING);
+        s_tx_used++;
+    }
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    HostLink_TxPump();
 }
 
 static int32_t HostLink_Mv(float volts)
@@ -82,7 +128,7 @@ static const char *HostLink_ModeName(void)
     }
 }
 
-static void HostLink_SendMachineTelemetry(void)
+static void HostLink_SendMachineTelemetry(bool with_bms)
 {
     char line[HOST_LINK_TX_MAX];
     BQ76922_Snapshot_t bms;
@@ -98,7 +144,11 @@ static void HostLink_SendMachineTelemetry(void)
     int n;
     int16_t dV;
 
-    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    /* Leave room for SET/ON while a previous T/TB/TC is still shifting out. */
+    if (s_tx_used > (HOST_LINK_TX_RING / 2U)) {
+        return;
+    }
+
     pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
     LdoPrereg_GetStatus(&prereg);
     LdoLink_GetStatus(&ldo);
@@ -109,8 +159,6 @@ static void HostLink_SendMachineTelemetry(void)
     } else {
         g0_age_ms = 0xFFFFFFFFu;
     }
-
-    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
 
     /* T — PSU / G0 / PD core (stable keys for H7 parser) */
     n = snprintf(line, sizeof(line),
@@ -170,6 +218,13 @@ static void HostLink_SendMachineTelemetry(void)
     if (n > 0) {
         HostLink_Tx(line);
     }
+
+    if (!with_bms) {
+        return;
+    }
+
+    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
 
     /* TB — full BMS snapshot (cells, pack/stack V, pack I, FETs, safety) */
     n = snprintf(line, sizeof(line),
@@ -269,7 +324,7 @@ static void HostLink_SendMachineTelemetry(void)
 
 static void HostLink_SendTelemetry(void)
 {
-    HostLink_SendMachineTelemetry();
+    HostLink_SendMachineTelemetry(true);
 }
 
 static bool HostLink_EqToken(const char *s, const char *token)
@@ -371,7 +426,7 @@ static void HostLink_SendHelp(void)
         "  SET <V> / ILIM <A>\r\n"
         "  PERMIT 0|1      PB7 kill / allow\r\n"
         "  REMOTE ON|OFF   sense path\r\n"
-        "  TEL [ms]        periodic T/TB/TC (0=off, default 500)\r\n"
+        "  TEL [ms]        T period (0=off, default 500; TB/TC >=200 ms)\r\n"
         "  ? / STATUS      one T/TB/TC frame now\r\n"
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
@@ -381,7 +436,7 @@ static void HostLink_SendHelp(void)
         "  BMS OTP BURN I-UNDERSTAND-OTP   one-shot OTP program (lab only)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
-        "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
+        "Parse: T/TB/TC only. G0 TLM is not forwarded. See docs/HOST_TELEMETRY.md\r\n");
 }
 
 static void HostLink_SendStatus(void)
@@ -402,6 +457,9 @@ static void HostLink_HandleLine(char *line)
         line++;
     }
     if (*line == '\0') {
+        return;
+    }
+    if (!HostLink_LooksLikeHostCommand(line)) {
         return;
     }
 
@@ -724,10 +782,16 @@ void HostLink_Init(UART_HandleTypeDef *huart)
 
     s_huart = huart;
     s_rx_len = 0U;
-    s_line_ready = false;
     s_rx_overflow = false;
+    s_rx_q_head = 0U;
+    s_rx_q_tail = 0U;
+    s_rx_q_count = 0U;
+    s_tx_head = 0U;
+    s_tx_tail = 0U;
+    s_tx_used = 0U;
     s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
     s_last_tel_ms = HAL_GetTick();
+    s_last_tb_ms = s_last_tel_ms;
     HostLink_ArmRx();
     HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
     n = snprintf(line, sizeof(line),
@@ -742,7 +806,7 @@ void HostLink_Init(UART_HandleTypeDef *huart)
     if (n > 0) {
         HostLink_Tx(line);
     }
-    HostLink_Tx("USART1 = T/TB/TC telemetry only (VERBOSE 0). Send HELP.\r\n");
+    HostLink_Tx("USART1 = T/TB/TC only; G0 TLM not forwarded (VERBOSE 0). Send HELP.\r\n");
     HostLink_SendHelp();
 }
 
@@ -750,22 +814,29 @@ void HostLink_Task(void)
 {
     uint32_t now_ms;
     char line[HOST_LINK_RX_LINE_MAX];
+    uint32_t bms_ms;
+    bool with_bms;
 
     if (s_huart == NULL) {
         return;
     }
 
-    if (s_line_ready) {
+    HostLink_TxPump();
+
+    while (s_rx_q_count > 0U) {
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
-        memcpy(line, s_rx_line, sizeof(line));
-        s_line_ready = false;
-        s_rx_len = 0U;
+        memcpy(line, s_rx_q[s_rx_q_tail], sizeof(line));
+        s_rx_q_tail = (uint8_t)((s_rx_q_tail + 1U) % HOST_LINK_RX_Q);
+        s_rx_q_count--;
         if (primask == 0U) {
             __enable_irq();
         }
         HostLink_HandleLine(line);
-    } else if (s_rx_overflow) {
+        HostLink_TxPump();
+    }
+
+    if (s_rx_overflow) {
         s_rx_overflow = false;
         HostLink_Tx("ERR LINE\r\n");
     }
@@ -774,8 +845,15 @@ void HostLink_Task(void)
     if ((s_tel_period_ms > 0U) &&
         ((uint32_t)(now_ms - s_last_tel_ms) >= s_tel_period_ms)) {
         s_last_tel_ms = now_ms;
-        HostLink_SendTelemetry();
+        bms_ms = HostLink_BmsPeriodMs(s_tel_period_ms);
+        with_bms = ((uint32_t)(now_ms - s_last_tb_ms) >= bms_ms);
+        HostLink_SendMachineTelemetry(with_bms);
+        if (with_bms) {
+            s_last_tb_ms = now_ms;
+        }
     }
+
+    HostLink_TxPump();
 }
 
 void HostLink_ForwardLine(const char *line)
@@ -785,6 +863,14 @@ void HostLink_ForwardLine(const char *line)
     }
     HostLink_Tx(line);
     HostLink_Tx("\r\n");
+}
+
+void HostLink_ForwardG0Line(const char *line)
+{
+    if (!HostLink_ShouldForwardG0Line(line, Debug_IsEnabled())) {
+        return;
+    }
+    HostLink_ForwardLine(line);
 }
 
 void HostLink_OnUartError(UART_HandleTypeDef *huart)
@@ -806,16 +892,20 @@ void HostLink_RxCplt(UART_HandleTypeDef *huart)
     if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
         if (s_rx_len > 0U) {
             s_rx_line[s_rx_len] = '\0';
-            s_line_ready = true;
+            if (s_rx_q_count < HOST_LINK_RX_Q) {
+                memcpy(s_rx_q[s_rx_q_head], s_rx_line, sizeof(s_rx_line));
+                s_rx_q_head = (uint8_t)((s_rx_q_head + 1U) % HOST_LINK_RX_Q);
+                s_rx_q_count++;
+            } else {
+                s_rx_overflow = true;
+            }
             s_rx_len = 0U;
         }
-    } else if (!s_line_ready) {
-        if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
-            s_rx_line[s_rx_len++] = (char)ch;
-        } else {
-            s_rx_overflow = true;
-            s_rx_len = 0U;
-        }
+    } else if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
+        s_rx_line[s_rx_len++] = (char)ch;
+    } else {
+        s_rx_overflow = true;
+        s_rx_len = 0U;
     }
 
     HostLink_ArmRx();
