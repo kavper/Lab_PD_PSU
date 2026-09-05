@@ -205,7 +205,11 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
     /* USER CODE BEGIN ADC2_MspInit 1 */
-
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitStruct.Pin = I_IN_BUCK_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(I_IN_BUCK_GPIO_Port, &GPIO_InitStruct);
     /* USER CODE END ADC2_MspInit 1 */
   }
 
@@ -281,7 +285,7 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     /* USER CODE END ADC2:ADC1_2_IRQn disable */
 
     /* USER CODE BEGIN ADC2_MspDeInit 1 */
-
+    HAL_GPIO_DeInit(I_IN_BUCK_GPIO_Port, I_IN_BUCK_Pin);
     /* USER CODE END ADC2_MspDeInit 1 */
   }
 

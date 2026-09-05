@@ -239,7 +239,8 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-  /* Rank 1 PA0 ADC1_IN1 ADC_VBAT = VIN. Rank 2 PA3 ADC1_IN4 I_OUT_BOOST INA296. */
+  /* Rank 1 PA0 ADC1_IN1 ADC_VBAT = VIN. Rank 2 PA3 ADC1_IN4 I_OUT_BOOST INA296.
+   * I_IN_BUCK is ADC2 rank 2 so both INA296 channels convert in parallel. */
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -267,11 +268,11 @@ static void MX_ADC2_Init(void)
   hadc2.Init.Resolution = ADC_RESOLUTION_12B;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc2.Init.LowPowerAutoWait = DISABLE;
   hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.NbrOfConversion = 2;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
   hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIG_HRTIM_TRG1;
   hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
@@ -295,8 +296,18 @@ static void MX_ADC2_Init(void)
   {
     Error_Handler();
   }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN ADC2_Init 2 */
-  /* Rank 1 PB2 ADC2_IN12 ADC_VOUT. Matches measurements.c DMA slot 0. */
+  /* Rank 1 PB2 ADC2_IN12 ADC_VOUT. Rank 2 PA1 ADC2_IN2 I_IN_BUCK INA296.
+   * Matches measurements.c DMA slots 0/1. ACS37100 I_L_MEAS is not sampled. */
   /* USER CODE END ADC2_Init 2 */
 
 }

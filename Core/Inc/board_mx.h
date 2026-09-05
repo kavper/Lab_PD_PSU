@@ -10,9 +10,9 @@
  * CubeMX-safe extras. Call only from USER CODE blocks in generated files.
  * CubeMX will not delete this file.
  *
- * HRTIM FLT3 (ACS37100, active low) is in the IOC: source, polarity, timer
- * fault enable, output inactive. CubeMX G4 still omits FaultModeCtl and
- * sometimes fault blanking — BoardMx_ApplyHrtimFault() finishes that.
+ * HRTIM FLT3 (ACS37100 series inductor, active low) stays in the IOC pinout
+ * but is disabled: current protection is high-side INA296 OCP, not I_L_MEAS.
+ * BoardMx_ApplyHrtimFault() turns FLT3 and timer fault enables off.
  */
 HAL_StatusTypeDef BoardMx_StartHsiPll(void);
 HAL_StatusTypeDef BoardMx_EnsureSysclkPll(void);

@@ -10,14 +10,20 @@ typedef struct {
     float vout;
     float iout;
     float vbat;
+    float i_hs_buck;   /* I_IN_BUCK INA296, DMA-window average + IIR */
+    float i_hs_boost;  /* I_OUT_BOOST INA296, DMA-window average + IIR */
     uint16_t raw_vin;
     uint16_t raw_vout;
     uint16_t raw_iout;
+    uint16_t raw_i_hs_buck;
+    uint16_t raw_i_hs_boost;
     bool valid;
 } Measurements_t;
 
 /* CubeMX ADC ranks (Lab_PD_PSU.ioc) must match DMA unpacking in measurements.c:
- * ADC1 rank1 PA0 ADC_VBAT VIN, rank2 PA3 I_OUT_BOOST, ADC2 rank1 PB2 ADC_VOUT. */
+ * ADC1 rank1 PA0 ADC_VBAT VIN, rank2 PA3 I_OUT_BOOST.
+ * ADC2 rank1 PB2 ADC_VOUT, rank2 PA1 I_IN_BUCK.
+ * ACS37100 I_L_MEAS is not sampled. */
 
 void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2);
 bool Measurements_Update(Measurements_t *meas);

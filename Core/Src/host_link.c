@@ -104,8 +104,9 @@ static void HostLink_SendMachineTelemetry(void)
 
     /* T — PSU / G0 / PD core (stable keys for H7 parser) */
     n = snprintf(line, sizeof(line),
-                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
-                 "duty_ppm=%lu run=%u mode=%s fault=%lu "
+                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld i_buck_ma=%ld i_boost_ma=%ld "
+                 "set_mv=%ld ilim_ma=%ld "
+                 "duty_ppm=%lu ucc_a=%u ucc_c=%u run=%u mode=%s fault=%lu "
                  "pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u "
                  "g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
@@ -116,11 +117,15 @@ static void HostLink_SendMachineTelemetry(void)
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
+                 (long)HostLink_Ma(App_GetHsBuckCurrent()),
+                 (long)HostLink_Ma(App_GetHsBoostCurrent()),
                  (long)HostLink_Mv(LdoLink_IsOutputWanted() || LdoPrereg_IsG0Active()
                                    ? LdoLink_GetG0Voltage()
                                    : App_GetCvSetpoint()),
                  (long)HostLink_Ma(LdoLink_GetG0Current()),
                  (unsigned long)(PowerStage_GetDutyA() * 1000000.0f + 0.5f),
+                 (unsigned int)(PowerStage_IsBuckTrEnActive() ? 1U : 0U),
+                 (unsigned int)(PowerStage_IsBoostTrEnActive() ? 1U : 0U),
                  (unsigned int)PSU_IsRunning(),
                  HostLink_ModeName(),
                  (unsigned long)App_GetFaultFlags(),

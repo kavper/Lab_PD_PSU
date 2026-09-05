@@ -315,14 +315,14 @@ static bool PowerStage_IsBoostRefreshEnabled(void)
 }
 
 /* True when commanded HS duty is so high that LS never refreshes bootstrap. */
-static bool PowerStage_NeedsHsBootstrapSupport(uint32_t hs_duty_10k)
+static bool PowerStage_NeedsHsBootstrapSupport(uint32_t hs_duty_10k, bool currently_active)
 {
 #if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE == 0U)
     (void)hs_duty_10k;
+    (void)currently_active;
     return false;
 #else
-    return (PowerStage_Clamp10k(hs_duty_10k) >=
-            POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K);
+    return Dcdc_UccNeededForHsDuty(hs_duty_10k, currently_active);
 #endif
 }
 
@@ -870,7 +870,7 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.tr_en_c_active = false;
     ps.tr_en_rise_ms = 0U;
 
-    /* ACS37100 FAULT is HRTIM_FLT3 (PB10), configured as AF in CubeMX. */
+    /* ACS37100 FAULT (HRTIM_FLT3 / PB10) is ignored; OCP uses INA296 HS shunts. */
 
     PowerStage_SetIsolatedSupplies(false);
 
@@ -1020,9 +1020,11 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             hs_a_10k = duty_a_10k;
             hs_c_10k = POWER_STAGE_DUTY_SCALE;
             need_a = PowerStage_IsBuckRefreshEnabled() &&
-                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k);
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
             need_c = PowerStage_IsBuckRefreshEnabled() &&
-                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k);
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
 
             ps.duty_a_10k = duty_a_10k;
             ps.duty_b_10k = 0U;
@@ -1067,9 +1069,11 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
                        0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
             need_a = PowerStage_IsBoostRefreshEnabled() &&
-                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k);
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
             need_c = PowerStage_IsBoostRefreshEnabled() &&
-                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k);
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
 
             ps.duty_a_10k = POWER_STAGE_DUTY_SCALE;
             ps.duty_b_10k = duty_b_10k;
@@ -1113,8 +1117,10 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             hs_a_10k = duty_a_10k;
             hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
                        0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
-            need_a = PowerStage_NeedsHsBootstrapSupport(hs_a_10k);
-            need_c = PowerStage_NeedsHsBootstrapSupport(hs_c_10k);
+            need_a = PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
+            need_c = PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
 
             ps.duty_a_10k = duty_a_10k;
             ps.duty_b_10k = duty_b_10k;
@@ -1376,12 +1382,9 @@ PowerStage_Region_t PowerStage_GetRegion(void)
 
 bool PowerStage_IsFaultActive(void)
 {
-    if (HAL_GPIO_ReadPin(FLT_GPIO_Port, FLT_Pin) == GPIO_PIN_RESET) {
-        return true;
-    }
-
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    /* TR_FLT feedback only for legs whose UCC EN is asserted (after settle). */
+    /* TR_FLT feedback only for legs whose UCC EN is asserted (after settle).
+     * ACS37100 / HRTIM_FLT3 (series inductor) is not a driver fault. */
     if ((ps.tr_en_a_active || ps.tr_en_c_active) &&
         ((HAL_GetTick() - ps.tr_en_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
         if (ps.tr_en_a_active && PowerStage_BuckTrFaultActive()) {

@@ -18,6 +18,8 @@ Use `boot rcc_csr` to see why the MCU restarted (pin / BOR / software / IWDG).
 On `TEL [ms]` or `?` / `STATUS`:
 
 1. `T …` — PSU / G0 / PD / pre-reg  
+   Extra DCDC keys: `i_buck_ma` / `i_boost_ma` (INA296 high-side averages), `ucc_a` / `ucc_c` (UCC33420 EN, HS duty ≥ 97%).  
+   On high-side OCP the G4 also emits a one-shot `E OCP …` line with both branch currents.  
 2. `TB …` — BMS  
 3. `TC …` — BQ25731 + TPS  
 
@@ -135,7 +137,7 @@ If FETs stay off after a button wake: **TP28 ≈ 0 V**, release the button fully
 |---|---|---|---|
 | **BQ76922 pack** (`i_pack_ma` / `i_cc2_ma`) | **5 mΩ** SRP–SRN | `BMS_SENSE_MOHM` → `CC Gain` / `Capacity Gain` in CFGUPDATE | OTP default is ~1 mΩ → readings were ~**5× too high** until `CC Gain=7.5684/5=1.51368`. **Already in this FW** — schematic 5 mΩ is correct; not the `chg=0` root cause |
 | **BQ25731 charger** | **5 mΩ** RAC/RSR | `power_manager` Option1 `FAST_5MOHM` | Already programmed at BQ init. Also at init via TPS I2C passthrough `0x6B`: Option0 `EN_OOA|PWM_FREQ=400kHz` (`0x0400|0x0200`), Option4 dither ±6% (`0x1800`), Option3 `EN_OTG_BIGCAP` (no HW VBUS slew bit — TPS owns `OTGVoltage`) |
-| **DCDC / INA296** (`iout` on T line) | **1 mΩ** in `board_rev.h` | `BOARD_INA296_SHUNT_OHM` | Separate from BMS pack sense |
+| **DCDC INA296 high-side** (`iout_ma` / `i_buck_ma` / `i_boost_ma` on T) | **1 mΩ** in `board_rev.h` | `BOARD_INA296_SHUNT_OHM` | Buck HS = `I_IN_BUCK`, boost HS = `I_OUT_BOOST`. ACS37100 series `I_L_MEAS` is ignored. |
 
 BMS protection numbers after CFGUPDATE:
 
