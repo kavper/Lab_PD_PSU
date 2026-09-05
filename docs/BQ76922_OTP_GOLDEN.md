@@ -15,6 +15,8 @@ Sources: BQ76922 DS (TS2 wake), TRM SLUUCG7, TI E2E (FET_EN + FET_INIT_OFF=0).
 | `0x9343` | Mfg Status Init | **`0x0050`** | `0x0040` PF_EN + **`0x0010` FET_EN** |
 | `0x9308` | FET Options | **`0x1D`** | PDSG_EN\|FET_CTRL_EN\|HOST_FET_EN\|SFET; **FET_INIT_OFF=0** |
 | `0x9304` | Vcell Mode | **`0x0017`** | Cells 1/2/3/5, skip VC4 |
+| `0x9236` | REG1 Config | **`0x0D`** | REG1 enabled at 3.3 V |
+| `0x9237` | REG0 Config | **`0x01`** | REG0/BREG preregulator enabled |
 
 Without FET_EN or with FET_INIT_OFF=1, host must still send FET commands.
 Wrong Vcell Mode → CUV on empty VC4 → FETs stay off.
@@ -56,6 +58,8 @@ bqStudio: enter decimals. Manual I2C: IEEE-754 little-endian.
 | `0x930E` | Predischarge Timeout | **`0x32`** | ~500 ms — only if PDSG FET+R fitted |
 | `0x930F` | Predischarge Stop Delta | **50** | ×10 mV = 500 mV |
 | `0x92FE` | TS2 Config | **`0x00`** | Not a thermistor; TS2 wake still works |
+| `0x930A` | Precharge Start Voltage | **`0`** | No PCHG path fitted |
+| `0x930C` | Precharge Stop Voltage | **`0`** | No PCHG path fitted |
 | `0x9254` | Auto Shutdown Time | **`0`** | Else wake without I2C may re-enter SHUTDOWN |
 
 Confirm in bqStudio: `Power:Shutdown:Auto Shutdown Time` = **0**.
@@ -65,9 +69,15 @@ Confirm in bqStudio: `Power:Shutdown:Auto Shutdown Time` = **0**.
 Normal boot / wake **only writes RAM**. OTP is burned **once** via USART1:
 
 1. Pack on balance cable. Apply **BAT 10–12 V** (OTP requirement).
-2. `BMS OTP STATUS` → expect `check=0x80`, `full=1`, `otpb=0`.
-3. `BMS OTP BURN I-UNDERSTAND-OTP` → one-shot; refused again this boot.
-4. `BMS SHUTDOWN` → short TS2 release (do **not** hold — soft-SHUTDOWN) → FETs on.
+2. `BMS OTP STATUS` → expect `full=1` and the expected RAM values. `OTPB=1`
+   is normal outside `CONFIG_UPDATE`; only `CHECK` evaluates real burn conditions.
+3. `BMS OTP CHECK` → stages the complete golden map in RAM, exits
+   `CONFIG_UPDATE`, reads every field back, re-enters `CONFIG_UPDATE`, checks
+   `OTPB`, and runs `OTP_WR_CHECK`; expect `check=0x80`.
+4. `BMS OTP BURN I-UNDERSTAND-OTP` → repeats the full preflight, programs once,
+   waits at least 100 ms, resets the AFE, and verifies that the complete map
+   reloaded from OTP. It is refused again during the same MCU boot.
+5. `BMS SHUTDOWN` → short TS2 release (do **not** hold — soft-SHUTDOWN) → FETs on.
 
 With OTP burned, G4 wake path **skips CFGUPDATE** when RAM already shows
 `Vcell=0x0017` + `FET Options=0x1D`, then issues `ALL_FETS_ON` (does not toggle

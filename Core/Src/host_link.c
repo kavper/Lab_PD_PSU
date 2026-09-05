@@ -554,8 +554,8 @@ static void HostLink_HandleLine(char *line)
                 (void)snprintf(msg, sizeof(msg),
                     "OK BMS OTP STATUS batt=0x%04X mfg_init=0x%04X "
                     "vcell=0x%04X fet_opt=0x%02X want=0x%02X match=%u "
-                    "full=%u otpb=%u burned=%u "
-                    "(ro; next BMS OTP CHECK @ BAT 10-12V)\r\n",
+                    "full=%u otpb_now=%u burned=%u "
+                    "(ro; OTPB is normally 1 outside CFGUPDATE; CHECK tests it)\r\n",
                     (unsigned)rep.battery_status,
                     (unsigned)rep.mfg_status_init,
                     (unsigned)rep.vcell_mode,
@@ -578,7 +578,7 @@ static void HostLink_HandleLine(char *line)
                 (void)snprintf(msg, sizeof(msg),
                     "%s BMS OTP CHECK check=0x%02X fail_addr=0x%04X "
                     "nodata=%u nosig=%u "
-                    "(0x80=can burn golden/0x1D; FETs reinited after CFGUPDATE)\r\n",
+                    "(0x80=golden readback verified + can burn; FETs reinited)\r\n",
                     (st == BQ76922_OK) ? "OK" : "ERR",
                     (unsigned)check,
                     (unsigned)fail,
@@ -623,7 +623,7 @@ static void HostLink_HandleLine(char *line)
                 }
                 (void)snprintf(msg, sizeof(msg),
                     "OK BMS OTP BURNED check=0x%02X write=0x%02X — "
-                    "verify: BMS OTP STATUS (want match=1), then "
+                    "cold-reset golden verified; then "
                     "BMS SHUTDOWN + short TS2.\r\n",
                     (unsigned)check, (unsigned)result);
                 HostLink_Tx(msg);

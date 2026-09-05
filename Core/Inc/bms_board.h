@@ -107,6 +107,15 @@
  */
 #define BMS_CFETOFF_PIN_CONFIG           0x00U
 #define BMS_DFETOFF_PIN_CONFIG           0x00U
+/* HW rev2 uses the BQ7692202-style regulator setup: REG0 feeds REGIN and
+ * REG1 is enabled at 3.3 V.  These values must survive a hostless wake. */
+#define BMS_REG1_CONFIG                  0x0DU
+#define BMS_REG0_CONFIG                  0x01U
+/* TS2 is a wake push-button, not a thermistor/ADC input. */
+#define BMS_TS2_CONFIG                   0x00U
+/* No PCHG hardware is fitted.  Keep precharge disabled; PDSG is independent. */
+#define BMS_PCHG_START_MV                0U
+#define BMS_PCHG_STOP_MV                 0U
 /* Predischarge Timeout 0x930E (U1, ~10 ms/step); Stop Delta 0x930F (U1, 10 mV). */
 #define BMS_PDSG_TIMEOUT                 0x32U  /* ~500 ms max predischarge */
 #define BMS_PDSG_STOP_DELTA              50U    /* exit PDSG when |stack-pack| < 500 mV */

@@ -28,9 +28,12 @@
 #define BQ76922_SUBCMD_ALL_FETS_ON       0x0096U
 #define BQ76922_SUBCMD_SLEEP_DISABLE     0x009AU
 #define BQ76922_SUBCMD_MANUF_STATUS      0x0057U
+#define BQ76922_SUBCMD_RESET             0x0012U
 #define BQ76922_SUBCMD_OTP_WR_CHECK      0x00A0U
 #define BQ76922_SUBCMD_OTP_WRITE         0x00A1U
 
+#define BQ76922_RAM_REG1_CONFIG          0x9236U
+#define BQ76922_RAM_REG0_CONFIG          0x9237U
 #define BQ76922_RAM_VCELL_MODE           0x9304U
 #define BQ76922_RAM_ENABLED_PROT_A       0x9261U
 #define BQ76922_RAM_ENABLED_PROT_B       0x9262U
@@ -47,7 +50,10 @@
 #define BQ76922_RAM_CAPACITY_GAIN        0x91ACU
 #define BQ76922_RAM_CFETOFF_PIN_CONFIG   0x92FAU
 #define BQ76922_RAM_DFETOFF_PIN_CONFIG   0x92FBU
+#define BQ76922_RAM_TS2_CONFIG           0x92FEU
 #define BQ76922_RAM_FET_OPTIONS          0x9308U
+#define BQ76922_RAM_PCHG_START           0x930AU
+#define BQ76922_RAM_PCHG_STOP            0x930CU
 #define BQ76922_RAM_PDSG_TIMEOUT         0x930EU
 #define BQ76922_RAM_PDSG_STOP_DELTA      0x930FU
 #define BQ76922_RAM_MFG_STATUS_INIT      0x9343U
@@ -316,7 +322,12 @@ static BQ76922_Status_t BQ76922_WriteRamBlock(BQ76922_Device_t *dev,
 
     checksum_block[0] = (uint8_t)(~sum & 0xFFU);
     checksum_block[1] = (uint8_t)(block_len + 2U); /* +2 per TI / BQ769x2_SetRegister */
-    return BQ76922_WriteDirect(dev, BQ76922_CMD_RAM_CHECKSUM, checksum_block, 2U);
+    status = BQ76922_WriteDirect(dev, BQ76922_CMD_RAM_CHECKSUM, checksum_block, 2U);
+    if (status == BQ76922_OK) {
+        /* Data Memory needs time to commit before the next address is issued. */
+        HAL_Delay(3U);
+    }
+    return status;
 }
 
 static BQ76922_Status_t BQ76922_WriteRamU1(BQ76922_Device_t *dev,
@@ -1182,23 +1193,6 @@ static BQ76922_Status_t BQ76922_WaitSubcommandDone(BQ76922_Device_t *dev,
     return BQ76922_NOT_READY;
 }
 
-static BQ76922_Status_t BQ76922_CallSubcommandU1(BQ76922_Device_t *dev,
-                                                 uint16_t subcmd,
-                                                 uint8_t *out)
-{
-    BQ76922_Status_t status;
-
-    status = BQ76922_SendSubcommand(dev, subcmd);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WaitSubcommandDone(dev, subcmd);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    return BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, out, 1U);
-}
-
 /* OTP_WR_CHECK / OTP_WRITE: byte0 = status; if No_DATA, byte1:2 = fail addr. */
 static BQ76922_Status_t BQ76922_CallOtpStatus(BQ76922_Device_t *dev,
                                               uint16_t subcmd,
@@ -1211,6 +1205,12 @@ static BQ76922_Status_t BQ76922_CallOtpStatus(BQ76922_Device_t *dev,
     status = BQ76922_SendSubcommand(dev, subcmd);
     if (status != BQ76922_OK) {
         return status;
+    }
+    /* TI SLUAA32A requires 100 ms before reading OTP_WRITE result.  Polling
+     * 0x3E immediately is insufficient: the command echo can already match
+     * while programming is still in progress. */
+    if (subcmd == BQ76922_SUBCMD_OTP_WRITE) {
+        HAL_Delay(100U);
     }
     status = BQ76922_WaitSubcommandDone(dev, subcmd);
     if (status != BQ76922_OK) {
@@ -1239,6 +1239,7 @@ static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
                                              uint8_t length)
 {
     uint8_t addr[2];
+    uint8_t echo[2];
     BQ76922_Status_t status;
 
     if ((data == NULL) || (length == 0U) || (length > 4U)) {
@@ -1250,7 +1251,14 @@ static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
     if (status != BQ76922_OK) {
         return status;
     }
-    HAL_Delay(2U);
+    HAL_Delay(3U);
+    status = BQ76922_ReadDirect(dev, BQ76922_CMD_SUBCMD_LOW, echo, 2U);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    if ((echo[0] != addr[0]) || (echo[1] != addr[1])) {
+        return BQ76922_I2C_ERROR;
+    }
     return BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, data, length);
 }
 
@@ -1300,11 +1308,46 @@ static BQ76922_Status_t BQ76922_OtpEnterCfgupdate(BQ76922_Device_t *dev)
     return BQ76922_NOT_READY;
 }
 
+static BQ76922_Status_t BQ76922_OtpExitCfgupdate(BQ76922_Device_t *dev)
+{
+    BQ76922_Status_t status;
+    uint32_t t0;
+
+    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    t0 = HAL_GetTick();
+    do {
+        status = BQ76922_ReadBatteryStatus(dev);
+        if (status != BQ76922_OK) {
+            return status;
+        }
+        if ((dev->snapshot.battery_status & BQ76922_BATT_CFGUPDATE) == 0U) {
+            HAL_Delay(20U);
+            return BQ76922_OK;
+        }
+        HAL_Delay(5U);
+    } while ((uint32_t)(HAL_GetTick() - t0) < 500U);
+
+    return BQ76922_NOT_READY;
+}
+
 static BQ76922_Status_t BQ76922_OtpWriteGolden(BQ76922_Device_t *dev)
 {
     BQ76922_Status_t status;
 
-    /* Minimal golden for autonomous TS2 wake — same values as CFGUPDATE path. */
+    /* Complete golden needed for autonomous TS2 wake. */
+    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_REG1_CONFIG,
+                                BMS_REG1_CONFIG);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_REG0_CONFIG,
+                                BMS_REG0_CONFIG);
+    if (status != BQ76922_OK) {
+        return status;
+    }
     status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
     if (status != BQ76922_OK) {
         return status;
@@ -1372,6 +1415,11 @@ static BQ76922_Status_t BQ76922_OtpWriteGolden(BQ76922_Device_t *dev)
     if (status != BQ76922_OK) {
         return status;
     }
+    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_TS2_CONFIG,
+                                BMS_TS2_CONFIG);
+    if (status != BQ76922_OK) {
+        return status;
+    }
     status = BQ76922_WriteRamU1(dev, BQ76922_RAM_FET_OPTIONS, BMS_FET_OPTIONS);
     if (status != BQ76922_OK) {
         return status;
@@ -1383,6 +1431,16 @@ static BQ76922_Status_t BQ76922_OtpWriteGolden(BQ76922_Device_t *dev)
     }
     status = BQ76922_WriteRamU1(dev, BQ76922_RAM_AUTO_SHUTDOWN_TIME,
                                 BMS_AUTO_SHUTDOWN_TIME);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_PCHG_START,
+                                BMS_PCHG_START_MV);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_PCHG_STOP,
+                                BMS_PCHG_STOP_MV);
     if (status != BQ76922_OK) {
         return status;
     }
@@ -1402,6 +1460,122 @@ static BQ76922_Status_t BQ76922_OtpWriteGolden(BQ76922_Device_t *dev)
     return BQ76922_WriteRamU2(dev, BQ76922_RAM_BODY_DIODE,
                                BMS_BODY_DIODE_THRESHOLD_MA);
 }
+
+static BQ76922_Status_t BQ76922_VerifyRamU1(BQ76922_Device_t *dev,
+                                             uint16_t address,
+                                             uint8_t expected,
+                                             uint16_t *fail_addr)
+{
+    uint8_t actual = 0U;
+    BQ76922_Status_t status = BQ76922_ReadRamU1(dev, address, &actual);
+
+    if ((status != BQ76922_OK) || (actual != expected)) {
+        if (fail_addr != NULL) {
+            *fail_addr = address;
+        }
+        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
+    }
+    return BQ76922_OK;
+}
+
+static BQ76922_Status_t BQ76922_VerifyRamU2(BQ76922_Device_t *dev,
+                                             uint16_t address,
+                                             uint16_t expected,
+                                             uint16_t *fail_addr)
+{
+    uint16_t actual = 0U;
+    BQ76922_Status_t status = BQ76922_ReadRamU2(dev, address, &actual);
+
+    if ((status != BQ76922_OK) || (actual != expected)) {
+        if (fail_addr != NULL) {
+            *fail_addr = address;
+        }
+        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
+    }
+    return BQ76922_OK;
+}
+
+static BQ76922_Status_t BQ76922_VerifyRamF4(BQ76922_Device_t *dev,
+                                             uint16_t address,
+                                             float expected,
+                                             uint16_t *fail_addr)
+{
+    uint8_t actual[4];
+    union {
+        float f;
+        uint32_t u;
+    } conv;
+    BQ76922_Status_t status;
+
+    conv.f = expected;
+    status = BQ76922_ReadRamBlock(dev, address, actual, sizeof(actual));
+    if ((status != BQ76922_OK) ||
+        (actual[0] != (uint8_t)(conv.u & 0xFFU)) ||
+        (actual[1] != (uint8_t)((conv.u >> 8) & 0xFFU)) ||
+        (actual[2] != (uint8_t)((conv.u >> 16) & 0xFFU)) ||
+        (actual[3] != (uint8_t)((conv.u >> 24) & 0xFFU))) {
+        if (fail_addr != NULL) {
+            *fail_addr = address;
+        }
+        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
+    }
+    return BQ76922_OK;
+}
+
+#define BQ_VERIFY_U1(addr_, value_) do { \
+    status = BQ76922_VerifyRamU1(dev, (addr_), (value_), fail_addr); \
+    if (status != BQ76922_OK) return status; \
+} while (0)
+#define BQ_VERIFY_U2(addr_, value_) do { \
+    status = BQ76922_VerifyRamU2(dev, (addr_), (value_), fail_addr); \
+    if (status != BQ76922_OK) return status; \
+} while (0)
+#define BQ_VERIFY_F4(addr_, value_) do { \
+    status = BQ76922_VerifyRamF4(dev, (addr_), (value_), fail_addr); \
+    if (status != BQ76922_OK) return status; \
+} while (0)
+
+static BQ76922_Status_t BQ76922_OtpVerifyGolden(BQ76922_Device_t *dev,
+                                                uint16_t *fail_addr)
+{
+    BQ76922_Status_t status;
+
+    if (fail_addr != NULL) {
+        *fail_addr = 0U;
+    }
+    BQ_VERIFY_U1(BQ76922_RAM_REG1_CONFIG, BMS_REG1_CONFIG);
+    BQ_VERIFY_U1(BQ76922_RAM_REG0_CONFIG, BMS_REG0_CONFIG);
+    BQ_VERIFY_U2(BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
+    BQ_VERIFY_U1(BQ76922_RAM_ENABLED_PROT_A, BMS_ENABLED_PROTECTIONS_A);
+    BQ_VERIFY_U1(BQ76922_RAM_ENABLED_PROT_B, BMS_ENABLED_PROTECTIONS_B);
+    BQ_VERIFY_U1(BQ76922_RAM_CHG_FET_PROT_A, BMS_CHG_FET_PROTECTIONS_A);
+    BQ_VERIFY_U1(BQ76922_RAM_DSG_FET_PROT_A, BMS_DSG_FET_PROTECTIONS_A);
+    BQ_VERIFY_U1(BQ76922_RAM_CUV_THRESHOLD, BMS_CUV_THRESHOLD_CODE);
+    BQ_VERIFY_U1(BQ76922_RAM_COV_THRESHOLD, BMS_COV_THRESHOLD_CODE);
+    BQ_VERIFY_U1(BQ76922_RAM_OCC_THRESHOLD, BMS_OCC_THRESHOLD_CODE);
+    BQ_VERIFY_U1(BQ76922_RAM_OCD1_THRESHOLD, BMS_OCD1_THRESHOLD_CODE);
+    BQ_VERIFY_U2(BQ76922_RAM_OCC_RECOVERY,
+                 (uint16_t)(int16_t)BMS_OCC_RECOVERY_MA);
+    BQ_VERIFY_F4(BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
+    BQ_VERIFY_F4(BQ76922_RAM_CAPACITY_GAIN, BMS_CAPACITY_GAIN);
+    BQ_VERIFY_U1(BQ76922_RAM_CFETOFF_PIN_CONFIG, BMS_CFETOFF_PIN_CONFIG);
+    BQ_VERIFY_U1(BQ76922_RAM_DFETOFF_PIN_CONFIG, BMS_DFETOFF_PIN_CONFIG);
+    BQ_VERIFY_U1(BQ76922_RAM_TS2_CONFIG, BMS_TS2_CONFIG);
+    BQ_VERIFY_U1(BQ76922_RAM_FET_OPTIONS, BMS_FET_OPTIONS);
+    BQ_VERIFY_U2(BQ76922_RAM_MFG_STATUS_INIT, BMS_MFG_STATUS_INIT);
+    BQ_VERIFY_U1(BQ76922_RAM_AUTO_SHUTDOWN_TIME, BMS_AUTO_SHUTDOWN_TIME);
+    BQ_VERIFY_U2(BQ76922_RAM_PCHG_START, BMS_PCHG_START_MV);
+    BQ_VERIFY_U2(BQ76922_RAM_PCHG_STOP, BMS_PCHG_STOP_MV);
+    BQ_VERIFY_U1(BQ76922_RAM_PDSG_TIMEOUT, BMS_PDSG_TIMEOUT);
+    BQ_VERIFY_U1(BQ76922_RAM_PDSG_STOP_DELTA, BMS_PDSG_STOP_DELTA);
+    BQ_VERIFY_U1(BQ76922_RAM_SCD_THRESHOLD, BMS_SCD_THRESHOLD);
+    BQ_VERIFY_U2(BQ76922_RAM_BODY_DIODE, BMS_BODY_DIODE_THRESHOLD_MA);
+    return BQ76922_OK;
+}
+
+#undef BQ_VERIFY_U1
+#undef BQ_VERIFY_U2
+#undef BQ_VERIFY_F4
 
 BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out)
@@ -1441,10 +1615,16 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
     out->otpb_blocked =
         ((dev->snapshot.battery_status & BQ76922_BATT_OTPB) != 0U);
 
-    (void)BQ76922_ReadRamU2(dev, BQ76922_RAM_MFG_STATUS_INIT,
-                            &out->mfg_status_init);
-    (void)BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &out->vcell_mode);
-    (void)BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &out->fet_options);
+    status = BQ76922_ReadRamU2(dev, BQ76922_RAM_MFG_STATUS_INIT,
+                               &out->mfg_status_init);
+    if (status != BQ76922_OK) {
+        goto out_hold;
+    }
+    status = BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &out->vcell_mode);
+    if (status != BQ76922_OK) {
+        goto out_hold;
+    }
+    status = BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &out->fet_options);
 
 out_hold:
     if (held) {
@@ -1462,6 +1642,7 @@ BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
     uint8_t check = 0U;
     uint16_t fail = 0U;
     bool held = false;
+    bool cfgupdate = false;
 
 #if (BMS_ENABLE == 0U)
     (void)dev;
@@ -1480,11 +1661,39 @@ BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
     if (status != BQ76922_OK) {
         goto out_hold;
     }
+    cfgupdate = true;
 
     /* Must load golden into RAM first — otherwise CHECK only validates the
      * currently effective OTP image (PDSG already cleared) and looks "OK". */
     status = BQ76922_OtpWriteGolden(dev);
     if (status != BQ76922_OK) {
+        goto out_exit_cfg;
+    }
+
+    /* TI production sequence: EXIT, read every staged value back, then enter
+     * CONFIG_UPDATE again for OTP_WR_CHECK. */
+    status = BQ76922_OtpExitCfgupdate(dev);
+    if (status != BQ76922_OK) {
+        goto out_exit_cfg;
+    }
+    cfgupdate = false;
+    status = BQ76922_OtpVerifyGolden(dev, &fail);
+    if (status != BQ76922_OK) {
+        goto out_reinit;
+    }
+    status = BQ76922_OtpEnterCfgupdate(dev);
+    if (status != BQ76922_OK) {
+        goto out_reinit;
+    }
+    cfgupdate = true;
+    status = BQ76922_ReadBatteryStatus(dev);
+    if (status != BQ76922_OK) {
+        goto out_exit_cfg;
+    }
+    if (((dev->snapshot.battery_status & BQ76922_BATT_SEC_MASK) !=
+         BQ76922_BATT_SEC_FULLACCESS) ||
+        ((dev->snapshot.battery_status & BQ76922_BATT_OTPB) != 0U)) {
+        status = BQ76922_NOT_READY;
         goto out_exit_cfg;
     }
 
@@ -1498,8 +1707,13 @@ BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
     }
 
 out_exit_cfg:
-    (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
-    HAL_Delay(20U);
+    if (cfgupdate) {
+        (void)BQ76922_OtpExitCfgupdate(dev);
+    }
+out_reinit:
+    if (fail_addr != NULL) {
+        *fail_addr = fail;
+    }
     /* EXIT_CFGUPDATE kills FET drivers — bring FETs back. */
     BQ76922_RequestReinit(dev);
 
@@ -1525,6 +1739,7 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
     uint8_t result = 0U;
     uint16_t fail = 0U;
     bool held = false;
+    bool cfgupdate = false;
 
 #if (BMS_ENABLE == 0U)
     (void)dev;
@@ -1561,11 +1776,29 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
     if (status != BQ76922_OK) {
         goto out_hold;
     }
+    cfgupdate = true;
 
     status = BQ76922_OtpWriteGolden(dev);
     if (status != BQ76922_OK) {
         goto out_exit_cfg;
     }
+
+    /* Do not trust successful I2C writes as proof.  Commit RAM, verify every
+     * golden field, and only then reopen CONFIG_UPDATE for OTP. */
+    status = BQ76922_OtpExitCfgupdate(dev);
+    if (status != BQ76922_OK) {
+        goto out_exit_cfg;
+    }
+    cfgupdate = false;
+    status = BQ76922_OtpVerifyGolden(dev, &fail);
+    if (status != BQ76922_OK) {
+        goto out_reinit;
+    }
+    status = BQ76922_OtpEnterCfgupdate(dev);
+    if (status != BQ76922_OK) {
+        goto out_reinit;
+    }
+    cfgupdate = true;
 
     status = BQ76922_ReadBatteryStatus(dev);
     if (status != BQ76922_OK) {
@@ -1612,9 +1845,30 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
     status = BQ76922_OK;
 
 out_exit_cfg:
-    (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
-    HAL_Delay(20U);
-    /* Reload FETs after CFGUPDATE exit — OTP does not replace that need this boot. */
+    if (cfgupdate) {
+        BQ76922_Status_t exit_status = BQ76922_OtpExitCfgupdate(dev);
+        cfgupdate = false;
+        if ((status == BQ76922_OK) && (exit_status != BQ76922_OK)) {
+            status = exit_status;
+        }
+    }
+    if (status == BQ76922_OK) {
+        /* Only RESET proves that values reload from OTP rather than remaining
+         * in the staged RAM image. */
+        status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_RESET);
+        if (status == BQ76922_OK) {
+            HAL_Delay(500U);
+            status = BQ76922_OtpVerifyGolden(dev, &fail);
+        }
+        /* Keep the one-shot guard set even if reset readback fails: OTP_WRITE
+         * already returned success and repeating it would consume another
+         * signature image. */
+    }
+out_reinit:
+    if (fail_addr != NULL) {
+        *fail_addr = fail;
+    }
+    /* Reload FETs after CFGUPDATE/reset. */
     BQ76922_RequestReinit(dev);
 
 out_hold:
