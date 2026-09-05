@@ -104,28 +104,30 @@ STM may program/verify static Option0/1/4/ADC (+ BIGCAP) before port activation.
 
 ---
 
-## Button / charger wake (no OTP)
+## Button wake (no OTP, no host command)
+
+Product sleep = BQ76922 **SHUTDOWN**. Wake = **TS2 button only** (short press → VSS). No UART/`BMS`/`ON` needed for wake — firmware re-probes the AFE and runs `FET_ENABLE` + `ALL_FETS_ON` automatically. Charger on **LD** is an alternate wake for plug-in.
 
 ### Schematic (HW rev2, BMS.SchDoc)
 
 | Net | Function |
 |---|---|
-| **S1** → **TS2**–**BATT-** (+R61) | Button wake from SHUTDOWN |
+| **S1** → **TS2**–**BATT-** (+R61) | **Only** product wake from SHUTDOWN |
 | **LD** (TP27) | Charger/USB wake when LD > ~1.45 V |
-| **RST_SHUT** (**TP28**) | Must stay **LOW** in normal run. To force SHUTDOWN for button tests: drive **TP28 to 3.3 V (REG1 / MCU logic — never pack VBAT)** for **≥1 s**, then release to GND. High &lt;1 s = AFE digital reset only. Floating/pull-up here blocks `CFGUPDATE` and looks like a wake/reset loop. Prefer UART `BMS SHUTDOWN` when the link is up. |
-| **CFETOFF / DFETOFF** (TP29 / TP30) | Leave floating OK now: CFGUPDATE writes Pin Config **0x00** (unused). If OTP had CFETOFF (`0x02`) and the pin floated high → `fet=0x14` (`DSG`+`DCHG_PIN`), `chg=0` forever |
-| **+VBAT** → LMR33620 → 3V3 | G4 MCU keep-alive (independent of PACK/FETs) |
+| **RST_SHUT** (**TP28**) | Must stay **LOW** in normal run. Lab enter-SHUTDOWN: drive **TP28 to 3.3 V (logic — never pack VBAT)** ≥1 s, then GND. Or UART `BMS SHUTDOWN` once to *enter* sleep (not to wake). |
+| **CFETOFF / DFETOFF** (TP29 / TP30) | Leave floating OK: CFGUPDATE writes Pin Config **0x00** (unused). |
+| **+VBAT** → LMR33620 → 3V3 | MCU rail; AFE REG18 dies in SHUTDOWN. Driver treats AFE I2C loss as absent and re-inits FETs on button wake with **zero** host commands. |
 | **PACK** | After CHG/DSG; `pack_mv≈0` with FETs off is expected |
 
-### Firmware sequence
+### Firmware sequence (automatic on TS2 wake)
 
-1. Button (TS2→VSS) or charger (LD) exits SHUTDOWN → G4 boots from +VBAT.  
+1. TS2→VSS exits SHUTDOWN → AFE returns on I2C (probe).  
 2. Hold I2C4, settle ~300 ms, `SLEEP_DISABLE`, clear alarms.  
-3. `SET_CFGUPDATE` until `batt` bit0=1, write `VCell Mode=0x0017`, **OCC/OCD1 thresholds**, **CFETOFF/DFETOFF Pin Config=0x00**, CC Gain for 5 mΩ, exit, verify `vcell_rb`.  
-4. `FET_ENABLE` (reject stale `manuf==0x0017`) then `ALL_FETS_ON` with **PDSG** soft-start (FET Options `PDSG_EN`, SCD threshold raised, body-diode threshold 2 A). Init verifies CHG+DSG and retries after clearing SCD/OCC.  
-5. Prot B OT/UT left off (TS2 is the wake button). Runtime: if CHG or DSG drops (charger plug/unplug / OCC latch), clear alarms + `ALL_FETS_ON`; sticky current faults re-issue FET commands without latching `FAULT_BMS`.
+3. `SET_CFGUPDATE` … `VCell Mode=0x0017`, protections, CFETOFF=0, CC Gain, exit, verify `vcell_rb`.  
+4. `FET_ENABLE` then `ALL_FETS_ON` (PDSG soft-start).  
+5. Runtime keeps CHG+DSG up after recoverable SCD/OCC/false-COV — still no host command.
 
-If FETs stay off: measure **TP28 ≈ 0 V**, then `BMS` / `?` — expect `cfg=1 vcell_rb=0x0017 fets=1` with `chg=1 dsg=1` and `sa` without SCD (`sa&0x80==0`) or OCC (`sa&0x10==0`). Rising `cfg_fail` with `batt=0x0184` and `init_step` stuck low almost always means **RST_SHUT not held low**. Stuck `chg=0 dsg=1 fet=0x14 sa=0x10` was **real OCC** (default ~0.8 A @ 5 mΩ vs ~8 A charger) mislabeled as COV by a reversed Safety A bit map — fixed by OCC/OCD1 thresholds + TI bit map; CFETOFF/DFETOFF also forced unused. Reboot loops with `sa=0x90` (SCD|OCC) / `vin` dip after `cfg=1` were capacitive PACK inrush — fixed by PDSG + FET verify retry.
+If FETs stay off after a button wake: **TP28 ≈ 0 V**, release the button fully (held TS2 = soft-SHUTDOWN), then check `TB`/`?` for `cfg=1 fets=1 vcell_rb=0x0017`. Rising `cfg_fail` with `init_step` stuck low → **RST_SHUT not low**.
 
 ### Sense resistors / current limits (do not mix paths)
 

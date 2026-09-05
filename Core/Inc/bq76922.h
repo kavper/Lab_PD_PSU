@@ -88,6 +88,7 @@ typedef struct {
     uint8_t fet_en_attempts;
     uint8_t fet_verify_attempts;
     uint8_t fet_recover_fails;
+    uint8_t i2c_absent_streak;
     uint32_t next_action_ms;
     uint32_t last_fet_cmd_ms;
     uint32_t bus_hold_since_ms;
@@ -113,7 +114,8 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev);
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
 /* Enter BQ769x2 SHUTDOWN: ALL_FETS_OFF then SHUTDOWN() twice (TI).
  * Keep balance harness connected; do not hold the TS2 button (soft-SHUTDOWN).
- * Wake later: TS2→VSS or charger on LD. Returns I2C status of last write. */
+ * Product wake is TS2 button only (or LD for charger) — no host command.
+ * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */
 BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 
 #endif /* BQ76922_H */

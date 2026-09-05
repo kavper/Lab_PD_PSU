@@ -359,7 +359,7 @@ static void HostLink_SendHelp(void)
         "  ? / STATUS      one T/TB/TC frame now\r\n"
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
-        "  BMS SHUTDOWN    BQ76922 SHUTDOWN (ALL_FETS_OFF + 0x0010 x2); wake=TS2 or LD\r\n"
+        "  BMS SHUTDOWN    enter AFE SHUTDOWN; wake = TS2 button only (auto FETs)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
         "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
@@ -545,9 +545,9 @@ static void HostLink_HandleLine(char *line)
             PSU_Stop();
 
             HostLink_Tx(
-                "OK BMS SHUTDOWN — keep balance cable on; do not hold TS2 button "
-                "(soft-SHUTDOWN). Expect REG18~0 / TS2~5V. Wake: press TS2 or LD.\r\n");
-            /* Flush UART before AFE (and possibly REG1) dies. */
+                "OK BMS SHUTDOWN — balance cable on; release TS2 (no hold). "
+                "Wake = short TS2 press only; FETs auto, no command.\r\n");
+            /* Flush UART before AFE drops. */
             HAL_Delay(20U);
             st = BQ76922_EnterShutdown(&g_bq76922);
             if (st != BQ76922_OK) {

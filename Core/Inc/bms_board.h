@@ -13,12 +13,12 @@
  * read OK) while the pack path stays locked.
  *
  * Wake hardware (BQ769x2):
- *   - Button → TS2 pulled to VSS (exit SHUTDOWN)
+ *   - Button → TS2 pulled to VSS (exit SHUTDOWN) — product wake, no host cmd
  *   - USB-C / charger → LD pin > VWAKEONLD (~1.45 V)
- *   - REG1/REG18 from BAT keep G4 alive with CHG/DSG OFF; PACK needs FETs
+ *   - After wake firmware always FET_ENABLE + ALL_FETS_ON (blank OTP, RAM)
  *
- * Blank OTP boots FET Test Mode (Mfg Status Init FET_EN=0). Host must
- * FET_ENABLE() then ALL_FETS_ON() every wake — RAM only, no OTP burn.
+ * Blank OTP boots FET Test Mode (Mfg Status Init FET_EN=0). Every wake must
+ * FET_ENABLE() then ALL_FETS_ON() in software — no OTP burn, no UART needed.
  *
  * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
  * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.

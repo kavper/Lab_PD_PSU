@@ -59,6 +59,9 @@
 #define BQ76922_BUS_HOLD_MAX_MS          15000U
 #define BQ76922_CFG_POLL_MAX             50U
 #define BQ76922_CFG_ENTER_MAX            6U
+/* AFE in SHUTDOWN NACKs I2C; after this many losses treat as absent so
+ * TS2 button wake re-probes and runs FET_ENABLE + ALL_FETS_ON with no host cmd. */
+#define BQ76922_I2C_ABSENT_STREAK        5U
 #define BQ76922_CC2_CHARGE_MA            50
 #define BQ76922_CC2_DISCHARGE_MA         (-50)
 #define BQ76922_MANUF_FET_EN             (1U << 4)
@@ -137,6 +140,10 @@ static bool BQ76922_ManufLooksStaleVcell(uint16_t manuf)
 {
     return manuf == BMS_VCELL_MODE;
 }
+
+static void BQ76922_ForceAbsent(BQ76922_Device_t *dev);
+static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
+                                    BQ76922_Status_t status);
 
 static void BQ76922_UpdateBusHold(BQ76922_Device_t *dev, uint32_t now_ms)
 {
@@ -1063,13 +1070,10 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
     }
     HAL_Delay(2U);
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
-    if (status == BQ76922_OK) {
-        dev->snapshot.fets_enabled = false;
-        dev->snapshot.chg_fet_on = false;
-        dev->snapshot.dsg_fet_on = false;
-        dev->snapshot.configured = false;
-        dev->snapshot.state = BQ76922_STATE_ABSENT;
-    }
+    /* Always invalidate session after the dual SHUTDOWN write. Leaving
+     * init_step at DONE + configured=0 falsely re-marked READY without
+     * FET_ENABLE — button wake then left MOSFETs off with no host cmd. */
+    BQ76922_ForceAbsent(dev);
     return status;
 #endif
 }
@@ -1108,6 +1112,62 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev)
              ((dev->snapshot.fet_status & BQ76922_FET_STATUS_PDSG) != 0U)));
 }
 
+/* Drop AFE session so the next presence (TS2 / LD wake) re-probes and runs
+ * full CFGUPDATE + FET_ENABLE + ALL_FETS_ON — no host command. */
+static void BQ76922_ForceAbsent(BQ76922_Device_t *dev)
+{
+    if (dev == NULL) {
+        return;
+    }
+
+    dev->snapshot.present = false;
+    dev->snapshot.probed = false;
+    dev->snapshot.configured = false;
+    dev->snapshot.fets_enabled = false;
+    dev->snapshot.chg_fet_on = false;
+    dev->snapshot.dsg_fet_on = false;
+    dev->snapshot.sample_valid = false;
+    dev->snapshot.shutdown_request = false;
+    dev->snapshot.vcell_mode_rb = 0U;
+    dev->snapshot.manuf_status = 0U;
+    dev->snapshot.fet_status = 0U;
+    dev->snapshot.state = BQ76922_STATE_ABSENT;
+    dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
+    dev->snapshot.init_step = dev->init_step;
+    dev->cfg_poll_tries = 0U;
+    dev->cfg_enter_tries = 0U;
+    dev->fet_en_attempts = 0U;
+    dev->fet_verify_attempts = 0U;
+    dev->fet_recover_fails = 0U;
+    dev->i2c_absent_streak = 0U;
+    dev->scan_index = 0U;
+    dev->bus_hold_since_ms = 0U;
+    dev->boot_settle_ms = 0U;
+    PowerManager_SetBmsBusHold(false);
+    dev->next_action_ms = HAL_GetTick() + BQ76922_PROBE_RETRY_MS;
+}
+
+/* True when AFE should be treated as gone (SHUTDOWN / unpowered). */
+static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
+                                    BQ76922_Status_t status)
+{
+    if (status == BQ76922_OK) {
+        dev->i2c_absent_streak = 0U;
+        return false;
+    }
+    if (status != BQ76922_I2C_ERROR) {
+        return false;
+    }
+    if (dev->i2c_absent_streak < 255U) {
+        dev->i2c_absent_streak++;
+    }
+    if (dev->i2c_absent_streak >= BQ76922_I2C_ABSENT_STREAK) {
+        BQ76922_ForceAbsent(dev);
+        return true;
+    }
+    return false;
+}
+
 void BQ76922_RequestReinit(BQ76922_Device_t *dev)
 {
     if (dev == NULL) {
@@ -1133,6 +1193,7 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     dev->fet_en_attempts = 0U;
     dev->fet_verify_attempts = 0U;
     dev->fet_recover_fails = 0U;
+    dev->i2c_absent_streak = 0U;
     dev->scan_index = 0U;
     dev->bus_hold_since_ms = 0U;
     dev->boot_settle_ms = 0U;
@@ -1174,8 +1235,13 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
             return;
         }
         if (dev->snapshot.present) {
+            /* Button/LD wake: AFE just returned — full FET bring-up, no host cmd. */
+            dev->i2c_absent_streak = 0U;
+            dev->boot_settle_ms = 0U;
             dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
             dev->snapshot.init_step = dev->init_step;
+            dev->snapshot.configured = false;
+            dev->snapshot.manuf_status = 0U;
             dev->bus_hold_since_ms = 0U;
             BQ76922_UpdateBusHold(dev, now_ms);
             dev->next_action_ms = now_ms + BQ76922_INIT_STEP_DELAY_MS;
@@ -1194,6 +1260,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
 
     if (dev->snapshot.alert_latched) {
         status = BQ76922_HandleAlert(dev);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_BUSY) {
             return;
         }
@@ -1211,6 +1280,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
                                                   (dev->scan_index * 2U)),
                                         buf,
                                         2U);
+            if (BQ76922_NoteCommsResult(dev, status)) {
+                return;
+            }
             if (status == BQ76922_OK) {
                 dev->snapshot.cell_mv[dev->scan_index] = BQ76922_Le16(buf);
                 dev->scan_index++;
@@ -1220,6 +1292,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else if (dev->scan_index == BQ76922_CELL_COUNT) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_PACK_V, buf, 2U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_OK) {
             dev->snapshot.pack_mv = BQ76922_USERV_TO_MV(BQ76922_Le16(buf));
             dev->scan_index++;
@@ -1228,6 +1303,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 1U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_STACK_V, buf, 2U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_OK) {
             dev->snapshot.stack_mv = BQ76922_USERV_TO_MV(BQ76922_Le16(buf));
             dev->scan_index++;
@@ -1236,6 +1314,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 2U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_CC2, buf, 2U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_OK) {
             dev->snapshot.cc2_ma = BQ76922_Le16(buf);
             dev->scan_index++;
@@ -1244,6 +1325,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 3U)) {
         status = BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, buf, 1U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_OK) {
             dev->snapshot.fet_status = buf[0];
             dev->snapshot.chg_fet_on = ((buf[0] & BQ76922_FET_STATUS_CHG) != 0U);
@@ -1259,6 +1343,9 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 4U)) {
         status = BQ76922_ReadSafetyStatus(dev);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
         if (status == BQ76922_OK) {
             (void)BQ76922_ReadBatteryStatus(dev);
             dev->scan_index++;
