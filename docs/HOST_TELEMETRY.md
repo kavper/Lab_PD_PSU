@@ -57,12 +57,12 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 | `pd_role` `pd_mv` `pd_ma` | PM snapshot contract (`pd_role`: 1=sink charge, 2=source) |
 | `bq_otg` | BQ25731 `IN_OTG`. `1` only after a real Source **contract** (`conn` 6/7 + PDO/RDO). Stays `0` in AttachWait, SINK ONLY, and AUTO sink. |
 
-Default USB-C: **AUTO = DRP + Try.SRC**, then **one role decision**:
+Default USB-C: **AUTO = DRP + Try.SRC**. Firmware follows the Type-C attach role; it does **not** software-PR_SWAP into SOURCE (that OTG-discharged the pack into 5 V powerbanks).
 
-- Partner already **Attached.SNK / live sink contract** (including a **5 V-only powerbank**) → **we SINK** and charge the pack. Never enable OTG into a partner that is already powering us.
-- No fresh partner Source Caps this plug and we are not SNK (sink-only iPad/phone) → **we SOURCE**.
-- We are Source and partner Source Caps are strong (V>5 V or >15 W) → **we SINK** (yield / charge pack).
-- We are Source and partner Source Caps are weak 5 V ≤15 W → **we SOURCE** (stay source).
+- **Attached.SNK / live sink contract** (including a **5 V-only powerbank**) → **SINK**, charge the pack, `bq_otg=0`.
+- **Attached.SRC** + fresh partner caps with V>5 V or >15 W → **SINK** (yield to charger).
+- **Attached.SRC** otherwise → **SOURCE** (stay; phone/iPad via Try.SRC). PORT_CONTROL uses `PROCESS_SWAP_SRC` only — no `INITIATE_SWAP_SRC`.
+- Role not stable yet → wait; do not lock a guessed mode.
 
 `USB SOURCE` is source-only (`0x28` Source SM, `0x29` reject swap to sink). `USB SINK` is sink-only (`0x28` Sink SM, `0x29` reject swap to source). 9 V source PDOs stay in the TPS image.
 
@@ -72,13 +72,13 @@ Expected `TC` after flash:
 
 - **iPhone (good, keep)**: later `conn=6/7`, `typec=0x60`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`), `bq_otg=1` only after that contract.
 - **iPad + USB SOURCE**: must leave `conn=0 typec=0x64` + VBUS 5↔0. Next log: `typec=0x60`, `conn=6/7`, `pd_role=2`, `pd_mv=5000` or `9000`, `bq_otg=1` only after the contract. `[PD-RESET]` on unplug/mode change restores **source-only** (`sm=1`), not DRP.
-- **iPad + AUTO**: same Source attach if partner PDOs are ≤15 W @ 5 V (or no Source PDOs).
-- **Charger / 5 V powerbank + AUTO**: `typec=0x61`, `conn=6/7`, `pd_role=1`, `bq_otg=0`, charge current on `bq_ichg_ma` / `bq_ibat_ma` (stay SINK even if partner only offers 5 V).
+- **iPad + AUTO**: Try.SRC → Attached.SRC → stay SOURCE (`pd_role=2`, `bq_otg=1` after contract). No software swap to SOURCE.
+- **Charger / 5 V powerbank + AUTO**: `typec=0x61`, `conn=6/7`, `pd_role=1`, `bq_otg=0`, charge on `bq_ichg_ma` / `bq_ibat_ma`.
 - Accidental OTG: PA4 stays low until Source contract.
 
 Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption3` EN_HIZ=1 EN_OTG=0, `0x28` Disabled until TPS VBUS `<0.8 V` and `tSrcRecover` 800 ms, then `0x28` for **that** mode (DRP+Try.SRC / Source-only / Sink-only), `0x29` swap bits for that mode. Do not treat `AttachWait.SRC` (`typec=0x64`) with vSafe0V as leftover — that is the iPad SOURCE attach. Kick only if CC is live in Unattached, or AttachWait with VBUS still high for 1.5 s.
 
-**Sticky SINK after a powerbank (fixed):** TPS `RX_SOURCE_CAPS` keeps the previous partner's PDOs across unplug. A failed `GSrC` on the next sink-only gadget (iPad) must **not** re-read that register. Firmware requires fresh Source Caps this plug for the weak-source path; if already Attached.SNK / live sink contract, stay SINK (so a 5 V powerbank charges the pack instead of getting OTG'd). Unplug force-resets session (clears Active PDO/RDO + neutralizes `0x29`) even during cooldown.
+**Sticky / OTG regressions (fixed):** stale `RX_SOURCE_CAPS` are ignored without a fresh plug event; Attached.SNK always stays SINK; AUTO never initiates PR_SWAP to SOURCE after SINK ONLY → AUTO.
 
 ---
 
@@ -92,7 +92,7 @@ Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption
 | `BMS FORCE` / `BMSREINIT` | full CONFIG_UPDATE + `ALL_FETS_ON` (RAM only, **no OTP**). Can hold I2C4 (starve BQ/TPS) and PACK inrush may PIN/POR-reboot the G4 — do not click casually while running. |
 | `VERBOSE 0\|1` | debug logs on same UART (keep `0` for parsers) |
 | `ON` / `OFF` / `SET` / `ILIM` / `PERMIT` / `REMOTE` | power / LDO |
-| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. **AUTO** = DRP+Try.SRC, then PDO heuristic (only 5 V ≤15 W → source the gadget; any PDO above 5 V or >15 W → sink/charge pack). `USB SOURCE` / `USB SINK` are true single-role (reject the opposite PR_Swap). |
+| `USB AUTO` / `USB SINK` / `USB SOURCE` | Type-C role. **AUTO** = DRP+Try.SRC; if already Attached.SNK (incl. 5 V powerbank) stay SINK; sink-only gadget → SOURCE; strong partner Source Caps while we are Source → SINK. `USB SOURCE` / `USB SINK` are true single-role (reject the opposite PR_Swap). |
 | `CLR` | clear sticky PSU fault latch |
 
 ---

@@ -1173,11 +1173,13 @@ static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
         return;
     }
     if (desired == TPS25751_ROLE_SOURCE) {
-        /* Stay/become source: reject swap to sink so iPad cannot PR_SWAP
-         * us off VBUS.  Allow process+initiate source for SWSr. */
-        swap_bits = (uint8_t)(TPS25751_PC_PROCESS_SWAP_SRC |
-                              TPS25751_PC_INITIATE_SWAP_SRC);
+        /* Stay Source (phone/iPad).  Reject PR_SWAP to sink so a DRP iPad
+         * cannot pull us off VBUS.  Do NOT InitiateSwapToSource — Type-C
+         * Try.SRC already made us source; initiating swaps was flipping
+         * powerbanks into OTG discharge after mode changes. */
+        swap_bits = (uint8_t)TPS25751_PC_PROCESS_SWAP_SRC;
     } else if (desired == TPS25751_ROLE_SINK) {
+        /* Yield to a real charger / stay sink. */
         swap_bits = (uint8_t)(TPS25751_PC_PROCESS_SWAP_SNK |
                               TPS25751_PC_INITIATE_SWAP_SNK);
     } else {
@@ -1194,6 +1196,12 @@ static bool PowerManager_IsAttachedAsSink(void)
            (g_pm.status.tps.role == TPS25751_ROLE_SINK);
 }
 
+static bool PowerManager_IsAttachedAsSource(void)
+{
+    return g_pm.status.tps.attached &&
+           (g_pm.status.tps.role == TPS25751_ROLE_SOURCE);
+}
+
 static bool PowerManager_HasLiveSinkContract(void)
 {
     return PowerManager_IsAttachedAsSink() &&
@@ -1208,35 +1216,33 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
     uint32_t max_mv;
 
     /*
-     * Partner is already powering us (Attached.SNK / live sink contract):
-     * always SINK and charge the pack.  A 5 V-only powerbank looks like
-     * "weak source" in the PDO table; treating that as SOURCE enabled OTG
-     * and discharged the pack into the bank after returning to AUTO.
+     * Stable AUTO (after SINK/SOURCE ONLY thrashing):
+     *  - Type-C attach is the source of truth (Try.SRC / partner Rp).
+     *  - Never software-PR_SWAP into SOURCE (that OTG-discharged the pack
+     *    into 5 V powerbanks after returning to AUTO).
+     *  - Only software-PR_SWAP Source→Sink when fresh strong charger caps
+     *    show we should yield.
      */
-    if (PowerManager_HasLiveSinkContract() ||
-        PowerManager_IsAttachedAsSink()) {
+    if (PowerManager_IsAttachedAsSink() ||
+        PowerManager_HasLiveSinkContract()) {
         return TPS25751_ROLE_SINK;
     }
 
-    if (!g_pm.partner_source_caps_fresh ||
-        !g_pm.partner_source_caps_current ||
-        (g_pm.partner_source_caps.count == 0U)) {
-        /* No fresh Source Caps and we are not SNK: sink-only gadget
-         * (iPad/phone) → we SOURCE.  Do not resurrect stale RX_SOURCE_CAPS
-         * from a previous powerbank plug. */
+    if (PowerManager_IsAttachedAsSource()) {
+        if (g_pm.partner_source_caps_fresh &&
+            g_pm.partner_source_caps_current &&
+            (g_pm.partner_source_caps.count > 0U)) {
+            max_mw = g_pm.partner_source_caps.max_power_mw;
+            max_mv = g_pm.partner_source_caps.max_voltage_mv;
+            if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+                (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
+                return TPS25751_ROLE_SINK;
+            }
+        }
         return TPS25751_ROLE_SOURCE;
     }
 
-    max_mw = g_pm.partner_source_caps.max_power_mw;
-    max_mv = g_pm.partner_source_caps.max_voltage_mv;
-
-    /* We are Source (Try.SRC won).  Strong partner Source Caps → yield
-     * and charge the pack; weak 5 V-only dual-role → stay Source. */
-    if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
-        (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
-        return TPS25751_ROLE_SINK;
-    }
-    return TPS25751_ROLE_SOURCE;
+    return TPS25751_ROLE_UNKNOWN;
 }
 
 static void PowerManager_DecidePolicy(uint32_t now_ms)
@@ -1247,27 +1253,30 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     uint32_t max_mw = g_pm.partner_source_caps.max_power_mw;
     uint32_t max_mv = g_pm.partner_source_caps.max_voltage_mv;
 
-    (void)now_ms;
-
     if (g_pm.policy_decided) {
         g_pm.policy_phase = PM_POLICY_DONE;
         return;
     }
 
     desired = PowerManager_AutoRoleFromPartnerSourceCaps();
-    if (PowerManager_HasLiveSinkContract()) {
-        reason = "LIVE_SINK_CONTRACT_STAY_SINK";
-    } else if (PowerManager_IsAttachedAsSink()) {
-        reason = "ATTACHED_AS_SINK_STAY_SINK";
+    if (desired == TPS25751_ROLE_UNKNOWN) {
+        /* Attach role not stable yet — retry, do not lock a bad decision. */
+        g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
+        g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
+        Debug_Printf("[PD-POLICY] AUTO wait: role not stable yet");
+        return;
+    }
+
+    if (PowerManager_IsAttachedAsSink()) {
+        reason = "ATTACHED_SNK_STAY_SINK";
+    } else if ((desired == TPS25751_ROLE_SINK) &&
+               PowerManager_IsAttachedAsSource()) {
+        reason = "ATTACHED_SRC_YIELD_TO_STRONG_CHARGER";
     } else if (!g_pm.partner_source_caps_fresh ||
-               !g_pm.partner_source_caps_current ||
                (g_pm.partner_source_caps.count == 0U)) {
-        reason = "NO_FRESH_PARTNER_SOURCE_CAPS_WE_SOURCE";
-    } else if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
-               (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
-        reason = "PARTNER_STRONG_SRC_WE_SINK";
+        reason = "ATTACHED_SRC_STAY_SOURCE";
     } else {
-        reason = "PARTNER_WEAK_5V_WE_SOURCE";
+        reason = "ATTACHED_SRC_WEAK_PARTNER_STAY_SOURCE";
     }
 
     g_pm.policy_desired_role = desired;
@@ -1282,12 +1291,12 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
                  PowerManager_RoleToString(desired),
                  reason);
 
-    if ((desired == current) || (desired == TPS25751_ROLE_UNKNOWN)) {
-        g_pm.policy_phase = PM_POLICY_DONE;
-    } else if (desired == TPS25751_ROLE_SINK) {
+    /* Only Source→Sink swaps are allowed.  Never PR_SWAP into SOURCE. */
+    if ((desired == TPS25751_ROLE_SINK) &&
+        (current == TPS25751_ROLE_SOURCE)) {
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     } else {
-        g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
+        g_pm.policy_phase = PM_POLICY_DONE;
     }
 }
 
@@ -1305,13 +1314,11 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
 
     current = g_pm.status.tps.role;
 
-    /* Never PR_SWAP / OTG into SOURCE while the partner is already
-     * powering us.  An early Decide with NO_FRESH→SOURCE (or weak 5 V
-     * powerbank classified as SOURCE) would otherwise discharge the pack. */
-    if (PowerManager_HasLiveSinkContract() ||
-        PowerManager_IsAttachedAsSink()) {
+    /* Partner already powering us → lock SINK, never enforce SOURCE/OTG. */
+    if (PowerManager_IsAttachedAsSink() ||
+        PowerManager_HasLiveSinkContract()) {
         if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
-            Debug_Printf("[PD-POLICY] override desired=%s → SINK (partner already sourcing to us)",
+            Debug_Printf("[PD-POLICY] override desired=%s → SINK (Attached.SNK)",
                          PowerManager_RoleToString(g_pm.policy_desired_role));
             g_pm.policy_desired_role = TPS25751_ROLE_SINK;
             PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
@@ -1322,8 +1329,6 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
 
-    /* One AUTO decision per plug.  Do not flip desired from the live
-     * contract (that was charge-first leftover). */
     if (!g_pm.policy_decided ||
         (g_pm.policy_desired_role == TPS25751_ROLE_UNKNOWN) ||
         (current == g_pm.policy_desired_role)) {
@@ -1331,11 +1336,16 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
 
+    /* Only enforce Source→Sink (yield to charger).  Never Source enforcement. */
+    if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
+
     if (g_pm.policy_role_mismatch_since_ms == 0U) {
         g_pm.policy_role_mismatch_since_ms = now_ms;
-        Debug_Printf("[PD-POLICY] role drift current=%s desired=%s; waiting %lums then one swap",
+        Debug_Printf("[PD-POLICY] role drift current=%s desired=SINK; waiting %lums then one swap",
                      PowerManager_RoleToString(current),
-                     PowerManager_RoleToString(g_pm.policy_desired_role),
                      (unsigned long)PM_POLICY_ROLE_DRIFT_MS);
         return;
     }
@@ -1348,16 +1358,11 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
 
-    PowerManager_QueueAutoSwapControl(g_pm.policy_desired_role);
-    if (g_pm.policy_desired_role == TPS25751_ROLE_SINK) {
-        g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
-    } else {
-        g_pm.policy_phase = PM_POLICY_SWAP_TO_SOURCE;
-    }
+    PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
+    g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     g_pm.policy_next_ms = now_ms;
     g_pm.policy_role_mismatch_since_ms = 0U;
-    Debug_Printf("[PD-POLICY] enforcing one-shot AUTO target=%s",
-                 PowerManager_RoleToString(g_pm.policy_desired_role));
+    Debug_Printf("[PD-POLICY] enforcing one-shot AUTO yield to SINK");
 }
 
 static void PowerManager_HandleTpsError(TPS25751_Status_t status,
