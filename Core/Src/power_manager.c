@@ -198,6 +198,10 @@ typedef struct {
     bool policy_swap_attempted;
     bool policy_decided;
     bool partner_source_caps_current;
+    /* True only after Source Caps arrived this plug (event or successful
+     * GSrC).  TPS RX_SOURCE_CAPS keeps the previous partner's PDOs across
+     * unplug — never trust a cold register read without this flag. */
+    bool partner_source_caps_fresh;
     bool partner_sink_observed;
     bool pdo_report_pending;
     bool local_source_caps_pending;
@@ -399,6 +403,7 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms,
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
     memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
     g_pm.partner_source_caps_current = false;
+    g_pm.partner_source_caps_fresh = false;
     g_pm.partner_sink_observed = false;
     g_pm.policy_swap_attempted = false;
     g_pm.policy_decided = false;
@@ -943,6 +948,23 @@ static void PowerManager_TryLogContractPdos(void)
     g_pm.pdo_report_pending = false;
 }
 
+static void PowerManager_NeutralizeAutoPortControl(void)
+{
+    /* After a SINK decision QueueAutoSwapControl leaves
+     * Process/InitiateSwapToSink set.  Those bits survive a skipped
+     * session reset (cooldown) and the next DRP gadget (iPad) gets
+     * PR_SWAP'd into a mutual-sink dead end.  AUTO always starts
+     * swap-neutral; DecidePolicy re-applies the matching bits. */
+    if ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
+        !g_pm.port_control_valid) {
+        return;
+    }
+    if (TPS25751_PatchPortControl(g_pm.port_control,
+                                  TPS25751_PORT_DRP)) {
+        g_pm.port_control_write_pending = true;
+    }
+}
+
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
 {
     memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
@@ -950,11 +972,16 @@ static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
     g_pm.policy_swap_attempted = false;
     g_pm.policy_decided = false;
     g_pm.partner_source_caps_current = false;
+    g_pm.partner_source_caps_fresh = false;
     g_pm.partner_sink_observed = false;
     g_pm.policy_cap_attempts = 0U;
     g_pm.policy_role_mismatch_since_ms = 0U;
     g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
     g_pm.pdo_report_pending = attached;
+    /* Drop stale Active PDO/RDO so AutoRole cannot treat a previous
+     * powerbank contract as "live sink, stay SINK" on the next plug. */
+    PowerManager_ClearContractTelemetry();
+    PowerManager_NeutralizeAutoPortControl();
     if (attached &&
         (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
         /* Discover partner Source PDOs before picking a role.  Do not
@@ -1126,7 +1153,10 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
         }
         PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
         if (!g_pm.status.tps.attached) {
-            PowerManager_BeginSessionReset(now_ms, "unplug", false);
+            /* force=true: cooldown must not skip clearing PORT_CONTROL /
+             * HIZ after a SINK powerbank session, or the next iPad plug
+             * inherits InitiateSwapToSink and never sources. */
+            PowerManager_BeginSessionReset(now_ms, "unplug", true);
             if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
                 Debug_Printf("[PD-POLICY] detach; decision state cleared");
             }
@@ -1163,16 +1193,12 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
     uint32_t max_mw;
     uint32_t max_mv;
 
-    if (!g_pm.partner_source_caps_current ||
+    if (!g_pm.partner_source_caps_fresh ||
+        !g_pm.partner_source_caps_current ||
         (g_pm.partner_source_caps.count == 0U)) {
-        /* Empty Get_Source_Cap: partner is SNK → we SOURCE.
-         * Attached as SNK with a live contract but no decoded PDO list:
-         * stay SINK (do not SWSr into an unread charger). */
-        if ((g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
-            g_pm.status.tps.active_pdo.valid &&
-            g_pm.status.tps.active_rdo.valid) {
-            return TPS25751_ROLE_SINK;
-        }
+        /* No fresh Source Caps this plug (GSrC failed / sink-only iPad):
+         * we SOURCE.  Do not keep SINK from a previous powerbank contract
+         * still sitting in Active PDO/RDO or RX_SOURCE_CAPS. */
         return TPS25751_ROLE_SOURCE;
     }
 
@@ -1204,13 +1230,10 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     }
 
     desired = PowerManager_AutoRoleFromPartnerSourceCaps();
-    if (!g_pm.partner_source_caps_current ||
+    if (!g_pm.partner_source_caps_fresh ||
+        !g_pm.partner_source_caps_current ||
         (g_pm.partner_source_caps.count == 0U)) {
-        if (desired == TPS25751_ROLE_SINK) {
-            reason = "SINK_CONTRACT_WITHOUT_PDO_LIST_STAY_SINK";
-        } else {
-            reason = "NO_PARTNER_SOURCE_CAPS_WE_SOURCE";
-        }
+        reason = "NO_FRESH_PARTNER_SOURCE_CAPS_WE_SOURCE";
     } else if ((max_mv <= PM_AUTO_WEAK_SRC_MAX_MV) &&
                (max_mw <= PM_AUTO_WEAK_SRC_MAX_MW)) {
         reason = "PARTNER_LE_15W_5V_WE_SOURCE";
@@ -1417,7 +1440,8 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  now_ms);
     }
     if (event.source_caps_received) {
-        g_pm.partner_source_caps_current = true;
+        /* Caps exist in silicon this plug — TRACE job will decode and
+         * set partner_source_caps_fresh.  Do not mark current yet. */
         g_pm.source_caps_trace_pending = true;
     }
     if (event.plug_changed || event.source_caps_received ||
@@ -1463,11 +1487,30 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 PowerManager_HandleTpsError(operation_status, now_ms);
             }
         } else if (completed_job == PM_JOB_GET_SOURCE_CAPS) {
-            g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
-            g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-            Debug_Printf("[PD-POLICY] Get_Source_Cap task=%u status=%s; still reading RX_SOURCE_CAPS",
-                         g_pm.tps.task_return_code,
-                         TPS25751_StatusToString(operation_status));
+            /* GSrC failed/timeout: partner is usually sink-only (iPad).
+             * Do NOT fall through to RX_SOURCE_CAPS — that register keeps
+             * the previous powerbank's PDOs and would wrongly decide SINK
+             * again.  If an async Source Caps event already refreshed this
+             * plug, keep those and decide; otherwise treat as empty. */
+            if (g_pm.partner_source_caps_fresh &&
+                g_pm.partner_source_caps_current &&
+                (g_pm.partner_source_caps.count > 0U)) {
+                g_pm.policy_phase = PM_POLICY_DECIDE;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+                Debug_Printf("[PD-POLICY] Get_Source_Cap task=%u status=%s; using Source Caps already captured this plug",
+                             g_pm.tps.task_return_code,
+                             TPS25751_StatusToString(operation_status));
+            } else {
+                memset(&g_pm.partner_source_caps, 0,
+                       sizeof(g_pm.partner_source_caps));
+                g_pm.partner_source_caps_current = true;
+                g_pm.partner_source_caps_fresh = true;
+                g_pm.policy_phase = PM_POLICY_DECIDE;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+                Debug_Printf("[PD-POLICY] Get_Source_Cap task=%u status=%s; no fresh partner Source Caps — decide SOURCE (skip stale RX_SOURCE_CAPS)",
+                             g_pm.tps.task_return_code,
+                             TPS25751_StatusToString(operation_status));
+            }
             if (operation_status != TPS25751_COMMAND_ERROR) {
                 PowerManager_HandleTpsError(operation_status, now_ms);
             }
@@ -1480,6 +1523,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_READ_SOURCE_CAPS) {
             memset(&g_pm.partner_source_caps, 0,
                    sizeof(g_pm.partner_source_caps));
+            g_pm.partner_source_caps_current = true;
+            g_pm.partner_source_caps_fresh = true;
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             PowerManager_HandleTpsError(operation_status, now_ms);
@@ -1891,12 +1936,15 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                                              data, length)) {
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
-                Debug_Printf("[PD-POLICY] invalid Source PDO payload; ignoring it");
+                g_pm.partner_source_caps_current = true;
+                g_pm.partner_source_caps_fresh = true;
+                Debug_Printf("[PD-POLICY] invalid Source PDO payload; treating as no partner Source Caps");
                 g_pm.policy_phase = PM_POLICY_DECIDE;
                 g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
                 break;
             }
             g_pm.partner_source_caps_current = true;
+            g_pm.partner_source_caps_fresh = true;
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
             PowerManager_TryLogContractPdos();
@@ -1929,11 +1977,13 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
                 g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
                 Debug_Printf("[PD-TRACE t=%lu] Source PDO register invalid len=%u",
                              (unsigned long)now_ms, length);
                 break;
             }
             g_pm.partner_source_caps_current = true;
+            g_pm.partner_source_caps_fresh = true;
             Debug_Printf("[PD-TRACE t=%lu] Source_Capabilities captured immediately",
                          (unsigned long)now_ms);
             PowerManager_LogCapabilities("SOURCE",

@@ -76,6 +76,8 @@ Expected `TC` after flash:
 
 Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption3` EN_HIZ=1 EN_OTG=0, `0x28` Disabled until TPS VBUS `<0.8 V` and `tSrcRecover` 800 ms, then `0x28` for **that** mode (DRP+Try.SRC / Source-only / Sink-only), `0x29` swap bits for that mode. Do not treat `AttachWait.SRC` (`typec=0x64`) with vSafe0V as leftover — that is the iPad SOURCE attach. Kick only if CC is live in Unattached, or AttachWait with VBUS still high for 1.5 s.
 
+**Sticky SINK after a powerbank (fixed):** TPS `RX_SOURCE_CAPS` keeps the previous partner's PDOs across unplug. A failed `GSrC` on the next sink-only gadget (iPad) must **not** re-read that register, or AUTO decides SINK again and nobody sources. Firmware now requires fresh Source Caps this plug; otherwise it decides SOURCE. Unplug also force-resets session (clears Active PDO/RDO + neutralizes `0x29` swap bits) even during cooldown.
+
 ---
 
 ## Commands (host → G4)
