@@ -68,23 +68,24 @@ HAL_StatusTypeDef BoardMx_EnsureSysclkPll(void)
 
 void BoardMx_ApplyHrtimFault(HRTIM_HandleTypeDef *hhrtim)
 {
-    HRTIM_FaultCfgTypeDef fault_cfg = {0};
-
     if (hhrtim == NULL) {
         return;
     }
 
-    fault_cfg.Source = HRTIM_FAULTSOURCE_DIGITALINPUT;
-    fault_cfg.Polarity = HRTIM_FAULTPOLARITY_LOW;
-    fault_cfg.Filter = HRTIM_FAULTFILTER_NONE;
-    fault_cfg.Lock = HRTIM_FAULTLOCK_READWRITE;
-    (void)HAL_HRTIM_FaultConfig(hhrtim, HRTIM_FAULT_3, &fault_cfg);
-    HAL_HRTIM_FaultModeCtl(hhrtim, HRTIM_FAULT_3, HRTIM_FAULTMODECTL_ENABLED);
+    /*
+     * ACS37100 inductor FAULT (HRTIM FLT3, active low) is ignored for now.
+     * High-side INA296 software OCP is the current protection. CubeMX still
+     * wires FLT3 onto Timer A/C; disable the channel and the timer enables
+     * so PWM cannot be hardware-killed by I_L_MEAS.
+     */
+    HAL_HRTIM_FaultModeCtl(hhrtim, HRTIM_FAULT_3, HRTIM_FAULTMODECTL_DISABLED);
 
-    /* CubeMX G4 may also enable fault blanking; ACS37100 FAULT must be live. */
-#ifdef __HAL_HRTIM_FAULT_BLANKING_DISABLE
-    __HAL_HRTIM_FAULT_BLANKING_DISABLE(hhrtim, HRTIM_FAULT_3);
-#endif
+    if (hhrtim->Instance != NULL) {
+        CLEAR_BIT(hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].FLTxR,
+                  HRTIM_FLTR_FLT3EN);
+        CLEAR_BIT(hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].FLTxR,
+                  HRTIM_FLTR_FLT3EN);
+    }
 }
 
 void BoardMx_GpioExtiCallback(uint16_t gpio_pin)

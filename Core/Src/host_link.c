@@ -10,13 +10,16 @@
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
+#include "host_link_policy.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
 #define HOST_LINK_RX_LINE_MAX        96U
+#define HOST_LINK_RX_Q               4U
 #define HOST_LINK_TX_MAX             768U
+#define HOST_LINK_TX_RING            2048U
 #define HOST_LINK_TEL_DEFAULT_MS     500U
 
 static UART_HandleTypeDef *s_huart = NULL;
@@ -24,10 +27,18 @@ static uint32_t s_boot_reset_flags;
 static uint8_t s_rx_byte;
 static char s_rx_line[HOST_LINK_RX_LINE_MAX];
 static volatile uint8_t s_rx_len;
-static volatile bool s_line_ready;
 static volatile bool s_rx_overflow;
+static char s_rx_q[HOST_LINK_RX_Q][HOST_LINK_RX_LINE_MAX];
+static volatile uint8_t s_rx_q_head;
+static volatile uint8_t s_rx_q_tail;
+static volatile uint8_t s_rx_q_count;
+static uint8_t s_tx_ring[HOST_LINK_TX_RING];
+static volatile uint16_t s_tx_head;
+static volatile uint16_t s_tx_tail;
+static volatile uint16_t s_tx_used;
 static uint32_t s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
 static uint32_t s_last_tel_ms;
+static uint32_t s_last_tb_ms;
 
 static void HostLink_ArmRx(void)
 {
@@ -36,9 +47,27 @@ static void HostLink_ArmRx(void)
     }
 }
 
+static void HostLink_TxPump(void)
+{
+    if (s_huart == NULL) {
+        return;
+    }
+
+    while (s_tx_used > 0U) {
+        if (__HAL_UART_GET_FLAG(s_huart, UART_FLAG_TXE) == RESET) {
+            break;
+        }
+        s_huart->Instance->TDR = s_tx_ring[s_tx_tail];
+        s_tx_tail = (uint16_t)((s_tx_tail + 1U) % HOST_LINK_TX_RING);
+        s_tx_used--;
+    }
+}
+
 static void HostLink_Tx(const char *text)
 {
     size_t len;
+    size_t i;
+    uint32_t primask;
 
     if ((s_huart == NULL) || (text == NULL)) {
         return;
@@ -47,7 +76,24 @@ static void HostLink_Tx(const char *text)
     if (len == 0U) {
         return;
     }
-    (void)HAL_UART_Transmit(s_huart, (uint8_t *)text, (uint16_t)len, 80U);
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (((uint32_t)s_tx_used + (uint32_t)len) >= HOST_LINK_TX_RING) {
+        if (primask == 0U) {
+            __enable_irq();
+        }
+        return;
+    }
+    for (i = 0U; i < len; i++) {
+        s_tx_ring[s_tx_head] = (uint8_t)text[i];
+        s_tx_head = (uint16_t)((s_tx_head + 1U) % HOST_LINK_TX_RING);
+        s_tx_used++;
+    }
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    HostLink_TxPump();
 }
 
 static int32_t HostLink_Mv(float volts)
@@ -58,6 +104,16 @@ static int32_t HostLink_Mv(float volts)
 static int32_t HostLink_Ma(float amps)
 {
     return (int32_t)((amps * 1000.0f) + ((amps >= 0.0f) ? 0.5f : -0.5f));
+}
+
+/* 0..10000 duty → 0..1000, meaning 0.0% .. 100.0% (divide by 10 to get percent). */
+static int32_t HostLink_DutyX10(uint32_t duty_10k)
+{
+    if (duty_10k > 10000U) {
+        duty_10k = 10000U;
+    }
+
+    return (int32_t)((duty_10k + 5U) / 10U);
 }
 
 static const char *HostLink_ModeName(void)
@@ -72,7 +128,7 @@ static const char *HostLink_ModeName(void)
     }
 }
 
-static void HostLink_SendMachineTelemetry(void)
+static void HostLink_SendMachineTelemetry(bool with_bms)
 {
     char line[HOST_LINK_TX_MAX];
     BQ76922_Snapshot_t bms;
@@ -88,7 +144,11 @@ static void HostLink_SendMachineTelemetry(void)
     int n;
     int16_t dV;
 
-    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    /* Leave room for SET/ON while a previous T/TB/TC is still shifting out. */
+    if (s_tx_used > (HOST_LINK_TX_RING / 2U)) {
+        return;
+    }
+
     pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
     LdoPrereg_GetStatus(&prereg);
     LdoLink_GetStatus(&ldo);
@@ -100,27 +160,32 @@ static void HostLink_SendMachineTelemetry(void)
         g0_age_ms = 0xFFFFFFFFu;
     }
 
-    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
-
     /* T — PSU / G0 / PD core (stable keys for H7 parser) */
     n = snprintf(line, sizeof(line),
-                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld set_mv=%ld ilim_ma=%ld "
-                 "duty_ppm=%lu run=%u mode=%s fault=%lu "
+                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld i_buck_ma=%ld i_boost_ma=%ld "
+                 "set_mv=%ld ilim_ma=%ld "
+                 "duty_a_x10=%ld duty_c_x10=%ld ucc_a=%u ucc_c=%u run=%u mode=%s fault=%lu "
                  "pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u "
                  "g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
-                 "g0_vout_mv=%lu vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
+                 "g0_fault=0x%lX g0_vout_mv=%lu g0_iout_ma=%lu "
+                 "vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
                  "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
                  "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
                  "pm_st=%u fmt=0\r\n",
                  (long)HostLink_Mv(App_GetInputVoltage()),
                  (long)HostLink_Mv(App_GetOutputVoltage()),
                  (long)HostLink_Ma(App_GetOutputCurrent()),
+                 (long)HostLink_Ma(App_GetHsBuckCurrent()),
+                 (long)HostLink_Ma(App_GetHsBoostCurrent()),
                  (long)HostLink_Mv(LdoLink_IsOutputWanted() || LdoPrereg_IsG0Active()
                                    ? LdoLink_GetG0Voltage()
                                    : App_GetCvSetpoint()),
                  (long)HostLink_Ma(LdoLink_GetG0Current()),
-                 (unsigned long)(PowerStage_GetDutyA() * 1000000.0f + 0.5f),
+                 (long)HostLink_DutyX10(PowerStage_GetDutyA10k()),
+                 (long)HostLink_DutyX10(PowerStage_GetDutyCPhys10k()),
+                 (unsigned int)(PowerStage_IsBuckTrEnActive() ? 1U : 0U),
+                 (unsigned int)(PowerStage_IsBoostTrEnActive() ? 1U : 0U),
                  (unsigned int)PSU_IsRunning(),
                  HostLink_ModeName(),
                  (unsigned long)App_GetFaultFlags(),
@@ -136,7 +201,9 @@ static void HostLink_SendMachineTelemetry(void)
                  (unsigned int)LdoLink_GetCtrlState(),
                  (unsigned int)ldo.kill_reported,
                  (unsigned int)ldo.outoff_reported,
+                 (unsigned long)ldo.fault_flags,
                  (unsigned long)ldo.vout_mv,
+                 (unsigned long)ldo.iout_ma,
                  (long)(prereg.vpre_request_v * 1000.0f),
                  (long)(prereg.vpre_command_v * 1000.0f),
                  (unsigned int)(prereg.regulation_ok ? 1U : 0U),
@@ -154,6 +221,13 @@ static void HostLink_SendMachineTelemetry(void)
     if (n > 0) {
         HostLink_Tx(line);
     }
+
+    if (!with_bms) {
+        return;
+    }
+
+    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
 
     /* TB — full BMS snapshot (cells, pack/stack V, pack I, FETs, safety) */
     n = snprintf(line, sizeof(line),
@@ -253,7 +327,7 @@ static void HostLink_SendMachineTelemetry(void)
 
 static void HostLink_SendTelemetry(void)
 {
-    HostLink_SendMachineTelemetry();
+    HostLink_SendMachineTelemetry(true);
 }
 
 static bool HostLink_EqToken(const char *s, const char *token)
@@ -352,10 +426,11 @@ static void HostLink_SendHelp(void)
     HostLink_Tx(
         "HELP G4 USART1 115200 — machine T/TB/TC for H7/parser\r\n"
         "  ON / OFF        start/stop DCDC + G0 LDO\r\n"
-        "  SET <V> / ILIM <A>\r\n"
+        "  SET V=<V> I=<A> atomic GUI setpoint (0.001 units)\r\n"
+        "  SET <V> / ILIM <A> legacy manual forms\r\n"
         "  PERMIT 0|1      PB7 kill / allow\r\n"
         "  REMOTE ON|OFF   sense path\r\n"
-        "  TEL [ms]        periodic T/TB/TC (0=off, default 500)\r\n"
+        "  TEL [ms]        T period (0=off, default 500; TB/TC >=200 ms)\r\n"
         "  ? / STATUS      one T/TB/TC frame now\r\n"
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
@@ -365,7 +440,7 @@ static void HostLink_SendHelp(void)
         "  BMS OTP BURN I-UNDERSTAND-OTP   one-shot OTP program (lab only)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
-        "Parse: lines starting T / TB / TC, key=value ints. See docs/HOST_TELEMETRY.md\r\n");
+        "Parse: T/TB/TC only. G0 TLM is not forwarded. See docs/HOST_TELEMETRY.md\r\n");
 }
 
 static void HostLink_SendStatus(void)
@@ -386,6 +461,9 @@ static void HostLink_HandleLine(char *line)
         line++;
     }
     if (*line == '\0') {
+        return;
+    }
+    if (!HostLink_LooksLikeHostCommand(line)) {
         return;
     }
 
@@ -444,13 +522,44 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "SET")) {
-        if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR SET use: SET 5.0\r\n");
+        const char *current_arg;
+        float current_value;
+
+        if ((toupper((unsigned char)arg[0]) == 'V') && (arg[1] == '=')) {
+            current_arg = HostLink_SkipToken(arg);
+            if (!HostLink_ParseFloat(&arg[2], &value) ||
+                (toupper((unsigned char)current_arg[0]) != 'I') ||
+                (current_arg[1] != '=') ||
+                !HostLink_ParseFloat(&current_arg[2], &current_value) ||
+                (*HostLink_SkipToken(current_arg) != '\0') ||
+                (value < 0.0f) || (value > 27.0f) ||
+                (current_value < 0.0f) || (current_value > 5.0f)) {
+                HostLink_Tx("ERR SET use: SET V=0.000..27.000 I=0.000..5.000\r\n");
+                return;
+            }
+            LdoLink_SetG0Setpoint(value, current_value);
+            if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
+                PSU_GuiSetTargetVoltage(value + BOARD_VPRE_MARGIN_V);
+            }
+            v_mv = (uint32_t)((value * 1000.0f) + 0.5f);
+            i_ma = (uint32_t)((current_value * 1000.0f) + 0.5f);
+            (void)snprintf(reply, sizeof(reply),
+                           "OK SET V=%lu.%03lu I=%lu.%03lu\r\n",
+                           (unsigned long)(v_mv / 1000U),
+                           (unsigned long)(v_mv % 1000U),
+                           (unsigned long)(i_ma / 1000U),
+                           (unsigned long)(i_ma % 1000U));
+            HostLink_Tx(reply);
+            return;
+        }
+        if (!HostLink_ParseFloat(arg, &value) || (value < 0.0f) ||
+            (value > 27.0f)) {
+            HostLink_Tx("ERR SET range: 0.000..27.000 V\r\n");
             return;
         }
         LdoLink_SetG0Voltage(value);
         if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
-            PSU_GuiSetTargetVoltage(value + 3.0f);
+            PSU_GuiSetTargetVoltage(value + BOARD_VPRE_MARGIN_V);
         }
         v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
         (void)snprintf(reply, sizeof(reply), "OK SET %lu mV\r\n", (unsigned long)v_mv);
@@ -458,12 +567,12 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "ILIM")) {
-        if (!HostLink_ParseFloat(arg, &value)) {
-            HostLink_Tx("ERR ILIM use: ILIM 0.1\r\n");
+        if (!HostLink_ParseFloat(arg, &value) || (value < 0.0f) ||
+            (value > 5.0f)) {
+            HostLink_Tx("ERR ILIM range: 0.000..5.000 A\r\n");
             return;
         }
         LdoLink_SetG0Current(value);
-        PSU_GuiSetTargetCurrent(value);
         i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
         (void)snprintf(reply, sizeof(reply), "OK ILIM %lu mA\r\n", (unsigned long)i_ma);
         HostLink_Tx(reply);
@@ -708,10 +817,16 @@ void HostLink_Init(UART_HandleTypeDef *huart)
 
     s_huart = huart;
     s_rx_len = 0U;
-    s_line_ready = false;
     s_rx_overflow = false;
+    s_rx_q_head = 0U;
+    s_rx_q_tail = 0U;
+    s_rx_q_count = 0U;
+    s_tx_head = 0U;
+    s_tx_tail = 0U;
+    s_tx_used = 0U;
     s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
     s_last_tel_ms = HAL_GetTick();
+    s_last_tb_ms = s_last_tel_ms;
     HostLink_ArmRx();
     HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
     n = snprintf(line, sizeof(line),
@@ -726,7 +841,7 @@ void HostLink_Init(UART_HandleTypeDef *huart)
     if (n > 0) {
         HostLink_Tx(line);
     }
-    HostLink_Tx("USART1 = T/TB/TC telemetry only (VERBOSE 0). Send HELP.\r\n");
+    HostLink_Tx("USART1 = T/TB/TC only; G0 TLM not forwarded (VERBOSE 0). Send HELP.\r\n");
     HostLink_SendHelp();
 }
 
@@ -734,22 +849,29 @@ void HostLink_Task(void)
 {
     uint32_t now_ms;
     char line[HOST_LINK_RX_LINE_MAX];
+    uint32_t bms_ms;
+    bool with_bms;
 
     if (s_huart == NULL) {
         return;
     }
 
-    if (s_line_ready) {
+    HostLink_TxPump();
+
+    while (s_rx_q_count > 0U) {
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
-        memcpy(line, s_rx_line, sizeof(line));
-        s_line_ready = false;
-        s_rx_len = 0U;
+        memcpy(line, s_rx_q[s_rx_q_tail], sizeof(line));
+        s_rx_q_tail = (uint8_t)((s_rx_q_tail + 1U) % HOST_LINK_RX_Q);
+        s_rx_q_count--;
         if (primask == 0U) {
             __enable_irq();
         }
         HostLink_HandleLine(line);
-    } else if (s_rx_overflow) {
+        HostLink_TxPump();
+    }
+
+    if (s_rx_overflow) {
         s_rx_overflow = false;
         HostLink_Tx("ERR LINE\r\n");
     }
@@ -758,8 +880,15 @@ void HostLink_Task(void)
     if ((s_tel_period_ms > 0U) &&
         ((uint32_t)(now_ms - s_last_tel_ms) >= s_tel_period_ms)) {
         s_last_tel_ms = now_ms;
-        HostLink_SendTelemetry();
+        bms_ms = HostLink_BmsPeriodMs(s_tel_period_ms);
+        with_bms = ((uint32_t)(now_ms - s_last_tb_ms) >= bms_ms);
+        HostLink_SendMachineTelemetry(with_bms);
+        if (with_bms) {
+            s_last_tb_ms = now_ms;
+        }
     }
+
+    HostLink_TxPump();
 }
 
 void HostLink_ForwardLine(const char *line)
@@ -769,6 +898,14 @@ void HostLink_ForwardLine(const char *line)
     }
     HostLink_Tx(line);
     HostLink_Tx("\r\n");
+}
+
+void HostLink_ForwardG0Line(const char *line)
+{
+    if (!HostLink_ShouldForwardG0Line(line, Debug_IsEnabled())) {
+        return;
+    }
+    HostLink_ForwardLine(line);
 }
 
 void HostLink_OnUartError(UART_HandleTypeDef *huart)
@@ -790,16 +927,20 @@ void HostLink_RxCplt(UART_HandleTypeDef *huart)
     if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
         if (s_rx_len > 0U) {
             s_rx_line[s_rx_len] = '\0';
-            s_line_ready = true;
+            if (s_rx_q_count < HOST_LINK_RX_Q) {
+                memcpy(s_rx_q[s_rx_q_head], s_rx_line, sizeof(s_rx_line));
+                s_rx_q_head = (uint8_t)((s_rx_q_head + 1U) % HOST_LINK_RX_Q);
+                s_rx_q_count++;
+            } else {
+                s_rx_overflow = true;
+            }
             s_rx_len = 0U;
         }
-    } else if (!s_line_ready) {
-        if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
-            s_rx_line[s_rx_len++] = (char)ch;
-        } else {
-            s_rx_overflow = true;
-            s_rx_len = 0U;
-        }
+    } else if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
+        s_rx_line[s_rx_len++] = (char)ch;
+    } else {
+        s_rx_overflow = true;
+        s_rx_len = 0U;
     }
 
     HostLink_ArmRx();

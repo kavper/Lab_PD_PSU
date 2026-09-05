@@ -184,6 +184,7 @@ static void MX_ADC1_Init(void)
   ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC1_Init 1 */
+  /* Kernel 42.5 MHz (PCLK/4). HAL has no ASYNC_DIV3; DIV2=85 MHz is over 12-bit spec. */
   /* USER CODE END ADC1_Init 1 */
 
   /** Common config
@@ -219,9 +220,9 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_4;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_92CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_6CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -232,14 +233,18 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_24CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-  /* Rank 1 PA0 ADC1_IN1 ADC_VBAT = VIN. Rank 2 PA3 ADC1_IN4 I_OUT_BOOST INA296. */
+  /* Rank 1 PA3 ADC1_IN4 I_OUT_BOOST 6.5 cyc (~153 ns S/H at CMP3).
+   * Rank 2 PA0 ADC1_IN1 VIN 24.5 cyc (~576 ns for 51k/4.7k Thevenin ~4.3 kΩ).
+   * Dual scan 6.5+12.5 + 24.5+12.5 = 56 cyc ≈ 1.32 µs < 2.0 µs PWM period.
+   * I_IN_BUCK is ADC2 rank 1 so both INA296 convert in parallel. */
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -258,6 +263,7 @@ static void MX_ADC2_Init(void)
   ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC2_Init 1 */
+  /* Same 42.5 MHz kernel as ADC1. */
   /* USER CODE END ADC2_Init 1 */
 
   /** Common config
@@ -267,11 +273,11 @@ static void MX_ADC2_Init(void)
   hadc2.Init.Resolution = ADC_RESOLUTION_12B;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc2.Init.LowPowerAutoWait = DISABLE;
   hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.NbrOfConversion = 2;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
   hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIG_HRTIM_TRG1;
   hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
@@ -285,9 +291,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_92CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_6CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -295,8 +301,19 @@ static void MX_ADC2_Init(void)
   {
     Error_Handler();
   }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_24CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN ADC2_Init 2 */
-  /* Rank 1 PB2 ADC2_IN12 ADC_VOUT. Matches measurements.c DMA slot 0. */
+  /* Rank 1 PA1 ADC2_IN2 I_IN_BUCK 6.5 cyc. Rank 2 PB2 ADC2_IN12 VOUT 24.5 cyc.
+   * DMA slots 0/1 in measurements.c. ACS37100 I_L_MEAS is not sampled. */
   /* USER CODE END ADC2_Init 2 */
 
 }
@@ -348,7 +365,7 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_HRTIM_ADCPostScalerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, 10) != HAL_OK)
+  if (HAL_HRTIM_ADCPostScalerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, 0) != HAL_OK)
   {
     Error_Handler();
   }
@@ -477,6 +494,7 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN HRTIM1_Init 2 */
+  /* Postscaler 0: ADC every PWM period. Dual scan fits in 2 µs so skip is unused. */
   BoardMx_ApplyHrtimFault(&hhrtim1);
   /* USER CODE END HRTIM1_Init 2 */
   HAL_HRTIM_MspPostInit(&hhrtim1);
@@ -578,6 +596,16 @@ static void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
+  /* CubeMX emits DisableFifoMode. G0 115200 needs the 8-byte RX FIFO or
+   * one missed IRQ (86 µs) overruns and shreds TLM / toggles DCDC. */
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_EnableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END USART2_Init 2 */
 
 }
@@ -623,6 +651,17 @@ static void MX_USART1_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART1_Init 2 */
+  /* CubeMX emits DisableFifoMode. Host SET on USART1 collides with T/TB/TC
+   * TX; the 8-byte RX FIFO covers one missed IRQ so slider commands are
+   * not shredded into SET 1.300 / ERR CMD. */
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_EnableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END USART1_Init 2 */
 
 }

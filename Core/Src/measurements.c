@@ -1,5 +1,6 @@
 #include "measurements.h"
 #include "board_rev.h"
+#include "dcdc_hs_policy.h"
 
 #define MEAS_ADC_TIMEOUT_MS              5U
 #define MEAS_ADC_VREF_V                  BOARD_VREF_V
@@ -7,14 +8,13 @@
 #define MEAS_IIR_ALPHA                   0.20f
 #define MEAS_DMA_DEPTH                   64U
 #define MEAS_ADC1_CHANNELS               2U
+#define MEAS_ADC2_CHANNELS               2U
 #define MEAS_ADC1_DMA_LENGTH             (MEAS_DMA_DEPTH * MEAS_ADC1_CHANNELS)
-#define MEAS_ADC2_DMA_LENGTH             MEAS_DMA_DEPTH
+#define MEAS_ADC2_DMA_LENGTH             (MEAS_DMA_DEPTH * MEAS_ADC2_CHANNELS)
 #define MEAS_DMA_SENTINEL                0xFFFFU
 
 #define MEAS_VIN_DIVIDER_RATIO           BOARD_DIVIDER_RATIO
 #define MEAS_VOUT_DIVIDER_RATIO          BOARD_DIVIDER_RATIO
-#define MEAS_IOUT_A_PER_V                BOARD_INA296_A_PER_V
-#define MEAS_IOUT_OFFSET_A               0.0f
 
 typedef struct {
     ADC_HandleTypeDef *hadc1;
@@ -23,6 +23,8 @@ typedef struct {
     float vout_filt;
     float iout_filt;
     float vbat_filt;
+    float i_hs_buck_filt;
+    float i_hs_boost_filt;
     HAL_StatusTypeDef last_hal_status;
     uint32_t dma_update_count;
     uint32_t last_adc1_slot;
@@ -53,9 +55,9 @@ enum {
     MEAS_ERR_DMA_NO_DATA
 };
 
-static float Meas_AdcToVoltage(uint16_t raw)
+static float Meas_CountsToVoltage(float counts)
 {
-    return ((float)raw * MEAS_ADC_VREF_V) / MEAS_ADC_FULL_SCALE;
+    return (counts * MEAS_ADC_VREF_V) / MEAS_ADC_FULL_SCALE;
 }
 
 static float Meas_Iir(float prev, float input)
@@ -92,25 +94,45 @@ static bool Meas_EnsureCircularDma(ADC_HandleTypeDef *hadc)
     return true;
 }
 
-static bool Meas_LatestAdc1Slot(uint32_t *slot)
+/*
+ * HAL_ADC_Start_DMA() arms DMA HT/TC and ADC OVR IRQs. At 500 kHz with
+ * postscaler 0 that is ~31 kHz of priority-1 ISRs and can starve USART2
+ * (G0 link, priority 5) into ORE. Measurements already poll DMA NDTR.
+ */
+static void Meas_QuietAdcIrqs(ADC_HandleTypeDef *hadc)
+{
+    if (hadc == NULL) {
+        return;
+    }
+
+    __HAL_ADC_DISABLE_IT(hadc, ADC_IT_OVR | ADC_IT_EOC | ADC_IT_EOS);
+
+    if (hadc->DMA_Handle != NULL) {
+        __HAL_DMA_DISABLE_IT(hadc->DMA_Handle, DMA_IT_HT | DMA_IT_TC);
+    }
+}
+
+static bool Meas_LatestSlot(ADC_HandleTypeDef *hadc,
+                            uint32_t dma_length,
+                            uint32_t channels,
+                            uint32_t *slot)
 {
     uint32_t remaining;
     uint32_t written;
 
-    if ((slot == NULL) ||
-        (g_meas_ctx.hadc1 == NULL) ||
-        (g_meas_ctx.hadc1->DMA_Handle == NULL)) {
+    if ((slot == NULL) || (hadc == NULL) || (hadc->DMA_Handle == NULL) ||
+        (channels == 0U)) {
         return false;
     }
 
-    remaining = __HAL_DMA_GET_COUNTER(g_meas_ctx.hadc1->DMA_Handle);
-    if (remaining > MEAS_ADC1_DMA_LENGTH) {
+    remaining = __HAL_DMA_GET_COUNTER(hadc->DMA_Handle);
+    if (remaining > dma_length) {
         return false;
     }
 
-    written = MEAS_ADC1_DMA_LENGTH - remaining;
-    if (written >= MEAS_ADC1_CHANNELS) {
-        *slot = (written / MEAS_ADC1_CHANNELS) - 1U;
+    written = dma_length - remaining;
+    if (written >= channels) {
+        *slot = (written / channels) - 1U;
     } else {
         *slot = MEAS_DMA_DEPTH - 1U;
     }
@@ -122,34 +144,67 @@ static bool Meas_LatestAdc1Slot(uint32_t *slot)
     return true;
 }
 
+static bool Meas_LatestAdc1Slot(uint32_t *slot)
+{
+    return Meas_LatestSlot(g_meas_ctx.hadc1,
+                           MEAS_ADC1_DMA_LENGTH,
+                           MEAS_ADC1_CHANNELS,
+                           slot);
+}
+
 static bool Meas_LatestAdc2Slot(uint32_t *slot)
 {
-    uint32_t remaining;
-    uint32_t written;
+    return Meas_LatestSlot(g_meas_ctx.hadc2,
+                           MEAS_ADC2_DMA_LENGTH,
+                           MEAS_ADC2_CHANNELS,
+                           slot);
+}
 
-    if ((slot == NULL) ||
-        (g_meas_ctx.hadc2 == NULL) ||
-        (g_meas_ctx.hadc2->DMA_Handle == NULL)) {
+static bool Meas_MeanChannel(const uint16_t *buf,
+                             uint32_t channels,
+                             uint32_t channel,
+                             float *mean_counts)
+{
+    uint32_t i;
+    uint32_t n = 0U;
+    uint32_t sum = 0U;
+
+    if ((buf == NULL) || (mean_counts == NULL) || (channel >= channels)) {
         return false;
     }
 
-    remaining = __HAL_DMA_GET_COUNTER(g_meas_ctx.hadc2->DMA_Handle);
-    if (remaining > MEAS_ADC2_DMA_LENGTH) {
+    for (i = 0U; i < MEAS_DMA_DEPTH; i++) {
+        uint16_t raw = buf[(i * channels) + channel];
+
+        if ((raw != MEAS_DMA_SENTINEL) && (raw <= (uint16_t)MEAS_ADC_FULL_SCALE)) {
+            sum += raw;
+            n++;
+        }
+    }
+
+    if (n == 0U) {
         return false;
     }
 
-    written = MEAS_ADC2_DMA_LENGTH - remaining;
-    if (written >= 1U) {
-        *slot = written - 1U;
-    } else {
-        *slot = MEAS_DMA_DEPTH - 1U;
-    }
-
-    if (*slot >= MEAS_DMA_DEPTH) {
-        *slot = MEAS_DMA_DEPTH - 1U;
-    }
-
+    *mean_counts = (float)sum / (float)n;
     return true;
+}
+
+static float Meas_Ina296AmpereFromCounts(float counts)
+{
+    uint16_t raw;
+
+    if (counts < 0.0f) {
+        counts = 0.0f;
+    } else if (counts > MEAS_ADC_FULL_SCALE) {
+        counts = MEAS_ADC_FULL_SCALE;
+    }
+
+    raw = (uint16_t)(counts + 0.5f);
+    return Dcdc_Ina296CountsToAmpere(raw,
+                                     MEAS_ADC_VREF_V,
+                                     BOARD_INA296_GAIN,
+                                     BOARD_INA296_SHUNT_OHM);
 }
 
 void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2)
@@ -160,6 +215,8 @@ void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2)
     g_meas_ctx.vout_filt = 0.0f;
     g_meas_ctx.iout_filt = 0.0f;
     g_meas_ctx.vbat_filt = 0.0f;
+    g_meas_ctx.i_hs_buck_filt = 0.0f;
+    g_meas_ctx.i_hs_boost_filt = 0.0f;
     g_meas_ctx.last_hal_status = HAL_OK;
     g_meas_ctx.dma_update_count = 0U;
     g_meas_ctx.last_adc1_slot = MEAS_DMA_DEPTH;
@@ -170,6 +227,12 @@ void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2)
     g_meas_ctx.initialized = false;
 
     if ((hadc1 == NULL) || (hadc2 == NULL)) {
+        return;
+    }
+
+    if ((hadc1->Init.NbrOfConversion != MEAS_ADC1_CHANNELS) ||
+        (hadc2->Init.NbrOfConversion != MEAS_ADC2_CHANNELS)) {
+        g_meas_ctx.last_error = MEAS_ERR_INIT_ADC1;
         return;
     }
 
@@ -222,6 +285,9 @@ void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2)
         return;
     }
 
+    Meas_QuietAdcIrqs(hadc1);
+    Meas_QuietAdcIrqs(hadc2);
+
     g_meas_ctx.dma_running = true;
     g_meas_ctx.initialized = true;
     g_meas_ctx.last_error = MEAS_ERR_NONE;
@@ -231,13 +297,19 @@ bool Measurements_Update(Measurements_t *meas)
 {
     uint16_t raw_vout;
     uint16_t raw_vin;
-    uint16_t raw_iout;
+    uint16_t raw_i_boost;
+    uint16_t raw_i_buck;
     uint32_t adc1_slot;
     uint32_t adc2_slot;
     float vin;
     float vout;
-    float iout;
+    float i_hs_boost;
+    float i_hs_buck;
     float vbat;
+    float mean_i_boost;
+    float mean_i_buck;
+    float mean_vin;
+    float mean_vout;
 
     if ((meas == NULL) || (!g_meas_ctx.initialized)) {
         g_meas_ctx.last_error = MEAS_ERR_INIT_ADC1;
@@ -251,19 +323,32 @@ bool Measurements_Update(Measurements_t *meas)
         return false;
     }
 
-    /* ADC1 rank1 DMA[0]: ADC_CHANNEL_1 PA0 ADC_VBAT (VIN via 51k/4.7k).
-     * ADC1 rank2 DMA[1]: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3).
-     * ADC2 rank1 DMA[0]: ADC_CHANNEL_12 PB2 ADC_VOUT. Keep ranks in Lab_PD_PSU.ioc. */
-    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
-    raw_iout = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
-    raw_vout = adc2_dma_buffer[adc2_slot];
+    /* ADC1 rank1 DMA[0]: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3), 6.5 cyc.
+     * ADC1 rank2 DMA[1]: ADC_CHANNEL_1 PA0 ADC_VBAT VIN (51k/4.7k), 24.5 cyc.
+     * ADC2 rank1 DMA[0]: ADC_CHANNEL_2 PA1 I_IN_BUCK (INA296A3), 6.5 cyc.
+     * ADC2 rank2 DMA[1]: ADC_CHANNEL_12 PB2 ADC_VOUT, 24.5 cyc.
+     * Currents convert first at CMP3 (mid HS-ON). I_L_MEAS / ACS37100 unused. */
+    raw_i_boost = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
+    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
+    raw_i_buck = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 0U];
+    raw_vout = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 1U];
 
     if ((raw_vout == MEAS_DMA_SENTINEL) ||
         (raw_vin == MEAS_DMA_SENTINEL) ||
-        (raw_iout == MEAS_DMA_SENTINEL) ||
+        (raw_i_boost == MEAS_DMA_SENTINEL) ||
+        (raw_i_buck == MEAS_DMA_SENTINEL) ||
         (raw_vout > (uint16_t)MEAS_ADC_FULL_SCALE) ||
         (raw_vin > (uint16_t)MEAS_ADC_FULL_SCALE) ||
-        (raw_iout > (uint16_t)MEAS_ADC_FULL_SCALE)) {
+        (raw_i_boost > (uint16_t)MEAS_ADC_FULL_SCALE) ||
+        (raw_i_buck > (uint16_t)MEAS_ADC_FULL_SCALE)) {
+        g_meas_ctx.last_error = MEAS_ERR_DMA_NO_DATA;
+        return false;
+    }
+
+    if ((!Meas_MeanChannel(adc1_dma_buffer, MEAS_ADC1_CHANNELS, 0U, &mean_i_boost)) ||
+        (!Meas_MeanChannel(adc1_dma_buffer, MEAS_ADC1_CHANNELS, 1U, &mean_vin)) ||
+        (!Meas_MeanChannel(adc2_dma_buffer, MEAS_ADC2_CHANNELS, 0U, &mean_i_buck)) ||
+        (!Meas_MeanChannel(adc2_dma_buffer, MEAS_ADC2_CHANNELS, 1U, &mean_vout))) {
         g_meas_ctx.last_error = MEAS_ERR_DMA_NO_DATA;
         return false;
     }
@@ -274,22 +359,26 @@ bool Measurements_Update(Measurements_t *meas)
         g_meas_ctx.dma_seen_once = true;
     }
 
-    vout = Meas_AdcToVoltage(raw_vout) * MEAS_VOUT_DIVIDER_RATIO;
-    vin = Meas_AdcToVoltage(raw_vin) * MEAS_VIN_DIVIDER_RATIO;
+    vout = Meas_CountsToVoltage(mean_vout) * MEAS_VOUT_DIVIDER_RATIO;
+    vin = Meas_CountsToVoltage(mean_vin) * MEAS_VIN_DIVIDER_RATIO;
     vbat = vin;
-    iout = (Meas_AdcToVoltage(raw_iout) - BOARD_INA296_OFFSET_V) *
-           MEAS_IOUT_A_PER_V + MEAS_IOUT_OFFSET_A;
+    i_hs_boost = Meas_Ina296AmpereFromCounts(mean_i_boost);
+    i_hs_buck = Meas_Ina296AmpereFromCounts(mean_i_buck);
 
     if (!g_meas_ctx.filter_ready) {
         g_meas_ctx.vin_filt = vin;
         g_meas_ctx.vout_filt = vout;
-        g_meas_ctx.iout_filt = iout;
+        g_meas_ctx.i_hs_boost_filt = i_hs_boost;
+        g_meas_ctx.i_hs_buck_filt = i_hs_buck;
+        g_meas_ctx.iout_filt = i_hs_boost;
         g_meas_ctx.vbat_filt = vbat;
         g_meas_ctx.filter_ready = true;
     } else {
         g_meas_ctx.vin_filt = Meas_Iir(g_meas_ctx.vin_filt, vin);
         g_meas_ctx.vout_filt = Meas_Iir(g_meas_ctx.vout_filt, vout);
-        g_meas_ctx.iout_filt = Meas_Iir(g_meas_ctx.iout_filt, iout);
+        g_meas_ctx.i_hs_boost_filt = Meas_Iir(g_meas_ctx.i_hs_boost_filt, i_hs_boost);
+        g_meas_ctx.i_hs_buck_filt = Meas_Iir(g_meas_ctx.i_hs_buck_filt, i_hs_buck);
+        g_meas_ctx.iout_filt = g_meas_ctx.i_hs_boost_filt;
         g_meas_ctx.vbat_filt = Meas_Iir(g_meas_ctx.vbat_filt, vbat);
     }
 
@@ -297,9 +386,13 @@ bool Measurements_Update(Measurements_t *meas)
     meas->vout = g_meas_ctx.vout_filt;
     meas->iout = g_meas_ctx.iout_filt;
     meas->vbat = g_meas_ctx.vbat_filt;
+    meas->i_hs_buck = g_meas_ctx.i_hs_buck_filt;
+    meas->i_hs_boost = g_meas_ctx.i_hs_boost_filt;
     meas->raw_vin = raw_vin;
     meas->raw_vout = raw_vout;
-    meas->raw_iout = raw_iout;
+    meas->raw_iout = raw_i_boost;
+    meas->raw_i_hs_buck = raw_i_buck;
+    meas->raw_i_hs_boost = raw_i_boost;
     meas->valid = true;
     g_meas_ctx.last_error = MEAS_ERR_NONE;
     g_meas_ctx.last_hal_status = HAL_OK;

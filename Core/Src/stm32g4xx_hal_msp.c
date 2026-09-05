@@ -120,8 +120,8 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**ADC1 GPIO Configuration
-    PA0     ------> ADC1_IN1  ADC_VBAT
-    PA3     ------> ADC1_IN4  I_OUT_BOOST
+    PA0     ------> ADC1_IN1  ADC_VBAT (VIN, rank 2)
+    PA3     ------> ADC1_IN4  I_OUT_BOOST (rank 1)
     */
     GPIO_InitStruct.Pin = ADC_VBAT_Pin|I_OUT_BOOST_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -176,7 +176,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
     /**ADC2 GPIO Configuration
-    PB2     ------> ADC2_IN12  ADC_VOUT
+    PB2     ------> ADC2_IN12  ADC_VOUT (rank 2)
     */
     GPIO_InitStruct.Pin = ADC_VOUT_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -205,7 +205,12 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
     /* USER CODE BEGIN ADC2_MspInit 1 */
-
+    /* PA1 ADC2_IN2 I_IN_BUCK: CubeMX rank1 (currents first). Pin set unchanged. */
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitStruct.Pin = I_IN_BUCK_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(I_IN_BUCK_GPIO_Port, &GPIO_InitStruct);
     /* USER CODE END ADC2_MspInit 1 */
   }
 
@@ -281,7 +286,7 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     /* USER CODE END ADC2:ADC1_2_IRQn disable */
 
     /* USER CODE BEGIN ADC2_MspDeInit 1 */
-
+    HAL_GPIO_DeInit(I_IN_BUCK_GPIO_Port, I_IN_BUCK_Pin);
     /* USER CODE END ADC2_MspDeInit 1 */
   }
 
@@ -535,7 +540,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+    /* G0 115200: preempt DMA leftovers. FIFO still covers a late ISR. */
+    HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 
     /* USER CODE BEGIN USART2_MspInit 1 */

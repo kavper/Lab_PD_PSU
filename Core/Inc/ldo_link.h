@@ -42,6 +42,7 @@ typedef struct {
     uint32_t iset_ma;
     uint32_t iout_ma;
     uint32_t vpre_mv;
+    uint32_t fault_flags;
     bool vpre_present;
     uint32_t last_tlm_ms;
     uint32_t last_rx_ms;
@@ -72,7 +73,7 @@ bool LdoLink_IsDcdcPermitRequested(void);
 void LdoLink_GetStatus(LdoLink_Status_t *out);
 bool LdoLink_IsPowerPermitted(void);
 
-/* G0 final-output control (ASCII SET / OUT ON / OUT OFF). */
+/* G0 final-output control (binary atomic SETPOINT / SET_OUTPUT). */
 void LdoLink_RequestOutput(bool on);
 bool LdoLink_IsOutputWanted(void);
 void LdoLink_SetG0Setpoint(float volts, float amps);

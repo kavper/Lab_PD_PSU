@@ -4,11 +4,11 @@
 #include "bms_board.h"
 #include "bq76922.h"
 #include "control_cv.h"
+#include "dcdc_hs_policy.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "host_link.h"
-#include "ldo_link.h"
 #include "measurements.h"
 #include "power_manager.h"
 #include "power_stage.h"
@@ -16,6 +16,7 @@
 
 BQ76922_Device_t g_bq76922;
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,7 +45,7 @@ BQ76922_Device_t g_bq76922;
 #define DUTY_MAX_ABS                         1.000f
 
 #define DUTY_BUCK_MIN                        0.020f
-/* 1.0 allowed: PowerStage switches to StaticHigh+bootstrap refresh at >=98% HS. */
+/* 1.0 allowed: PowerStage switches to StaticHigh+UCC at >=97% HS. */
 #define DUTY_BUCK_MAX                        1.000f
 
 /* BUCK_BOOST mixed-mode duty limits are set here. */
@@ -99,8 +100,7 @@ BQ76922_Device_t g_bq76922;
 #define REGION_SWITCH_CONFIRM_COUNT          8U
 #define REGION_MIN_DWELL_MS                  200U
 
-#define OCP_ACTIVE_MIN_LIMIT_A               0.05f
-#define OCP_HIT_COUNT_LIMIT                  20U
+#define OCP_HIT_COUNT_LIMIT                  DCDC_HS_OCP_HIT_LIMIT
 
 #define OFF_RAMP_DONE_V                      0.020f
 #define OFF_DISABLE_HOLD_TICKS               80U
@@ -169,6 +169,14 @@ typedef struct {
     bool fast_loop_running;
     bool timebase_glitch;
     bool low_setpoint_start_active;
+    bool ocp_event_pending;
+    float ocp_event_i_buck;
+    float ocp_event_i_boost;
+    float ocp_event_iout;
+    float ocp_event_ilim;
+    float ocp_event_vin;
+    float ocp_event_vout;
+    uint32_t ocp_event_hits;
 } App_Context_t;
 
 static App_Context_t app;
@@ -638,7 +646,8 @@ static void App_ApplyDuty(PowerStage_Region_t region,
                           float duty_cmd_a,
                           float duty_cmd_c)
 {
-    float adc_trigger;
+    float buck_hs_end;
+    float boost_hs_end;
 
     duty_cmd_a = App_Clamp(duty_cmd_a, DUTY_MIN_ABS, DUTY_MAX_ABS);
     duty_cmd_c = App_Clamp(duty_cmd_c, DUTY_MIN_ABS, DUTY_MAX_ABS);
@@ -647,24 +656,30 @@ static void App_ApplyDuty(PowerStage_Region_t region,
 
     switch (region) {
         case POWER_REGION_BUCK:
+            /* Buck PWM on TA1 (HS). Boost pass-through: HS static 100%. */
             PowerStage_SetDuty(duty_cmd_a, 0.0f);
-            adc_trigger = App_Clamp(duty_cmd_a + 0.20f, 0.15f, 0.85f);
-            PowerStage_SetAdcTriggerPoint(adc_trigger);
+            buck_hs_end = duty_cmd_a;
+            boost_hs_end = 1.0f;
             break;
 
         case POWER_REGION_BOOST:
-            /* Diagnostic-only path: not selected by automatic CV region logic. */
+            /* Diagnostic-only path: not selected by automatic CV region logic.
+             * Buck pass-through HS=100%. duty_c is boost LS, so HS = 1 − D_C. */
             PowerStage_SetDuty(1.0f, duty_cmd_c);
-            adc_trigger = App_Clamp(duty_cmd_c + 0.20f, 0.15f, 0.85f);
-            PowerStage_SetAdcTriggerPoint(adc_trigger);
+            buck_hs_end = 1.0f;
+            boost_hs_end = 1.0f - duty_cmd_c;
             break;
 
         case POWER_REGION_BUCK_BOOST:
         default:
             PowerStage_SetDuty(duty_cmd_a, duty_cmd_c);
-            PowerStage_SetAdcTriggerPoint(0.60f);
+            buck_hs_end = duty_cmd_a;
+            boost_hs_end = 1.0f - duty_cmd_c;
             break;
     }
+
+    /* CMP3 in the overlap of both HS-ON windows so INA296 S/H is in-pulse. */
+    PowerStage_SetAdcTriggerPoint(Dcdc_AdcTriggerInHsOn(buck_hs_end, boost_hs_end));
 
     app.duty_cmd_a = duty_cmd_a;
     app.duty_cmd_c = duty_cmd_c;
@@ -871,10 +886,61 @@ static void App_SaturateForRegion(PowerStage_Region_t region,
     }
 }
 
+static void App_LatchOcpEvent(void)
+{
+    if (app.ocp_event_pending) {
+        return;
+    }
+
+    app.ocp_event_pending = true;
+    app.ocp_event_i_buck = app.meas.i_hs_buck;
+    app.ocp_event_i_boost = app.meas.i_hs_boost;
+    app.ocp_event_iout = app.meas.iout;
+    app.ocp_event_ilim = DCDC_HS_EMERGENCY_OCP_A;
+    app.ocp_event_vin = app.meas.vin;
+    app.ocp_event_vout = app.meas.vout;
+    app.ocp_event_hits = app.ocp_hit_count;
+}
+
+static void App_PublishOcpEvent(void)
+{
+    char line[220];
+    int n;
+
+    if (!app.ocp_event_pending) {
+        return;
+    }
+
+    app.ocp_event_pending = false;
+    n = snprintf(line, sizeof(line),
+                 "E OCP src=HS_INA296 i_buck_ma=%ld i_boost_ma=%ld iout_ma=%ld "
+                 "ilim_ma=%ld hits=%lu vin_mv=%ld vout_mv=%ld",
+                 (long)((app.ocp_event_i_buck * 1000.0f) +
+                        ((app.ocp_event_i_buck >= 0.0f) ? 0.5f : -0.5f)),
+                 (long)((app.ocp_event_i_boost * 1000.0f) +
+                        ((app.ocp_event_i_boost >= 0.0f) ? 0.5f : -0.5f)),
+                 (long)((app.ocp_event_iout * 1000.0f) +
+                        ((app.ocp_event_iout >= 0.0f) ? 0.5f : -0.5f)),
+                 (long)((app.ocp_event_ilim * 1000.0f) +
+                        ((app.ocp_event_ilim >= 0.0f) ? 0.5f : -0.5f)),
+                 (unsigned long)app.ocp_event_hits,
+                 (long)((app.ocp_event_vin * 1000.0f) +
+                        ((app.ocp_event_vin >= 0.0f) ? 0.5f : -0.5f)),
+                 (long)((app.ocp_event_vout * 1000.0f) +
+                        ((app.ocp_event_vout >= 0.0f) ? 0.5f : -0.5f)));
+    if (n > 0) {
+        HostLink_ForwardLine(line);
+    }
+}
+
 static void App_FaultShutdown(uint32_t reason)
 {
     if (reason == FAULT_NONE) {
         reason = FAULT_DRIVER;
+    }
+
+    if (((reason & FAULT_OCP) != 0U) && ((app.latched_fault_flags & FAULT_OCP) == 0U)) {
+        App_LatchOcpEvent();
     }
 
     app.latched_fault_flags |= reason;
@@ -931,16 +997,20 @@ static void App_UpdateFaultFlagsFast(bool adc_ok)
             flags |= FAULT_OVP;
         }
 
-        if (app.stage_enabled && (app.current_limit_a >= OCP_ACTIVE_MIN_LIMIT_A)) {
-            if (app.meas.iout > app.current_limit_a) {
-                if (app.ocp_hit_count < OCP_HIT_COUNT_LIMIT) {
-                    app.ocp_hit_count++;
-                }
-                if (app.ocp_hit_count >= OCP_HIT_COUNT_LIMIT) {
-                    flags |= FAULT_OCP;
-                }
-            } else if (app.ocp_hit_count > 0U) {
-                app.ocp_hit_count--;
+        if (app.stage_enabled) {
+            /*
+             * The user current limit belongs to the G0 LDO, which enforces it
+             * in analogue hardware.  G4 watches only for a catastrophic DCDC
+             * overcurrent and must not move this threshold with the UI slider.
+             */
+            bool hs_over = Dcdc_HsEmergencyOvercurrent(app.meas.i_hs_buck,
+                                                       app.meas.i_hs_boost);
+
+            app.ocp_hit_count = Dcdc_OcpUpdateHits(app.ocp_hit_count,
+                                                   hs_over,
+                                                   OCP_HIT_COUNT_LIMIT);
+            if (Dcdc_OcpTripped(app.ocp_hit_count, OCP_HIT_COUNT_LIMIT)) {
+                flags |= FAULT_OCP;
             }
         } else {
             app.ocp_hit_count = 0U;
@@ -1377,6 +1447,8 @@ static void App_DebugTask(void)
     float vin;
     float vout;
     float iout;
+    float i_hs_buck;
+    float i_hs_boost;
     float setpoint_v;
     float ramped_setpoint_v;
     float duty_cmd_c;
@@ -1390,6 +1462,8 @@ static void App_DebugTask(void)
     int32_t vin_x1000;
     int32_t vout_x1000;
     int32_t iout_x1000;
+    int32_t i_buck_x1000;
+    int32_t i_boost_x1000;
     int32_t set_x1000;
     int32_t rset_x1000;
     int32_t err_x1000;
@@ -1414,6 +1488,8 @@ static void App_DebugTask(void)
     vin = app.meas.vin;
     vout = app.meas.vout;
     iout = app.meas.iout;
+    i_hs_buck = app.meas.i_hs_buck;
+    i_hs_boost = app.meas.i_hs_boost;
     setpoint_v = app.cv_user_setpoint;
     ramped_setpoint_v = ControlCv_GetRampedSetpoint(&app.cv);
     duty_cmd_c = app.duty_cmd_c;
@@ -1465,6 +1541,8 @@ static void App_DebugTask(void)
     vin_x1000 = App_ToFixed(vin, 1000);
     vout_x1000 = App_ToFixed(vout, 1000);
     iout_x1000 = App_ToFixed(iout, 1000);
+    i_buck_x1000 = App_ToFixed(i_hs_buck, 1000);
+    i_boost_x1000 = App_ToFixed(i_hs_boost, 1000);
     set_x1000 = App_ToFixed(setpoint_v, 1000);
     rset_x1000 = App_ToFixed(ramped_setpoint_v, 1000);
     err_x1000 = App_ToFixed(cv_error_v, 1000);
@@ -1478,7 +1556,7 @@ static void App_DebugTask(void)
 
     App_FaultText(fault_flags, fault_text, sizeof(fault_text));
 
-    Debug_Printf("[APP] mode=%s req=%s region=%s vin=%s%ld.%03ldV vout=%s%ld.%03ldV set=%s%ld.%03ldV rset=%s%ld.%03ldV err=%s%ld.%03ldV iout=%s%ld.%03ldA fault=%s en=%u",
+    Debug_Printf("[APP] mode=%s req=%s region=%s vin=%s%ld.%03ldV vout=%s%ld.%03ldV set=%s%ld.%03ldV rset=%s%ld.%03ldV err=%s%ld.%03ldV iout=%s%ld.%03ldA i_buck=%s%ld.%03ldA i_boost=%s%ld.%03ldA fault=%s en=%u",
                  App_ModeText(active_mode),
                  App_ModeText(requested_mode),
                  App_RegionText(active_region),
@@ -1500,6 +1578,12 @@ static void App_DebugTask(void)
                  (iout_x1000 < 0) ? "-" : "",
                  App_IntPart(iout_x1000, 1000),
                  App_FracPart(iout_x1000, 1000),
+                 (i_buck_x1000 < 0) ? "-" : "",
+                 App_IntPart(i_buck_x1000, 1000),
+                 App_FracPart(i_buck_x1000, 1000),
+                 (i_boost_x1000 < 0) ? "-" : "",
+                 App_IntPart(i_boost_x1000, 1000),
+                 App_FracPart(i_boost_x1000, 1000),
                  fault_text,
                  stage_enabled ? 1U : 0U);
 
@@ -1726,9 +1810,11 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     }
 #endif
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    Debug_Printf("[APP] GaN: UCC TR_EN selective (HS>=%lu.%02lu%% per leg, TR_FLT feedback)",
+    Debug_Printf("[APP] GaN: UCC TR_EN selective (HS>=%lu.%02lu%% per leg, off<%lu.%02lu%%, TR_FLT feedback)",
                  (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U));
+                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U),
+                 (unsigned long)(Dcdc_UccDutyOff10k() / 100U),
+                 (unsigned long)(Dcdc_UccDutyOff10k() % 100U));
 #else
     Debug_Printf("[APP] GaN: direct +5V drivers (TR_EN/TR_FLT ignored)");
 #endif
@@ -1739,6 +1825,9 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 #else
     Debug_Printf("[APP] GaN: bootstrap refresh OFF");
 #endif
+    Debug_Printf("[APP] GaN: HS INA296 OCP (buck+boost, %u cycles @ %lu Hz, ACS37100 I_L ignored)",
+                 (unsigned int)OCP_HIT_COUNT_LIMIT,
+                 (unsigned long)APP_CTRL_FREQ_HZ);
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
     Debug_Printf("[APP] DIAG: pure BOOST fixed PWM test ENABLED (10%% -> 30%% -> 50%%)");
 #endif
@@ -1750,6 +1839,7 @@ void App_Run(void)
 {
     LdoLink_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
+    App_PublishOcpEvent();
     App_ControlSlowTask();
     /* BMS before PM: button/charger wake must open FETs before TPS grabs I2C4. */
     BQ76922_Task(&g_bq76922, HAL_GetTick());
@@ -1864,6 +1954,16 @@ float App_GetOutputVoltage(void)
 float App_GetOutputCurrent(void)
 {
     return app.meas.iout;
+}
+
+float App_GetHsBuckCurrent(void)
+{
+    return app.meas.i_hs_buck;
+}
+
+float App_GetHsBoostCurrent(void)
+{
+    return app.meas.i_hs_boost;
 }
 
 bool App_IsStageEnabled(void)

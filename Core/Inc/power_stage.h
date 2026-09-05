@@ -2,6 +2,7 @@
 #define POWER_STAGE_H
 
 #include "main.h"
+#include "dcdc_hs_policy.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -25,10 +26,12 @@
 
 /*
  * Bootstrap / UCC high-side support (selective per leg):
- * When upper-FET (HS) duty reaches ~98%, that leg alone gets help — never
- * blanket both converters. With UCC33420 boards: assert only that leg's
- * BUCK_TR_EN / BOOST_TR_EN and honor its TR_FLT feedback. Without UCC:
+ * When upper-FET (HS) duty reaches 97%, that leg alone gets UCC33420 help —
+ * never blanket both converters. This is extra support while the upper switch
+ * stays on so long that bootstrap cannot refresh. With UCC boards: assert
+ * only that leg's BUCK_TR_EN / BOOST_TR_EN and honor its TR_FLT. Without UCC:
  * StaticHigh + short LS refresh pulses on that leg (HRTIM master, ref_act).
+ * 200-point hysteresis drops EN below 95% so 97% does not chatter.
  */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
@@ -44,7 +47,11 @@
 
 /* HS duty at/above this (x10000) enables that leg's UCC EN and/or refresh. */
 #ifndef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
-#define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K   9800U
+#define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K   DCDC_UCC_HS_DUTY_ON_10K
+#endif
+
+#ifndef POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K
+#define POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K        DCDC_UCC_HS_DUTY_HYST_10K
 #endif
 
 /* Bootstrap refresh frequency is set here; this is not PWM switching frequency. */
