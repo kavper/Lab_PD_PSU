@@ -15,10 +15,12 @@
  * Wake hardware (BQ769x2):
  *   - Button → TS2 pulled to VSS (exit SHUTDOWN) — product wake, no host cmd
  *   - USB-C / charger → LD pin > VWAKEONLD (~1.45 V)
- *   - After wake firmware always FET_ENABLE + ALL_FETS_ON (blank OTP, RAM)
+ *   - After wake, blank OTP needs MCU: FET_ENABLE + ALL_FETS_ON (RAM).
+ *   - Optional OTP golden (docs/BQ76922_OTP_GOLDEN.md): BQ can turn FETs
+ *     on from TS2 alone (FET_EN + FET_INIT_OFF=0 + Vcell Mode).
  *
  * Blank OTP boots FET Test Mode (Mfg Status Init FET_EN=0). Every wake must
- * FET_ENABLE() then ALL_FETS_ON() in software — no OTP burn, no UART needed.
+ * FET_ENABLE() then ALL_FETS_ON() in software until OTP is programmed.
  *
  * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
  * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
@@ -58,11 +60,12 @@
 /* BQ76922 SRP/SRN sense resistor (pack current). Not the DCDC INA296 shunt. */
 #define BMS_SENSE_MOHM                   5U
 /*
- * CC Gain = 7.4768 / Rsense_mOhm (TI calib guide). Default OTP is for ~1 mOhm
- * (CC Gain 7.4768) — with a 5 mOhm shunt CC2/i_pack reads ~5× too high until
- * this is written in CONFIG_UPDATE.
+ * CC Gain = 7.5684 / Rsense_mOhm (BQ76922 TRM, VREF2=1.24 V).
+ * Older BQ769x2 notes used 7.4768 (default OTP assumes ~1 mOhm → 7.4768).
+ * With a 5 mOhm shunt, write 1.51368 or CC2/i_pack reads ~5× too high.
+ * Capacity Gain = CC Gain × 298261.6178 (TRM).
  */
-#define BMS_CC_GAIN                      (7.4768f / (float)BMS_SENSE_MOHM)
+#define BMS_CC_GAIN                      (7.5684f / (float)BMS_SENSE_MOHM)
 #define BMS_CAPACITY_GAIN                (BMS_CC_GAIN * 298261.6178f)
 
 /*
@@ -82,6 +85,13 @@
  * enough to BOR the 3V3 rail (PIN+POR reboot loop).
  */
 #define BMS_FET_OPTIONS                  0x1DU
+/*
+ * CHG/DSG FET Protections A — keep TI defaults (only legal fast-path values):
+ *   CHG 0x98 = SCD|OCC|COV; DSG 0xE4 = SCD|OCD1|CUV (TRM).
+ * Written explicitly so RAM bring-up and OTP golden match.
+ */
+#define BMS_CHG_FET_PROTECTIONS_A        0x98U
+#define BMS_DSG_FET_PROTECTIONS_A        0xE4U
 /*
  * CFETOFF / DFETOFF Pin Config (0x92FA / 0x92FB): PIN_FXN=0 → unused.
  * HW rev2 leaves TP29/TP30 floating; if PIN_FXN=CFETOFF (0x02) and the pin

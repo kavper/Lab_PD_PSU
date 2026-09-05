@@ -32,6 +32,8 @@
 #define BQ76922_RAM_VCELL_MODE           0x9304U
 #define BQ76922_RAM_ENABLED_PROT_A       0x9261U
 #define BQ76922_RAM_ENABLED_PROT_B       0x9262U
+#define BQ76922_RAM_CHG_FET_PROT_A       0x9265U
+#define BQ76922_RAM_DSG_FET_PROT_A       0x9269U
 #define BQ76922_RAM_BODY_DIODE           0x9273U
 #define BQ76922_RAM_CUV_THRESHOLD        0x9275U
 #define BQ76922_RAM_COV_THRESHOLD        0x9278U
@@ -100,6 +102,8 @@ typedef enum {
     BQ76922_INIT_VCELL_MODE,
     BQ76922_INIT_PROT_A,
     BQ76922_INIT_PROT_B,
+    BQ76922_INIT_CHG_FET_PROT_A,
+    BQ76922_INIT_DSG_FET_PROT_A,
     BQ76922_INIT_CUV_THRESH,
     BQ76922_INIT_COV_THRESH,
     BQ76922_INIT_OCC_THRESH,
@@ -655,6 +659,18 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             delay_ms = 20U;
             break;
 
+        case BQ76922_INIT_CHG_FET_PROT_A:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CHG_FET_PROT_A,
+                                        BMS_CHG_FET_PROTECTIONS_A);
+            delay_ms = 20U;
+            break;
+
+        case BQ76922_INIT_DSG_FET_PROT_A:
+            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_DSG_FET_PROT_A,
+                                        BMS_DSG_FET_PROTECTIONS_A);
+            delay_ms = 20U;
+            break;
+
         case BQ76922_INIT_CUV_THRESH:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CUV_THRESHOLD,
                                         BMS_CUV_THRESHOLD_CODE);
@@ -688,7 +704,7 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             break;
 
         case BQ76922_INIT_CC_GAIN:
-            /* 5 mOhm pack shunt — without this, CC2/i_pack is ~5× high. */
+            /* 5 mOhm pack shunt — TRM CC Gain = 7.5684 / Rsense_mOhm. */
             status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
             delay_ms = 20U;
             break;
