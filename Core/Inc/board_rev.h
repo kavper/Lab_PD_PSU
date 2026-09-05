@@ -100,7 +100,7 @@
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
 #define BOARD_VPRE_MIN_V                     3.0f
 #define BOARD_VPRE_MAX_V                     36.0f
-#define BOARD_VPRE_MARGIN_V                  3.0f
+#define BOARD_VPRE_MARGIN_V                  1.5f
 /*
  * G0 CONSOLE_MINIMUM_VIN_MV is 6.0 V. While OUT is on OR host still wants
  * output, never command the DCDC below this floor — even if G0 CC collapses
@@ -127,11 +127,11 @@
 #endif
 
 /*
- * First LDO bring-up target on G4 DCDC (pre-reg): 5 V LDO + 3 V margin = 8 V.
+ * First LDO bring-up target on G4 DCDC (pre-reg): 5 V LDO + 1.5 V margin = 6.5 V.
  * G0 auto-enables 5.000 V / 0.100 A when PGOOD and POWER_KILL clear.
  */
 #ifndef BOARD_BRINGUP_LDO_VPRE_V
-#define BOARD_BRINGUP_LDO_VPRE_V             8.0f
+#define BOARD_BRINGUP_LDO_VPRE_V             6.5f
 #endif
 
 /* Assert POWER_PERMIT from boot so G0 opto clears POWER_KILL early. */

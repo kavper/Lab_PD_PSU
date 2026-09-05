@@ -539,7 +539,7 @@ static void HostLink_HandleLine(char *line)
             }
             LdoLink_SetG0Setpoint(value, current_value);
             if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
-                PSU_GuiSetTargetVoltage(value + 3.0f);
+                PSU_GuiSetTargetVoltage(value + BOARD_VPRE_MARGIN_V);
             }
             v_mv = (uint32_t)((value * 1000.0f) + 0.5f);
             i_ma = (uint32_t)((current_value * 1000.0f) + 0.5f);
@@ -559,7 +559,7 @@ static void HostLink_HandleLine(char *line)
         }
         LdoLink_SetG0Voltage(value);
         if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
-            PSU_GuiSetTargetVoltage(value + 3.0f);
+            PSU_GuiSetTargetVoltage(value + BOARD_VPRE_MARGIN_V);
         }
         v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
         (void)snprintf(reply, sizeof(reply), "OK SET %lu mV\r\n", (unsigned long)v_mv);
