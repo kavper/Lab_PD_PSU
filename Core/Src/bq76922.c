@@ -97,6 +97,8 @@
 #define BQ76922_BATT_SEC_UNSEALED        (2U << 8)
 #define BQ76922_BATT_SS                  (1U << 11)
 #define BQ76922_OTP_OK_CODE              0x80U
+#define BQ76922_OTP_NO_DATA              0x08U /* bit3 — bit/image exhausted */
+#define BQ76922_OTP_NO_SIG               0x10U /* bit4 — signature slots gone */
 #define BQ76922_OTP_CONFIRM_TOKEN        "I-UNDERSTAND-OTP"
 /* Default DA Config USER_VOLTS_CV=1 → Stack/PACK in centivolts (10 mV). */
 #define BQ76922_USERV_TO_MV(raw)         ((int16_t)((int16_t)(raw) * 10))
@@ -1197,6 +1199,40 @@ static BQ76922_Status_t BQ76922_CallSubcommandU1(BQ76922_Device_t *dev,
     return BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, out, 1U);
 }
 
+/* OTP_WR_CHECK / OTP_WRITE: byte0 = status; if No_DATA, byte1:2 = fail addr. */
+static BQ76922_Status_t BQ76922_CallOtpStatus(BQ76922_Device_t *dev,
+                                              uint16_t subcmd,
+                                              uint8_t *status_byte,
+                                              uint16_t *fail_addr)
+{
+    uint8_t buf[3];
+    BQ76922_Status_t status;
+
+    status = BQ76922_SendSubcommand(dev, subcmd);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    status = BQ76922_WaitSubcommandDone(dev, subcmd);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 3U);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    if (status_byte != NULL) {
+        *status_byte = buf[0];
+    }
+    if (fail_addr != NULL) {
+        if ((buf[0] & BQ76922_OTP_NO_DATA) != 0U) {
+            *fail_addr = (uint16_t)buf[1] | ((uint16_t)buf[2] << 8);
+        } else {
+            *fail_addr = 0U;
+        }
+    }
+    return BQ76922_OK;
+}
+
 static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
                                              uint16_t address,
                                              uint8_t *data,
@@ -1387,6 +1423,7 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
     memset(out, 0, sizeof(*out));
     out->session_already_burned = s_otp_burned_this_boot;
     out->wr_check = 0U; /* use BQ76922_OtpRunWrCheck() for 0x80 preflight */
+    out->fet_options_want = BMS_FET_OPTIONS;
 
     PowerManager_SetBmsBusHold(true);
     held = true;
@@ -1417,15 +1454,19 @@ out_hold:
 #endif
 }
 
-BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev, uint8_t *wr_check)
+BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
+                                       uint8_t *wr_check,
+                                       uint16_t *fail_addr)
 {
     BQ76922_Status_t status;
     uint8_t check = 0U;
+    uint16_t fail = 0U;
     bool held = false;
 
 #if (BMS_ENABLE == 0U)
     (void)dev;
     (void)wr_check;
+    (void)fail_addr;
     return BQ76922_NOT_READY;
 #else
     if ((dev == NULL) || (dev->hi2c == NULL)) {
@@ -1440,11 +1481,23 @@ BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev, uint8_t *wr_check)
         goto out_hold;
     }
 
-    status = BQ76922_CallSubcommandU1(dev, BQ76922_SUBCMD_OTP_WR_CHECK, &check);
+    /* Must load golden into RAM first — otherwise CHECK only validates the
+     * currently effective OTP image (PDSG already cleared) and looks "OK". */
+    status = BQ76922_OtpWriteGolden(dev);
+    if (status != BQ76922_OK) {
+        goto out_exit_cfg;
+    }
+
+    status = BQ76922_CallOtpStatus(dev, BQ76922_SUBCMD_OTP_WR_CHECK,
+                                   &check, &fail);
     if (wr_check != NULL) {
         *wr_check = check;
     }
+    if (fail_addr != NULL) {
+        *fail_addr = fail;
+    }
 
+out_exit_cfg:
     (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
     HAL_Delay(20U);
     /* EXIT_CFGUPDATE kills FET drivers — bring FETs back. */
@@ -1464,11 +1517,13 @@ out_hold:
 BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
                                  const char *confirm_token,
                                  uint8_t *wr_check,
-                                 uint8_t *wr_result)
+                                 uint8_t *wr_result,
+                                 uint16_t *fail_addr)
 {
     BQ76922_Status_t status;
     uint8_t check = 0U;
     uint8_t result = 0U;
+    uint16_t fail = 0U;
     bool held = false;
 
 #if (BMS_ENABLE == 0U)
@@ -1476,6 +1531,7 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
     (void)confirm_token;
     (void)wr_check;
     (void)wr_result;
+    (void)fail_addr;
     return BQ76922_NOT_READY;
 #else
     if ((dev == NULL) || (dev->hi2c == NULL)) {
@@ -1491,6 +1547,9 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
         }
         if (wr_result != NULL) {
             *wr_result = 0U;
+        }
+        if (fail_addr != NULL) {
+            *fail_addr = 0U;
         }
         return BQ76922_NOT_READY;
     }
@@ -1519,9 +1578,13 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
         goto out_exit_cfg;
     }
 
-    status = BQ76922_CallSubcommandU1(dev, BQ76922_SUBCMD_OTP_WR_CHECK, &check);
+    status = BQ76922_CallOtpStatus(dev, BQ76922_SUBCMD_OTP_WR_CHECK,
+                                   &check, &fail);
     if (wr_check != NULL) {
         *wr_check = check;
+    }
+    if (fail_addr != NULL) {
+        *fail_addr = fail;
     }
     if ((status != BQ76922_OK) || (check != BQ76922_OTP_OK_CODE)) {
         if (status == BQ76922_OK) {
@@ -1530,9 +1593,13 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
         goto out_exit_cfg;
     }
 
-    status = BQ76922_CallSubcommandU1(dev, BQ76922_SUBCMD_OTP_WRITE, &result);
+    status = BQ76922_CallOtpStatus(dev, BQ76922_SUBCMD_OTP_WRITE,
+                                   &result, &fail);
     if (wr_result != NULL) {
         *wr_result = result;
+    }
+    if (fail_addr != NULL) {
+        *fail_addr = fail;
     }
     if ((status != BQ76922_OK) || (result != BQ76922_OTP_OK_CODE)) {
         if (status == BQ76922_OK) {

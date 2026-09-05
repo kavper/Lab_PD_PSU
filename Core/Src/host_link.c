@@ -541,7 +541,7 @@ static void HostLink_HandleLine(char *line)
 
         if (otp) {
             const char *otp_arg = HostLink_SkipToken(arg);
-            char msg[160];
+            char msg[220];
 
             if (HostLink_EqToken(otp_arg, "STATUS") || (*otp_arg == '\0')) {
                 BQ76922_OtpReport_t rep;
@@ -553,12 +553,15 @@ static void HostLink_HandleLine(char *line)
                 }
                 (void)snprintf(msg, sizeof(msg),
                     "OK BMS OTP STATUS batt=0x%04X mfg_init=0x%04X "
-                    "vcell=0x%04X fet_opt=0x%02X full=%u otpb=%u burned=%u "
-                    "(read-only; BMS OTP CHECK for wr_check/0x80)\r\n",
+                    "vcell=0x%04X fet_opt=0x%02X want=0x%02X match=%u "
+                    "full=%u otpb=%u burned=%u "
+                    "(ro; next BMS OTP CHECK @ BAT 10-12V)\r\n",
                     (unsigned)rep.battery_status,
                     (unsigned)rep.mfg_status_init,
                     (unsigned)rep.vcell_mode,
                     (unsigned)rep.fet_options,
+                    (unsigned)rep.fet_options_want,
+                    (rep.fet_options == rep.fet_options_want) ? 1U : 0U,
                     rep.fullaccess ? 1U : 0U,
                     rep.otpb_blocked ? 1U : 0U,
                     rep.session_already_burned ? 1U : 0U);
@@ -568,14 +571,19 @@ static void HostLink_HandleLine(char *line)
 
             if (HostLink_EqToken(otp_arg, "CHECK")) {
                 uint8_t check = 0U;
+                uint16_t fail = 0U;
                 BQ76922_Status_t st =
-                    BQ76922_OtpRunWrCheck(&g_bq76922, &check);
+                    BQ76922_OtpRunWrCheck(&g_bq76922, &check, &fail);
 
                 (void)snprintf(msg, sizeof(msg),
-                    "%s BMS OTP CHECK check=0x%02X "
-                    "(0x80=ready @ BAT 10-12V; FETs reinited after CFGUPDATE)\r\n",
+                    "%s BMS OTP CHECK check=0x%02X fail_addr=0x%04X "
+                    "nodata=%u nosig=%u "
+                    "(0x80=can burn golden/0x1D; FETs reinited after CFGUPDATE)\r\n",
                     (st == BQ76922_OK) ? "OK" : "ERR",
-                    (unsigned)check);
+                    (unsigned)check,
+                    (unsigned)fail,
+                    ((check & 0x08U) != 0U) ? 1U : 0U,
+                    ((check & 0x10U) != 0U) ? 1U : 0U);
                 HostLink_Tx(msg);
                 return;
             }
@@ -584,35 +592,39 @@ static void HostLink_HandleLine(char *line)
                 const char *token = HostLink_SkipToken(otp_arg);
                 uint8_t check = 0U;
                 uint8_t result = 0U;
+                uint16_t fail = 0U;
                 BQ76922_Status_t st;
 
                 if (!HostLink_EqToken(token, "I-UNDERSTAND-OTP")) {
                     HostLink_Tx(
                         "ERR BMS OTP BURN requires exact token:\r\n"
                         "  BMS OTP BURN I-UNDERSTAND-OTP\r\n"
-                        "OTP is one-way. Boot never burns. Run BMS OTP STATUS first.\r\n");
+                        "OTP is one-way. Boot never burns. Run BMS OTP CHECK first.\r\n");
                     return;
                 }
 
                 HostLink_Tx(
-                    "OK BMS OTP BURN starting — writing golden + OTP_WRITE "
-                    "(BAT 10-12V required)...\r\n");
+                    "OK BMS OTP BURN starting — golden (fet_opt want 0x1D) + "
+                    "OTP_WRITE (BAT 10-12V required)...\r\n");
                 HAL_Delay(20U);
                 st = BQ76922_OtpBurn(&g_bq76922, "I-UNDERSTAND-OTP",
-                                     &check, &result);
+                                     &check, &result, &fail);
                 if (st != BQ76922_OK) {
                     (void)snprintf(msg, sizeof(msg),
-                        "ERR BMS OTP BURN failed st=%d check=0x%02X write=0x%02X "
-                        "(need FULLACCESS, OTPB=0, check=0x80, BAT 10-12V; "
-                        "or already burned this boot)\r\n",
-                        (int)st, (unsigned)check, (unsigned)result);
+                        "ERR BMS OTP BURN failed st=%d check=0x%02X "
+                        "write=0x%02X fail_addr=0x%04X nodata=%u nosig=%u "
+                        "(FULLACCESS+OTPB=0+BAT10-12V; 0x9308=PDSG bit may be exhausted)\r\n",
+                        (int)st, (unsigned)check, (unsigned)result,
+                        (unsigned)fail,
+                        ((check & 0x08U) != 0U) ? 1U : 0U,
+                        ((check & 0x10U) != 0U) ? 1U : 0U);
                     HostLink_Tx(msg);
                     return;
                 }
                 (void)snprintf(msg, sizeof(msg),
                     "OK BMS OTP BURNED check=0x%02X write=0x%02X — "
-                    "do NOT repeat. Test: BMS SHUTDOWN then short TS2 "
-                    "(FETs should rise without UART).\r\n",
+                    "verify: BMS OTP STATUS (want match=1), then "
+                    "BMS SHUTDOWN + short TS2.\r\n",
                     (unsigned)check, (unsigned)result);
                 HostLink_Tx(msg);
                 return;

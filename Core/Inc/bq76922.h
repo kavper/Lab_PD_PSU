@@ -123,10 +123,12 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 /* Lab/production OTP — NEVER called from boot. UART: BMS OTP STATUS / BURN. */
 typedef struct {
     uint8_t wr_check;          /* raw OTP_WR_CHECK() byte; 0x80 = OK */
+    uint16_t fail_addr;        /* first No_DATA addr (0 if unused) */
     uint16_t battery_status;
     uint16_t mfg_status_init;  /* Data Memory 0x9343 */
     uint16_t vcell_mode;       /* Data Memory 0x9304 */
     uint8_t fet_options;       /* Data Memory 0x9308 */
+    uint8_t fet_options_want;  /* golden target (BMS_FET_OPTIONS) */
     bool cfgupdate;
     bool fullaccess;
     bool otpb_blocked;
@@ -136,13 +138,18 @@ typedef struct {
 /* Read-only snapshot (no CONFIG_UPDATE — safe while FETs are on). */
 BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out);
-/* CONFIG_UPDATE + OTP_WR_CHECK + EXIT + reinit FETs. Drops FETs briefly. */
-BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev, uint8_t *wr_check);
-/* Burns Data Memory image. Requires BAT≈10–12 V, FULLACCESS.
+/* CONFIG_UPDATE + write golden to RAM + OTP_WR_CHECK + EXIT + reinit.
+ * Drops FETs briefly. Fills wr_check and optional fail_addr (No_DATA). */
+BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
+                                       uint8_t *wr_check,
+                                       uint16_t *fail_addr);
+/* Burns Data Memory image (golden includes FET Options 0x1D / PDSG_EN).
+ * Requires BAT≈10–12 V, FULLACCESS.
  * confirm_token must be the exact string "I-UNDERSTAND-OTP". */
 BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
                                  const char *confirm_token,
                                  uint8_t *wr_check,
-                                 uint8_t *wr_result);
+                                 uint8_t *wr_result,
+                                 uint16_t *fail_addr);
 
 #endif /* BQ76922_H */
