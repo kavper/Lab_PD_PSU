@@ -360,7 +360,8 @@ static void HostLink_SendHelp(void)
         "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
         "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
         "  BMS SHUTDOWN    enter AFE SHUTDOWN; wake = TS2 button only (auto FETs)\r\n"
-        "  BMS OTP STATUS  OTP_WR_CHECK only (needs BAT 10-12V, never auto)\r\n"
+        "  BMS OTP STATUS  read-only OTP/RAM snapshot (safe, no CFGUPDATE)\r\n"
+        "  BMS OTP CHECK   OTP_WR_CHECK (BAT 10-12V; briefly drops FETs + reinit)\r\n"
         "  BMS OTP BURN I-UNDERSTAND-OTP   one-shot OTP program (lab only)\r\n"
         "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
         "  G0DIAG / G0SWAP / CLR\r\n"
@@ -547,14 +548,13 @@ static void HostLink_HandleLine(char *line)
                 BQ76922_Status_t st = BQ76922_OtpGetReport(&g_bq76922, &rep);
 
                 if (st != BQ76922_OK) {
-                    HostLink_Tx("ERR BMS OTP STATUS I2C/CFGUPDATE failed\r\n");
+                    HostLink_Tx("ERR BMS OTP STATUS I2C failed\r\n");
                     return;
                 }
                 (void)snprintf(msg, sizeof(msg),
-                    "OK BMS OTP STATUS check=0x%02X batt=0x%04X mfg_init=0x%04X "
+                    "OK BMS OTP STATUS batt=0x%04X mfg_init=0x%04X "
                     "vcell=0x%04X fet_opt=0x%02X full=%u otpb=%u burned=%u "
-                    "(check 0x80=ready; BAT must be 10-12V)\r\n",
-                    (unsigned)rep.wr_check,
+                    "(read-only; BMS OTP CHECK for wr_check/0x80)\r\n",
                     (unsigned)rep.battery_status,
                     (unsigned)rep.mfg_status_init,
                     (unsigned)rep.vcell_mode,
@@ -562,6 +562,20 @@ static void HostLink_HandleLine(char *line)
                     rep.fullaccess ? 1U : 0U,
                     rep.otpb_blocked ? 1U : 0U,
                     rep.session_already_burned ? 1U : 0U);
+                HostLink_Tx(msg);
+                return;
+            }
+
+            if (HostLink_EqToken(otp_arg, "CHECK")) {
+                uint8_t check = 0U;
+                BQ76922_Status_t st =
+                    BQ76922_OtpRunWrCheck(&g_bq76922, &check);
+
+                (void)snprintf(msg, sizeof(msg),
+                    "%s BMS OTP CHECK check=0x%02X "
+                    "(0x80=ready @ BAT 10-12V; FETs reinited after CFGUPDATE)\r\n",
+                    (st == BQ76922_OK) ? "OK" : "ERR",
+                    (unsigned)check);
                 HostLink_Tx(msg);
                 return;
             }
@@ -604,7 +618,8 @@ static void HostLink_HandleLine(char *line)
                 return;
             }
 
-            HostLink_Tx("ERR BMS OTP use: STATUS | BURN I-UNDERSTAND-OTP\r\n");
+            HostLink_Tx(
+                "ERR BMS OTP use: STATUS | CHECK | BURN I-UNDERSTAND-OTP\r\n");
             return;
         }
 

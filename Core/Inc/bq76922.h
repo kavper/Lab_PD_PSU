@@ -131,9 +131,12 @@ typedef struct {
     bool session_already_burned;
 } BQ76922_OtpReport_t;
 
+/* Read-only snapshot (no CONFIG_UPDATE — safe while FETs are on). */
 BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out);
-/* Burns current Data Memory image. Requires BAT≈10–12 V, FULLACCESS.
+/* CONFIG_UPDATE + OTP_WR_CHECK + EXIT + reinit FETs. Drops FETs briefly. */
+BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev, uint8_t *wr_check);
+/* Burns Data Memory image. Requires BAT≈10–12 V, FULLACCESS.
  * confirm_token must be the exact string "I-UNDERSTAND-OTP". */
 BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
                                  const char *confirm_token,

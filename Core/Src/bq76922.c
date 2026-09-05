@@ -1331,7 +1331,6 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out)
 {
     BQ76922_Status_t status;
-    uint8_t check = 0U;
     bool held = false;
 
 #if (BMS_ENABLE == 0U)
@@ -1343,8 +1342,11 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
         return BQ76922_INVALID_ARG;
     }
 
+    /* Read-only — never enter CONFIG_UPDATE here. EXIT_CFGUPDATE after
+     * OTP_WR_CHECK used to drop FETs and leave the driver thinking cfg=1. */
     memset(out, 0, sizeof(*out));
     out->session_already_burned = s_otp_burned_this_boot;
+    out->wr_check = 0U; /* use BQ76922_OtpRunWrCheck() for 0x80 preflight */
 
     PowerManager_SetBmsBusHold(true);
     held = true;
@@ -1367,36 +1369,53 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
     (void)BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &out->vcell_mode);
     (void)BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &out->fet_options);
 
-    /* OTP_WR_CHECK requires CONFIG_UPDATE + FULLACCESS. */
-    if (!out->cfgupdate) {
-        status = BQ76922_OtpEnterCfgupdate(dev);
-        if (status != BQ76922_OK) {
-            goto out_hold;
-        }
-        out->cfgupdate = true;
-        status = BQ76922_ReadBatteryStatus(dev);
-        if (status == BQ76922_OK) {
-            out->battery_status = dev->snapshot.battery_status;
-            out->fullaccess =
-                ((dev->snapshot.battery_status & BQ76922_BATT_SEC_MASK) ==
-                 BQ76922_BATT_SEC_FULLACCESS);
-            out->otpb_blocked =
-                ((dev->snapshot.battery_status & BQ76922_BATT_OTPB) != 0U);
-        }
+out_hold:
+    if (held) {
+        PowerManager_SetBmsBusHold(false);
+    }
+    return status;
+#endif
+}
+
+BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev, uint8_t *wr_check)
+{
+    BQ76922_Status_t status;
+    uint8_t check = 0U;
+    bool held = false;
+
+#if (BMS_ENABLE == 0U)
+    (void)dev;
+    (void)wr_check;
+    return BQ76922_NOT_READY;
+#else
+    if ((dev == NULL) || (dev->hi2c == NULL)) {
+        return BQ76922_INVALID_ARG;
+    }
+
+    PowerManager_SetBmsBusHold(true);
+    held = true;
+
+    status = BQ76922_OtpEnterCfgupdate(dev);
+    if (status != BQ76922_OK) {
+        goto out_hold;
     }
 
     status = BQ76922_CallSubcommandU1(dev, BQ76922_SUBCMD_OTP_WR_CHECK, &check);
-    if (status == BQ76922_OK) {
-        out->wr_check = check;
+    if (wr_check != NULL) {
+        *wr_check = check;
     }
 
     (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_EXIT_CFGUPDATE);
-    HAL_Delay(10U);
-    out->cfgupdate = false;
+    HAL_Delay(20U);
+    /* EXIT_CFGUPDATE kills FET drivers — bring FETs back. */
+    BQ76922_RequestReinit(dev);
 
 out_hold:
     if (held) {
         PowerManager_SetBmsBusHold(false);
+    }
+    if ((status == BQ76922_OK) && (check != BQ76922_OTP_OK_CODE)) {
+        return BQ76922_NOT_READY;
     }
     return status;
 #endif
