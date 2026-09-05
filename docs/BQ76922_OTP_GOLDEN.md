@@ -104,3 +104,41 @@ One-shot OTP from the host UART:
 - `BMS OTP BURN I-UNDERSTAND-OTP`
 
 After a successful burn, G4 is optional for FET-on; MCU is still used for PD/PSU.
+
+## Validated HW rev2 unit (2026-09-05)
+
+Physical predischarge path fitted:
+
+- PDSG pin/TP25 drives one high-side P-MOSFET;
+- 22 ohm series predischarge resistor;
+- 1.5 Mohm gate-to-source resistor;
+- PCHG remains unused.
+
+Test supply / cell simulator was approximately 10.9-11.0 V.  The production
+preflight completed with full golden RAM readback:
+
+```text
+OK BMS OTP CHECK check=0x80 fail_addr=0x0000 nodata=0 nosig=0
+```
+
+The guarded burn then returned a successful OTP write and set the one-shot
+session flag.  Readback before the independent shutdown test was:
+
+```text
+batt=0x0988 mfg_init=0x0050 vcell=0x0017 fet_opt=0x1D match=1 burned=1
+```
+
+After `BMS SHUTDOWN` and a short physical TS2 press, the BQ and MCU restarted
+without a host command.  Readback after that independent wake was:
+
+```text
+batt=0x0188 mfg_init=0x0050 vcell=0x0017 fet_opt=0x1D match=1 burned=0
+```
+
+`burned=0` is expected after the MCU reboot: it is only a volatile per-boot
+guard.  The retained BQ values and autonomous wake confirm the OTP image.
+
+The resistor simulator had about 2.2 V per used input, below the configured
+2.8 V CUV threshold, so `Safety Status A=0x04` and DSG off are expected during
+this programming setup.  Test final CHG/PDSG/DSG sequencing with real 4S cell
+voltages above the CUV recovery threshold.
