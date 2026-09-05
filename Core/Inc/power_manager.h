@@ -87,6 +87,10 @@ typedef struct {
     PowerManager_Error_t last_error;
     uint32_t pd_reset_seq;
     bool pd_reset_busy;
+    uint32_t attach_generation;
+    bool session_reset_faulted;
+    uint16_t session_reset_fault_tps_vbus_mv;
+    uint16_t session_reset_fault_bq_vbus_mv;
 } PowerManager_Status_t;
 
 void PowerManager_Init(I2C_HandleTypeDef *hi2c);

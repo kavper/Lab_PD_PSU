@@ -25,22 +25,23 @@
 #define PM_SESSION_RESET_STUCK_MS     400U
 #define PM_SESSION_RESET_COOLDOWN_MS 1500U
 /* USB Type-C tSrcRecover is 660–1000 ms after vSafe0V.  TRM STATUS
- * VBUS Status 0h is <0.8 V.  bd90e21 wrote 0x28 Disabled then immediately
- * restored DRP, so the silicon never reached vSafe0V. */
+ * VBUS Status 0h is <0.8 V.  Destructive Disabled→vSafe0V→restore is
+ * ONLY for confirmed stuck states — never for a normal unplug. */
 #define PM_SESSION_TSRC_RECOVER_MS    800U
 #define PM_SESSION_VSAFE0_MV          800U
 #define PM_SESSION_VSAFE0_GIVEUP_MS  2500U
 #define PM_SESSION_ATTACHWAIT_STUCK_MS 1500U
+#define PM_STUCK_CONFIRM_SAMPLES        3U
+#define PM_STUCK_DEBOUNCE_MS          250U
 #define PM_POLICY_SETTLE_MS            300U
-/* AUTO role from the partner's Source PDOs (not sticky Try.SRC / leftover).
- *
- * SOURCE (we charge them): phone/tablet / sink-only gadget — only 5 V at
- * typical USB default power, or no Source PDOs at all.
- * SINK (we charge the pack): partner offers anything above 5 V (9 V/12 V/…
- * including a 20 W brick), or more than 15 W even at 5 V (5 V/4 A).
- */
+#define PM_COHERENT_TELEMETRY_PHASE     8U
+/* AUTO: Type-C attach role + fresh caps + Dual-Role Power + user mode.
+ * 5 V/15 W is only a strong-charger yield hint, never the sole rule.
+ * Ambiguous DRP → keep the Type-C role (documented preference). */
 #define PM_AUTO_WEAK_SRC_MAX_MW        15000U
 #define PM_AUTO_WEAK_SRC_MAX_MV         5000U
+#define PM_SRC_PATH_BQ_VBUS_MIN_MV     4500U
+#define PM_SRC_PATH_BQ_VBUS_MAX_MV     5500U
 #define PM_ENABLE_BQ_EC_ACCESS          1U
 #define PM_VERBOSE_TRANSITION_LOGS       0U
 typedef enum {
@@ -114,15 +115,32 @@ typedef enum {
 typedef enum {
     PM_POLICY_IDLE = 0,
     PM_POLICY_WAIT_SETTLE,
+    PM_POLICY_WAIT_COHERENT,
     PM_POLICY_GET_SINK_CAPS,
     PM_POLICY_READ_SINK_CAPS,
     PM_POLICY_GET_SOURCE_CAPS,
+    PM_POLICY_WAIT_SOURCE_CAPS_EVENT,
     PM_POLICY_READ_SOURCE_CAPS,
     PM_POLICY_DECIDE,
-    PM_POLICY_SWAP_TO_SOURCE,
+    PM_POLICY_APPLY_PROCESS_BITS,
     PM_POLICY_SWAP_TO_SINK,
-    PM_POLICY_DONE
+    PM_POLICY_LOCKED,
+    PM_POLICY_DONE = PM_POLICY_LOCKED
 } PowerManager_PolicyPhase_t;
+
+typedef enum {
+    PM_SRC_PATH_IDLE = 0,
+    PM_SRC_PATH_WAIT_CONTRACT,
+    PM_SRC_PATH_WAIT_BQ_VBUS,
+    PM_SRC_PATH_READY,
+    PM_SRC_PATH_FAULT
+} PowerManager_SourcePathPhase_t;
+
+typedef enum {
+    PM_BQ_OWNER_STM_STATIC = 0, /* pre-port Option0/1/4/ADC + BIGCAP only */
+    PM_BQ_OWNER_TPS_RUNTIME,   /* contract: STM must not fight Option3 */
+    PM_BQ_OWNER_STM_EMERGENCY  /* explicit host/fault shutdown + readback */
+} PowerManager_BqOwner_t;
 
 typedef struct {
     I2C_HandleTypeDef *hi2c;
@@ -156,6 +174,40 @@ typedef struct {
     uint32_t session_reset_seq;
     uint32_t session_reset_cooldown_until_ms;
     uint32_t leftover_vbus_since_ms;
+    uint8_t stuck_confirm_count;
+    uint32_t stuck_debounce_until_ms;
+    uint32_t attach_generation;
+    uint32_t job_attach_generation;
+    bool session_caps_event_this_gen;
+    bool session_gsrc_ok_this_gen;
+    bool session_gsrc_failed_this_gen;
+    bool session_reset_faulted;
+    uint16_t session_reset_fault_tps_vbus_mv;
+    uint16_t session_reset_fault_bq_vbus_mv;
+    uint8_t session_reset_fault_vbus_state;
+    uint8_t session_reset_fault_typec;
+    PowerManager_SourcePathPhase_t source_path_phase;
+    PowerManager_BqOwner_t bq_owner;
+    bool bq_emergency_shutdown_pending;
+    bool bq_emergency_readback_pending;
+    uint16_t bq_emergency_option3_target;
+    bool coherent_snapshot_valid;
+    bool snap_attached;
+    uint8_t snap_connection_state;
+    uint8_t snap_typec_port_state;
+    uint8_t snap_cc1_state;
+    uint8_t snap_cc2_state;
+    uint8_t snap_vbus_state;
+    uint16_t snap_tps_vbus_mv;
+    uint16_t snap_bq_vbus_mv;
+    TPS25751_PowerRole_t snap_role;
+    bool snap_pdo_valid;
+    bool snap_rdo_valid;
+    uint8_t snap_pp5v_state;
+    uint8_t snap_pphv_state;
+    TPS25751_PowerRole_t typec_initial_role;
+    bool typec_initial_role_latched;
+    bool auto_swap_command_sent;
     bool bq_option3_read_pending;
     bool bq_option3_write_pending;
     bool bq_option3_valid;
@@ -198,9 +250,9 @@ typedef struct {
     bool policy_swap_attempted;
     bool policy_decided;
     bool partner_source_caps_current;
-    /* True only after Source Caps arrived this plug (event or successful
-     * GSrC).  TPS RX_SOURCE_CAPS keeps the previous partner's PDOs across
-     * unplug — never trust a cold register read without this flag. */
+    /* True only after source_caps_received for this attach_generation
+     * (and optional successful GSrC).  Never set from a cold RX_SOURCE_CAPS
+     * register read alone — that register keeps the previous partner's PDOs. */
     bool partner_source_caps_fresh;
     bool partner_sink_observed;
     bool pdo_report_pending;
@@ -491,6 +543,7 @@ static void PowerManager_MaintainOtgPermissionPin(void)
      * while still Unattached/AttachWait.SRC; leftover 5 V blocked vSafe0V
      * so iPad never reached Attached.SRC (conn=0, VBUS 5↔0). */
     if (g_pm.session_reset_busy ||
+        g_pm.session_reset_faulted ||
         (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
         (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF) ||
         g_pm.status.source_fault_latched) {
@@ -502,7 +555,8 @@ static void PowerManager_MaintainOtgPermissionPin(void)
             (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
             (g_pm.status.tps.connection_state >= 6U) &&
             g_pm.status.tps.active_pdo.valid &&
-            g_pm.status.tps.active_rdo.valid;
+            g_pm.status.tps.active_rdo.valid &&
+            (g_pm.source_path_phase == PM_SRC_PATH_READY);
         if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
             (g_pm.policy_desired_role == TPS25751_ROLE_SINK)) {
             source_contract = false;
@@ -1040,7 +1094,6 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
 {
     uint32_t elapsed;
     bool vsafe0;
-    bool give_up;
 
     if (!g_pm.session_reset_wait_vsafe0) {
         return;
@@ -1053,93 +1106,275 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
     elapsed = now_ms - g_pm.session_reset_disable_ms;
     vsafe0 = (g_pm.status.tps.vbus_mv < PM_SESSION_VSAFE0_MV) ||
              (g_pm.status.tps.vbus_state == 0U);
-    give_up = elapsed >= PM_SESSION_VSAFE0_GIVEUP_MS;
-    if ((elapsed < PM_SESSION_TSRC_RECOVER_MS) || (!vsafe0 && !give_up)) {
+
+    if (elapsed < PM_SESSION_TSRC_RECOVER_MS) {
         return;
     }
 
-    if (give_up && !vsafe0) {
-        Debug_Printf("[PD-RESET t=%lu seq=%lu] VBUS still %lu mV after %lu ms (BQ ADC %lu mV); connector may be back-fed — restoring Type-C SM anyway",
+    if (!vsafe0) {
+        if (elapsed < PM_SESSION_VSAFE0_GIVEUP_MS) {
+            return;
+        }
+        /* Do NOT restore Type-C if vSafe0V was never reached. */
+        g_pm.session_reset_wait_vsafe0 = false;
+        g_pm.session_reset_restore_config = false;
+        g_pm.session_reset_faulted = true;
+        g_pm.session_reset_fault_tps_vbus_mv = g_pm.status.tps.vbus_mv;
+        g_pm.session_reset_fault_bq_vbus_mv = g_pm.status.bq.adc_vbus_mv;
+        g_pm.session_reset_fault_vbus_state = g_pm.status.tps.vbus_state;
+        g_pm.session_reset_fault_typec = g_pm.status.tps.typec_port_state;
+        g_pm.status.session_reset_faulted = true;
+        g_pm.status.session_reset_fault_tps_vbus_mv =
+            g_pm.session_reset_fault_tps_vbus_mv;
+        g_pm.status.session_reset_fault_bq_vbus_mv =
+            g_pm.session_reset_fault_bq_vbus_mv;
+        g_pm.status.source_fault_latched = true;
+        g_pm.status.state = POWER_MANAGER_FAULT;
+        g_pm.bq_owner = PM_BQ_OWNER_STM_EMERGENCY;
+        g_pm.bq_emergency_shutdown_pending = true;
+        PowerManager_ForceOtgOff();
+        Debug_Printf("[PD-RESET t=%lu seq=%lu] FAULT vSafe0V not reached; stay Disabled tps_vbus=%lu STATUS.VBUS=%u bq_vbus=%lu typec=0x%02X elapsed=%lu — Type-C NOT restored",
                      (unsigned long)now_ms,
                      (unsigned long)g_pm.session_reset_seq,
-                     (unsigned long)g_pm.status.tps.vbus_mv,
-                     (unsigned long)elapsed,
-                     (unsigned long)g_pm.status.bq.adc_vbus_mv);
-    } else {
-        Debug_Printf("[PD-RESET t=%lu seq=%lu] vSafe0V ok tps_vbus=%lu STATUS.VBUS=%u elapsed=%lu; restore 0x28 %s sm=%u",
-                     (unsigned long)now_ms,
-                     (unsigned long)g_pm.session_reset_seq,
-                     (unsigned long)g_pm.status.tps.vbus_mv,
-                     g_pm.status.tps.vbus_state,
-                     (unsigned long)elapsed,
-                     PowerManager_UserModeToString(g_pm.status.requested_mode),
-                     (unsigned int)PowerManager_MapPortMode(
-                         g_pm.status.requested_mode));
+                     (unsigned long)g_pm.session_reset_fault_tps_vbus_mv,
+                     g_pm.session_reset_fault_vbus_state,
+                     (unsigned long)g_pm.session_reset_fault_bq_vbus_mv,
+                     g_pm.session_reset_fault_typec,
+                     (unsigned long)elapsed);
+        return;
     }
 
+    Debug_Printf("[PD-RESET t=%lu seq=%lu] vSafe0V ok tps_vbus=%lu STATUS.VBUS=%u elapsed=%lu; restore 0x28 %s sm=%u",
+                 (unsigned long)now_ms,
+                 (unsigned long)g_pm.session_reset_seq,
+                 (unsigned long)g_pm.status.tps.vbus_mv,
+                 g_pm.status.tps.vbus_state,
+                 (unsigned long)elapsed,
+                 PowerManager_UserModeToString(g_pm.status.requested_mode),
+                 (unsigned int)PowerManager_MapPortMode(
+                     g_pm.status.requested_mode));
+
     if (g_pm.bq_option3_valid) {
+        /* Emergency/stuck-reset path only: RMW HIZ clear, leave EN_OTG=0. */
         g_pm.bq_option3_target =
             (uint16_t)((g_pm.status.bq.charge_option3 |
                         BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) &
                        (uint16_t)~BQ25731_CHARGE_OPTION3_EN_HIZ);
         g_pm.bq_option3_write_pending = true;
+        g_pm.bq_owner = PM_BQ_OWNER_STM_EMERGENCY;
     }
     PowerManager_QueuePolicyPortConfig();
 }
+
 
 static void PowerManager_CheckLeftoverVbus(uint32_t now_ms)
 {
     bool cc_live;
     bool attach_wait;
     bool vsafe0;
+    bool stuck_now;
     uint8_t typec;
     uint32_t stuck_ms;
-    uint8_t cc1 = g_pm.status.tps.cc1_state;
-    uint8_t cc2 = g_pm.status.tps.cc2_state;
+    uint8_t cc1;
+    uint8_t cc2;
 
     PowerManager_TickSessionResetWait(now_ms);
 
-    if (g_pm.status.tps.attached ||
-        (g_pm.status.tps.connection_state >= 6U) ||
-        g_pm.session_reset_busy) {
+    if (g_pm.session_reset_busy || g_pm.session_reset_faulted) {
         g_pm.leftover_vbus_since_ms = 0U;
+        g_pm.stuck_confirm_count = 0U;
         return;
     }
 
-    /* Do not tear down a live Type-C attach sequence.  AttachWait.SRC (0x64)
-     * with Rd is how SOURCE ONLY meets an iPad; the old 400 ms leftover
-     * reset disabled 0x28 in the middle of tCCDebounce. */
-    typec = g_pm.status.tps.typec_port_state;
+    /* Prefer a coherent snapshot (STATUS+TYPEC+ADC from one telemetry cycle). */
+    if (g_pm.coherent_snapshot_valid) {
+        if (g_pm.snap_attached || (g_pm.snap_connection_state >= 6U)) {
+            g_pm.leftover_vbus_since_ms = 0U;
+            g_pm.stuck_confirm_count = 0U;
+            return;
+        }
+        typec = g_pm.snap_typec_port_state;
+        cc1 = g_pm.snap_cc1_state;
+        cc2 = g_pm.snap_cc2_state;
+        vsafe0 = (g_pm.snap_tps_vbus_mv < PM_SESSION_VSAFE0_MV) ||
+                 (g_pm.snap_vbus_state == 0U);
+    } else {
+        if (g_pm.status.tps.attached ||
+            (g_pm.status.tps.connection_state >= 6U)) {
+            g_pm.leftover_vbus_since_ms = 0U;
+            g_pm.stuck_confirm_count = 0U;
+            return;
+        }
+        typec = g_pm.status.tps.typec_port_state;
+        cc1 = g_pm.status.tps.cc1_state;
+        cc2 = g_pm.status.tps.cc2_state;
+        vsafe0 = (g_pm.status.tps.vbus_mv < PM_SESSION_VSAFE0_MV) ||
+                 (g_pm.status.tps.vbus_state == 0U);
+    }
+
+    /* Do not tear down a live Type-C attach sequence. */
     attach_wait = (typec == 0x64U) || (typec == 0x65U) ||
                   (typec == 0x45U) || (typec == 0x4FU) ||
                   (typec == 0x4EU) || (typec == 0x50U);
-    vsafe0 = (g_pm.status.tps.vbus_mv < PM_SESSION_VSAFE0_MV) ||
-             (g_pm.status.tps.vbus_state == 0U);
     if (attach_wait && vsafe0) {
         g_pm.leftover_vbus_since_ms = 0U;
+        g_pm.stuck_confirm_count = 0U;
         return;
     }
 
-    /* TRM 3.2.27: 1h=Ra 2h=Rd are Source-only pin states. */
     cc_live = ((cc1 >= 1U) && (cc1 <= 5U)) ||
               ((cc2 >= 1U) && (cc2 <= 5U));
-    if (!cc_live) {
+    stuck_now = cc_live && !(attach_wait && vsafe0);
+    if (!stuck_now) {
         g_pm.leftover_vbus_since_ms = 0U;
+        g_pm.stuck_confirm_count = 0U;
         return;
     }
+
     if (g_pm.leftover_vbus_since_ms == 0U) {
         g_pm.leftover_vbus_since_ms = now_ms;
+        g_pm.stuck_confirm_count = 1U;
+        g_pm.stuck_debounce_until_ms = now_ms + PM_STUCK_DEBOUNCE_MS;
         return;
+    }
+
+    /* Require several agreeing coherent samples plus a separate debounce. */
+    if (g_pm.coherent_snapshot_valid) {
+        g_pm.stuck_confirm_count++;
+        g_pm.coherent_snapshot_valid = false;
     }
     stuck_ms = attach_wait ? PM_SESSION_ATTACHWAIT_STUCK_MS :
                PM_SESSION_RESET_STUCK_MS;
-    if ((uint32_t)(now_ms - g_pm.leftover_vbus_since_ms) >= stuck_ms) {
-        PowerManager_BeginSessionReset(now_ms,
-            attach_wait ?
-            "AttachWait with VBUS not vSafe0V" :
-            "conn=0 CC live (Ra/Rd/Rp), no PlugPresent",
-            false);
+    if ((g_pm.stuck_confirm_count < PM_STUCK_CONFIRM_SAMPLES) ||
+        ((uint32_t)(now_ms - g_pm.leftover_vbus_since_ms) < stuck_ms) ||
+        ((int32_t)(now_ms - g_pm.stuck_debounce_until_ms) < 0)) {
+        return;
     }
+
+    PowerManager_BeginSessionReset(now_ms,
+        attach_wait ?
+        "confirmed AttachWait with VBUS not vSafe0V" :
+        "confirmed conn=0 CC live, no PlugPresent",
+        false);
+    g_pm.stuck_confirm_count = 0U;
+    g_pm.leftover_vbus_since_ms = 0U;
+}
+
+
+
+static void PowerManager_CaptureCoherentSnapshot(void)
+{
+    const TPS25751_Telemetry_t *t = &g_pm.status.tps;
+
+    g_pm.snap_attached = t->attached;
+    g_pm.snap_connection_state = t->connection_state;
+    g_pm.snap_typec_port_state = t->typec_port_state;
+    g_pm.snap_cc1_state = t->cc1_state;
+    g_pm.snap_cc2_state = t->cc2_state;
+    g_pm.snap_vbus_state = t->vbus_state;
+    g_pm.snap_tps_vbus_mv = t->vbus_mv;
+    g_pm.snap_bq_vbus_mv = g_pm.status.bq.adc_vbus_mv;
+    g_pm.snap_role = t->role;
+    g_pm.snap_pdo_valid = t->active_pdo.valid;
+    g_pm.snap_rdo_valid = t->active_rdo.valid;
+    g_pm.snap_pp5v_state = t->pp5v_state;
+    g_pm.snap_pphv_state = t->pphv_state;
+    g_pm.coherent_snapshot_valid = true;
+
+    if (t->attached &&
+        !g_pm.typec_initial_role_latched &&
+        ((t->role == TPS25751_ROLE_SINK) ||
+         (t->role == TPS25751_ROLE_SOURCE))) {
+        g_pm.typec_initial_role = t->role;
+        g_pm.typec_initial_role_latched = true;
+    }
+}
+
+static void PowerManager_TickSourcePath(uint32_t now_ms)
+{
+    bool source_role;
+    bool contract_ok;
+    uint16_t bq_vbus;
+
+    (void)now_ms;
+    source_role =
+        g_pm.status.tps.attached &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
+        (g_pm.status.requested_mode != POWER_MANAGER_USER_SINK_ONLY) &&
+        (g_pm.status.requested_mode != POWER_MANAGER_USER_OFF) &&
+        !g_pm.session_reset_busy &&
+        !g_pm.session_reset_faulted;
+
+    if (!source_role) {
+        if (g_pm.source_path_phase != PM_SRC_PATH_IDLE) {
+            g_pm.source_path_phase = PM_SRC_PATH_IDLE;
+            if (g_pm.bq_owner == PM_BQ_OWNER_TPS_RUNTIME) {
+                g_pm.bq_owner = PM_BQ_OWNER_STM_STATIC;
+            }
+        }
+        return;
+    }
+
+    contract_ok = (g_pm.status.tps.connection_state >= 6U) &&
+                  g_pm.status.tps.active_pdo.valid &&
+                  g_pm.status.tps.active_rdo.valid;
+    bq_vbus = g_pm.status.bq.adc_vbus_mv;
+
+    switch (g_pm.source_path_phase) {
+        case PM_SRC_PATH_IDLE:
+        case PM_SRC_PATH_WAIT_CONTRACT:
+            g_pm.source_path_phase = contract_ok ?
+                PM_SRC_PATH_WAIT_BQ_VBUS : PM_SRC_PATH_WAIT_CONTRACT;
+            break;
+        case PM_SRC_PATH_WAIT_BQ_VBUS:
+            if (contract_ok &&
+                (bq_vbus >= PM_SRC_PATH_BQ_VBUS_MIN_MV) &&
+                (bq_vbus <= PM_SRC_PATH_BQ_VBUS_MAX_MV)) {
+                g_pm.source_path_phase = PM_SRC_PATH_READY;
+                g_pm.bq_owner = PM_BQ_OWNER_TPS_RUNTIME;
+                Debug_Printf("[PD-SRC] BQ VBUS ready %u mV gen=%lu — TPS owns runtime Option3",
+                             bq_vbus, (unsigned long)g_pm.attach_generation);
+            }
+            break;
+        case PM_SRC_PATH_READY:
+            if (!contract_ok) {
+                g_pm.source_path_phase = PM_SRC_PATH_WAIT_CONTRACT;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void PowerManager_InvalidateSessionOnDetach(uint32_t now_ms)
+{
+    (void)now_ms;
+    PowerManager_ClearContractTelemetry();
+    memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
+    memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
+    g_pm.partner_source_caps_current = false;
+    g_pm.partner_source_caps_fresh = false;
+    g_pm.partner_sink_observed = false;
+    g_pm.session_caps_event_this_gen = false;
+    g_pm.session_gsrc_ok_this_gen = false;
+    g_pm.session_gsrc_failed_this_gen = false;
+    g_pm.policy_swap_attempted = false;
+    g_pm.policy_decided = false;
+    g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
+    g_pm.auto_swap_command_sent = false;
+    g_pm.typec_initial_role_latched = false;
+    g_pm.typec_initial_role = TPS25751_ROLE_UNKNOWN;
+    g_pm.source_path_phase = PM_SRC_PATH_IDLE;
+    g_pm.coherent_snapshot_valid = false;
+    g_pm.leftover_vbus_since_ms = 0U;
+    g_pm.stuck_confirm_count = 0U;
+    /* Drop INITIATE bits only — PROCESS bits describe accepted policy and
+     * are re-applied by AUTO.  Never initiate via 0x29 on detach. */
+    PowerManager_NeutralizeAutoPortControl();
+    if (g_pm.bq_owner == PM_BQ_OWNER_TPS_RUNTIME) {
+        g_pm.bq_owner = PM_BQ_OWNER_STM_STATIC;
+    }
+    PowerManager_ForceOtgOff();
 }
 
 static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
@@ -1148,21 +1383,37 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
         g_pm.previous_attached = g_pm.status.tps.attached;
         if (g_pm.status.tps.attached) {
             g_pm.attach_count++;
+            g_pm.attach_generation++;
+            g_pm.status.attach_generation = g_pm.attach_generation;
+            g_pm.typec_initial_role = g_pm.status.tps.role;
+            g_pm.typec_initial_role_latched = false;
+            g_pm.session_caps_event_this_gen = false;
+            g_pm.session_gsrc_ok_this_gen = false;
+            g_pm.session_gsrc_failed_this_gen = false;
+            g_pm.auto_swap_command_sent = false;
+            g_pm.source_path_phase = PM_SRC_PATH_WAIT_CONTRACT;
+            g_pm.coherent_snapshot_valid = false;
+            g_pm.stuck_confirm_count = 0U;
+            g_pm.stuck_debounce_until_ms = 0U;
+            Debug_Printf("[PD-SESSION] attach gen=%lu role=%s conn=%u typec=0x%02X",
+                         (unsigned long)g_pm.attach_generation,
+                         PowerManager_RoleToString(g_pm.status.tps.role),
+                         g_pm.status.tps.connection_state,
+                         g_pm.status.tps.typec_port_state);
         } else {
             g_pm.detach_count++;
+            g_pm.attach_generation++;
+            /* Normal detach: invalidate session data only.  Do NOT write
+             * BeginSessionReset — TPS Type-C SM handles unplug; a forced
+             * Disabled→vSafe0V→800 ms window blacks out fast replugs. */
+            PowerManager_InvalidateSessionOnDetach(now_ms);
+            Debug_Printf("[PD-SESSION] detach gen=%lu (soft invalidate, no 0x28 reset)",
+                         (unsigned long)g_pm.attach_generation);
         }
         PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
-        if (!g_pm.status.tps.attached) {
-            /* force=true: cooldown must not skip clearing PORT_CONTROL /
-             * HIZ after a SINK powerbank session, or the next iPad plug
-             * inherits InitiateSwapToSink and never sources. */
-            PowerManager_BeginSessionReset(now_ms, "unplug", true);
-            if (PM_VERBOSE_TRANSITION_LOGS != 0U) {
-                Debug_Printf("[PD-POLICY] detach; decision state cleared");
-            }
-        }
     }
 }
+
 
 static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
 {
@@ -1172,16 +1423,13 @@ static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
         g_pm.port_control_read_pending = true;
         return;
     }
+    /* Single PR_SWAP initiation path: 0x29 carries PROCESS_* acceptance
+     * policy only.  Role change is initiated exactly once via SWSk/SWSr
+     * (see Decide/Maintain).  Never set INITIATE_SWAP_* here. */
     if (desired == TPS25751_ROLE_SOURCE) {
-        /* Stay Source (phone/iPad).  Reject PR_SWAP to sink so a DRP iPad
-         * cannot pull us off VBUS.  Do NOT InitiateSwapToSource — Type-C
-         * Try.SRC already made us source; initiating swaps was flipping
-         * powerbanks into OTG discharge after mode changes. */
         swap_bits = (uint8_t)TPS25751_PC_PROCESS_SWAP_SRC;
     } else if (desired == TPS25751_ROLE_SINK) {
-        /* Yield to a real charger / stay sink. */
-        swap_bits = (uint8_t)(TPS25751_PC_PROCESS_SWAP_SNK |
-                              TPS25751_PC_INITIATE_SWAP_SNK);
+        swap_bits = (uint8_t)TPS25751_PC_PROCESS_SWAP_SNK;
     } else {
         swap_bits = 0U;
     }
@@ -1189,6 +1437,7 @@ static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
         g_pm.port_control_write_pending = true;
     }
 }
+
 
 static bool PowerManager_IsAttachedAsSink(void)
 {
@@ -1214,36 +1463,66 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
 {
     uint32_t max_mw;
     uint32_t max_mv;
+    bool partner_drp;
+    bool strong_charger;
+    TPS25751_PowerRole_t typec_role;
 
-    /*
-     * Stable AUTO (after SINK/SOURCE ONLY thrashing):
-     *  - Type-C attach is the source of truth (Try.SRC / partner Rp).
-     *  - Never software-PR_SWAP into SOURCE (that OTG-discharged the pack
-     *    into 5 V powerbanks after returning to AUTO).
-     *  - Only software-PR_SWAP Source→Sink when fresh strong charger caps
-     *    show we should yield.
-     */
+    /* Explicit user modes win over AUTO heuristics. */
+    if (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) {
+        return TPS25751_ROLE_SINK;
+    }
+    if (g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY) {
+        return TPS25751_ROLE_SOURCE;
+    }
+
+    typec_role = g_pm.typec_initial_role_latched ?
+                 g_pm.typec_initial_role : g_pm.status.tps.role;
+
+    /* Already sinking (incl. 5 V powerbank) → stay SINK / charge pack. */
     if (PowerManager_IsAttachedAsSink() ||
         PowerManager_HasLiveSinkContract()) {
         return TPS25751_ROLE_SINK;
     }
 
-    if (PowerManager_IsAttachedAsSource()) {
-        if (g_pm.partner_source_caps_fresh &&
-            g_pm.partner_source_caps_current &&
-            (g_pm.partner_source_caps.count > 0U)) {
-            max_mw = g_pm.partner_source_caps.max_power_mw;
-            max_mv = g_pm.partner_source_caps.max_voltage_mv;
-            if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
-                (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
-                return TPS25751_ROLE_SINK;
-            }
-        }
+    if (!PowerManager_IsAttachedAsSource()) {
+        return TPS25751_ROLE_UNKNOWN;
+    }
+
+    /* No fresh caps this generation yet → keep Type-C SOURCE (Try.SRC). */
+    if (!g_pm.partner_source_caps_fresh ||
+        !g_pm.partner_source_caps_current) {
         return TPS25751_ROLE_SOURCE;
     }
 
-    return TPS25751_ROLE_UNKNOWN;
+    if (g_pm.partner_source_caps.count == 0U) {
+        /* GSrC path concluded "no partner source caps" for this session. */
+        return TPS25751_ROLE_SOURCE;
+    }
+
+    max_mw = g_pm.partner_source_caps.max_power_mw;
+    max_mv = g_pm.partner_source_caps.max_voltage_mv;
+    partner_drp = g_pm.partner_source_caps.first_pdo_dual_role_power;
+    strong_charger = (max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+                     (max_mw > PM_AUTO_WEAK_SRC_MAX_MW);
+
+    if (strong_charger) {
+        /* Clear charger advertisement while we are Source → yield once. */
+        return TPS25751_ROLE_SINK;
+    }
+
+    if (!partner_drp) {
+        /* Partner is source-only at weak 5 V — unusual while we are SRC;
+         * keep Type-C role (documented preference: no oscillate). */
+        return (typec_role == TPS25751_ROLE_SINK) ?
+               TPS25751_ROLE_SINK : TPS25751_ROLE_SOURCE;
+    }
+
+    /* Ambiguous weak DRP (phone/tablet dual-role at ≤5 V/15 W):
+     * keep the Type-C attach role.  Do not thrash with re-swaps. */
+    return (typec_role == TPS25751_ROLE_SINK) ?
+           TPS25751_ROLE_SINK : TPS25751_ROLE_SOURCE;
 }
+
 
 static void PowerManager_DecidePolicy(uint32_t now_ms)
 {
@@ -1254,51 +1533,69 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     uint32_t max_mv = g_pm.partner_source_caps.max_voltage_mv;
 
     if (g_pm.policy_decided) {
-        g_pm.policy_phase = PM_POLICY_DONE;
+        g_pm.policy_phase = PM_POLICY_LOCKED;
         return;
+    }
+
+    if (!g_pm.typec_initial_role_latched &&
+        ((current == TPS25751_ROLE_SINK) ||
+         (current == TPS25751_ROLE_SOURCE))) {
+        g_pm.typec_initial_role = current;
+        g_pm.typec_initial_role_latched = true;
     }
 
     desired = PowerManager_AutoRoleFromPartnerSourceCaps();
     if (desired == TPS25751_ROLE_UNKNOWN) {
-        /* Attach role not stable yet — retry, do not lock a bad decision. */
         g_pm.policy_phase = PM_POLICY_WAIT_SETTLE;
         g_pm.policy_next_ms = now_ms + PM_POLICY_SETTLE_MS;
-        Debug_Printf("[PD-POLICY] AUTO wait: role not stable yet");
+        Debug_Printf("[PD-POLICY] AUTO wait: role not stable yet gen=%lu",
+                     (unsigned long)g_pm.attach_generation);
         return;
     }
 
-    if (PowerManager_IsAttachedAsSink()) {
+    if (PowerManager_IsAttachedAsSink() ||
+        PowerManager_HasLiveSinkContract()) {
         reason = "ATTACHED_SNK_STAY_SINK";
     } else if ((desired == TPS25751_ROLE_SINK) &&
                PowerManager_IsAttachedAsSource()) {
-        reason = "ATTACHED_SRC_YIELD_TO_STRONG_CHARGER";
+        reason = "ATTACHED_SRC_YIELD_STRONG_OR_USER";
     } else if (!g_pm.partner_source_caps_fresh ||
                (g_pm.partner_source_caps.count == 0U)) {
-        reason = "ATTACHED_SRC_STAY_SOURCE";
+        reason = "ATTACHED_SRC_KEEP_TYPEC_SOURCE";
+    } else if (g_pm.partner_source_caps.first_pdo_dual_role_power) {
+        reason = "AMBIGUOUS_DRP_KEEP_TYPEC_ROLE";
     } else {
-        reason = "ATTACHED_SRC_WEAK_PARTNER_STAY_SOURCE";
+        reason = "ATTACHED_SRC_WEAK_KEEP_SOURCE";
     }
 
     g_pm.policy_desired_role = desired;
     g_pm.policy_decided = true;
+    /* PROCESS_* policy bits only — initiation is SWSk below if needed. */
     PowerManager_QueueAutoSwapControl(desired);
 
-    Debug_Printf("[PD-POLICY] AUTO role source_pdos=%u max=%lumW %lumV current=%s decision=%s reason=%s",
+    Debug_Printf("[PD-POLICY] AUTO gen=%lu typec0=%s source_pdos=%u max=%lumW %lumV drp=%u current=%s decision=%s reason=%s",
+                 (unsigned long)g_pm.attach_generation,
+                 PowerManager_RoleToString(g_pm.typec_initial_role),
                  g_pm.partner_source_caps.count,
                  (unsigned long)max_mw,
                  (unsigned long)max_mv,
+                 g_pm.partner_source_caps.first_pdo_dual_role_power ? 1U : 0U,
                  PowerManager_RoleToString(current),
                  PowerManager_RoleToString(desired),
                  reason);
 
-    /* Only Source→Sink swaps are allowed.  Never PR_SWAP into SOURCE. */
+    /* Exactly one software PR_SWAP initiation path: SWSk when we must
+     * yield Source→Sink.  If already at the desired role, do nothing. */
     if ((desired == TPS25751_ROLE_SINK) &&
-        (current == TPS25751_ROLE_SOURCE)) {
+        (current == TPS25751_ROLE_SOURCE) &&
+        !g_pm.auto_swap_command_sent) {
         g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     } else {
-        g_pm.policy_phase = PM_POLICY_DONE;
+        g_pm.policy_phase = PM_POLICY_LOCKED;
+        g_pm.auto_swap_command_sent = false;
     }
 }
+
 
 static void PowerManager_MaintainPolicy(uint32_t now_ms)
 {
@@ -1322,8 +1619,9 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
                          PowerManager_RoleToString(g_pm.policy_desired_role));
             g_pm.policy_desired_role = TPS25751_ROLE_SINK;
             PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
-            g_pm.policy_phase = PM_POLICY_DONE;
-            g_pm.policy_swap_attempted = false;
+            g_pm.policy_phase = PM_POLICY_LOCKED;
+            g_pm.policy_swap_attempted = true;
+            g_pm.auto_swap_command_sent = true;
         }
         g_pm.policy_role_mismatch_since_ms = 0U;
         return;
@@ -1336,15 +1634,18 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
         return;
     }
 
-    /* Only enforce Source→Sink (yield to charger).  Never Source enforcement. */
+    /* Only enforce Source→Sink yield once.  Never Source enforcement. */
     if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
         g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
+    if (g_pm.policy_swap_attempted || g_pm.auto_swap_command_sent) {
         return;
     }
 
     if (g_pm.policy_role_mismatch_since_ms == 0U) {
         g_pm.policy_role_mismatch_since_ms = now_ms;
-        Debug_Printf("[PD-POLICY] role drift current=%s desired=SINK; waiting %lums then one swap",
+        Debug_Printf("[PD-POLICY] role drift current=%s desired=SINK; waiting %lums then one SWSk",
                      PowerManager_RoleToString(current),
                      (unsigned long)PM_POLICY_ROLE_DRIFT_MS);
         return;
@@ -1353,8 +1654,8 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     if (((uint32_t)(now_ms - g_pm.policy_role_mismatch_since_ms) <
          PM_POLICY_ROLE_DRIFT_MS) ||
         !PowerManager_TickReached(now_ms, g_pm.policy_next_ms) ||
-        (g_pm.policy_phase != PM_POLICY_DONE) ||
-        g_pm.policy_swap_attempted) {
+        ((g_pm.policy_phase != PM_POLICY_LOCKED) &&
+         (g_pm.policy_phase != PM_POLICY_DONE))) {
         return;
     }
 
@@ -1362,8 +1663,9 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     g_pm.policy_phase = PM_POLICY_SWAP_TO_SINK;
     g_pm.policy_next_ms = now_ms;
     g_pm.policy_role_mismatch_since_ms = 0U;
-    Debug_Printf("[PD-POLICY] enforcing one-shot AUTO yield to SINK");
+    Debug_Printf("[PD-POLICY] enforcing one-shot AUTO yield to SINK via SWSk");
 }
+
 
 static void PowerManager_HandleTpsError(TPS25751_Status_t status,
                                         uint32_t now_ms)
@@ -1489,8 +1791,9 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  now_ms);
     }
     if (event.source_caps_received) {
-        /* Caps exist in silicon this plug — TRACE job will decode and
-         * set partner_source_caps_fresh.  Do not mark current yet. */
+        /* Caps arrived for this attach_generation.  TRACE may decode;
+         * never treat a cold RX_SOURCE_CAPS read as fresh without this. */
+        g_pm.session_caps_event_this_gen = true;
         g_pm.source_caps_trace_pending = true;
     }
     if (event.plug_changed || event.source_caps_received ||
@@ -1552,13 +1855,17 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             } else {
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
-                g_pm.partner_source_caps_current = true;
-                g_pm.partner_source_caps_fresh = true;
+                /* GSrC failed: caps are unknown for this generation.
+                 * Do NOT mark fresh/current and do NOT read RX_SOURCE_CAPS. */
+                g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
+                g_pm.session_gsrc_failed_this_gen = true;
                 g_pm.policy_phase = PM_POLICY_DECIDE;
                 g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
-                Debug_Printf("[PD-POLICY] Get_Source_Cap task=%u status=%s; no fresh partner Source Caps — decide SOURCE (skip stale RX_SOURCE_CAPS)",
+                Debug_Printf("[PD-POLICY] Get_Source_Cap task=%u status=%s gen=%lu; no source_caps_received — decide without RX_SOURCE_CAPS",
                              g_pm.tps.task_return_code,
-                             TPS25751_StatusToString(operation_status));
+                             TPS25751_StatusToString(operation_status),
+                             (unsigned long)g_pm.attach_generation);
             }
             if (operation_status != TPS25751_COMMAND_ERROR) {
                 PowerManager_HandleTpsError(operation_status, now_ms);
@@ -1572,8 +1879,8 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         } else if (completed_job == PM_JOB_READ_SOURCE_CAPS) {
             memset(&g_pm.partner_source_caps, 0,
                    sizeof(g_pm.partner_source_caps));
-            g_pm.partner_source_caps_current = true;
-            g_pm.partner_source_caps_fresh = true;
+            g_pm.partner_source_caps_current = false;
+            g_pm.partner_source_caps_fresh = false;
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             PowerManager_HandleTpsError(operation_status, now_ms);
@@ -1794,10 +2101,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_WRITE_PORT_CONTROL:
             g_pm.port_control_write_pending = false;
-            Debug_Printf("[PD-RESET] PORT_CONTROL applied 0x%02X (PR_SWAP initiate=0 process_src=%u process_snk=%u)",
+            Debug_Printf("[PD-RESET] PORT_CONTROL applied 0x%02X (process_snk=%u initiate_snk=%u process_src=%u initiate_src=%u)",
                          g_pm.port_control[0],
-                         (g_pm.port_control[0] & 0x40U) != 0U ? 1U : 0U,
-                         (g_pm.port_control[0] & 0x10U) != 0U ? 1U : 0U);
+                         (g_pm.port_control[0] & TPS25751_PC_PROCESS_SWAP_SNK) != 0U ? 1U : 0U,
+                         (g_pm.port_control[0] & TPS25751_PC_INITIATE_SWAP_SNK) != 0U ? 1U : 0U,
+                         (g_pm.port_control[0] & TPS25751_PC_PROCESS_SWAP_SRC) != 0U ? 1U : 0U,
+                         (g_pm.port_control[0] & TPS25751_PC_INITIATE_SWAP_SRC) != 0U ? 1U : 0U);
             PowerManager_FinishSessionResetIfIdle(now_ms);
             break;
 
@@ -1937,6 +2246,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.telemetry_phase = 8U;
             PowerManager_UpdatePdSnapshot();
             PowerManager_TryLogContractPdos();
+            PowerManager_CaptureCoherentSnapshot();
             break;
 
         case PM_JOB_READ_EVENT:
@@ -1976,18 +2286,36 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_GET_SOURCE_CAPS:
-            g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+            g_pm.session_gsrc_ok_this_gen = true;
+            if (g_pm.session_caps_event_this_gen) {
+                g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+            } else {
+                g_pm.policy_phase = PM_POLICY_WAIT_SOURCE_CAPS_EVENT;
+            }
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
             break;
 
         case PM_JOB_READ_SOURCE_CAPS:
+            if (!g_pm.session_caps_event_this_gen &&
+                !g_pm.session_gsrc_ok_this_gen) {
+                memset(&g_pm.partner_source_caps, 0,
+                       sizeof(g_pm.partner_source_caps));
+                g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
+                Debug_Printf("[PD-POLICY] ignore RX_SOURCE_CAPS without event/GSrC ok gen=%lu",
+                             (unsigned long)g_pm.attach_generation);
+                g_pm.policy_phase = PM_POLICY_DECIDE;
+                g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+                break;
+            }
             if (!TPS25751_DecodeCapabilities(&g_pm.partner_source_caps,
                                              data, length)) {
                 memset(&g_pm.partner_source_caps, 0,
                        sizeof(g_pm.partner_source_caps));
-                g_pm.partner_source_caps_current = true;
-                g_pm.partner_source_caps_fresh = true;
-                Debug_Printf("[PD-POLICY] invalid Source PDO payload; treating as no partner Source Caps");
+                g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
+                Debug_Printf("[PD-POLICY] invalid Source PDO payload gen=%lu",
+                             (unsigned long)g_pm.attach_generation);
                 g_pm.policy_phase = PM_POLICY_DECIDE;
                 g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
                 break;
@@ -2021,6 +2349,16 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_TRACE_SOURCE_CAPS:
             g_pm.source_caps_trace_pending = false;
+            if (!g_pm.session_caps_event_this_gen) {
+                memset(&g_pm.partner_source_caps, 0,
+                       sizeof(g_pm.partner_source_caps));
+                g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
+                Debug_Printf("[PD-TRACE t=%lu] ignore RX_SOURCE_CAPS without source_caps_received gen=%lu",
+                             (unsigned long)now_ms,
+                             (unsigned long)g_pm.attach_generation);
+                break;
+            }
             if (!TPS25751_DecodeCapabilities(&g_pm.partner_source_caps,
                                              data, length)) {
                 memset(&g_pm.partner_source_caps, 0,
@@ -2041,11 +2379,18 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
-        case PM_JOB_SWAP_TO_SINK:
-            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_phase = PM_POLICY_LOCKED;
             g_pm.policy_next_ms = now_ms + PM_POLICY_SWAP_RETRY_MS;
-            Debug_Printf("[PD-POLICY] role swap accepted target=%s; maintained policy verifies actual role in [PD]",
-                         PowerManager_RoleToString(g_pm.policy_desired_role));
+            Debug_Printf("[PD-POLICY] unexpected SWSr ignored for AUTO gen=%lu",
+                         (unsigned long)g_pm.attach_generation);
+            break;
+        case PM_JOB_SWAP_TO_SINK:
+            g_pm.auto_swap_command_sent = true;
+            g_pm.policy_swap_attempted = true;
+            g_pm.policy_phase = PM_POLICY_LOCKED;
+            g_pm.policy_next_ms = now_ms + PM_POLICY_SWAP_RETRY_MS;
+            Debug_Printf("[PD-POLICY] SWSk accepted target=SINK gen=%lu",
+                         (unsigned long)g_pm.attach_generation);
             break;
 
         case PM_JOB_BQ_TRACE_IIN_HOST:
@@ -2613,6 +2958,11 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
         g_pm.policy_phase = PM_POLICY_GET_SINK_CAPS;
     }
+    if ((g_pm.policy_phase == PM_POLICY_WAIT_SOURCE_CAPS_EVENT) &&
+        g_pm.session_caps_event_this_gen) {
+        g_pm.policy_phase = PM_POLICY_READ_SOURCE_CAPS;
+        g_pm.policy_next_ms = now_ms;
+    }
     if (!PowerManager_TickReached(now_ms, g_pm.policy_next_ms)) {
         return PM_JOB_NONE;
     }
@@ -2625,7 +2975,6 @@ static PowerManager_Job_t PowerManager_SelectPolicyJob(uint32_t now_ms)
         case PM_POLICY_READ_SINK_CAPS: return PM_JOB_READ_SINK_CAPS;
         case PM_POLICY_GET_SOURCE_CAPS: return PM_JOB_GET_SOURCE_CAPS;
         case PM_POLICY_READ_SOURCE_CAPS: return PM_JOB_READ_SOURCE_CAPS;
-        case PM_POLICY_SWAP_TO_SOURCE: return PM_JOB_SWAP_TO_SOURCE;
         case PM_POLICY_SWAP_TO_SINK: return PM_JOB_SWAP_TO_SINK;
         default: return PM_JOB_NONE;
     }
@@ -2653,11 +3002,16 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
         return PM_JOB_READ_MODE;
     }
-    if (g_pm.bq_option3_write_pending) {
-        return PM_JOB_BQ_WRITE_OPTION3;
-    }
-    if (g_pm.bq_option3_read_pending) {
-        return PM_JOB_BQ_READ_OPTION3;
+    if (g_pm.bq_emergency_shutdown_pending ||
+        g_pm.bq_emergency_readback_pending ||
+        g_pm.session_reset_busy ||
+        (g_pm.bq_owner != PM_BQ_OWNER_TPS_RUNTIME)) {
+        if (g_pm.bq_option3_write_pending) {
+            return PM_JOB_BQ_WRITE_OPTION3;
+        }
+        if (g_pm.bq_option3_read_pending) {
+            return PM_JOB_BQ_READ_OPTION3;
+        }
     }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
@@ -2830,6 +3184,7 @@ void PowerManager_Task(void)
         return;
     }
     now_ms = HAL_GetTick();
+    PowerManager_TickSourcePath(HAL_GetTick());
     PowerManager_MaintainOtgPermissionPin();
     PowerManager_TickSessionResetWait(now_ms);
 
@@ -2837,7 +3192,8 @@ void PowerManager_Task(void)
         operation_status = TPS25751_Task(&g_pm.tps, now_ms);
         if (operation_status != TPS25751_BUSY) {
             PowerManager_ProcessCompletedJob(operation_status, now_ms);
-            PowerManager_MaintainOtgPermissionPin();
+            PowerManager_TickSourcePath(HAL_GetTick());
+    PowerManager_MaintainOtgPermissionPin();
         }
         return;
     }

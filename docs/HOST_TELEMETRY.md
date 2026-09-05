@@ -57,28 +57,35 @@ Healthy after button/USB wake: `cfg=1`, `fets=1`, `vcell_rb=0x0017`, `manuf` bit
 | `pd_role` `pd_mv` `pd_ma` | PM snapshot contract (`pd_role`: 1=sink charge, 2=source) |
 | `bq_otg` | BQ25731 `IN_OTG`. `1` only after a real Source **contract** (`conn` 6/7 + PDO/RDO). Stays `0` in AttachWait, SINK ONLY, and AUTO sink. |
 
-Default USB-C: **AUTO = DRP + Try.SRC**. Firmware follows the Type-C attach role; it does **not** software-PR_SWAP into SOURCE (that OTG-discharged the pack into 5 V powerbanks).
+Default USB-C: **AUTO = DRP + Try.SRC** with a deterministic session/AUTO state machine.
 
-- **Attached.SNK / live sink contract** (including a **5 V-only powerbank**) → **SINK**, charge the pack, `bq_otg=0`.
-- **Attached.SRC** + fresh partner caps with V>5 V or >15 W → **SINK** (yield to charger).
-- **Attached.SRC** otherwise → **SOURCE** (stay; phone/iPad via Try.SRC). PORT_CONTROL uses `PROCESS_SWAP_SRC` only — no `INITIATE_SWAP_SRC`.
-- Role not stable yet → wait; do not lock a guessed mode.
+### Session / attach_generation
+Every plug and unplug bumps `attach_generation`. PDO/RDO, partner Source Caps, AUTO decisions, and 4CC command results are valid only for the current generation. Soft detach invalidates them without writing PORT_CONFIG `0x28`.
 
-`USB SOURCE` is source-only (`0x28` Source SM, `0x29` reject swap to sink). `USB SINK` is sink-only (`0x28` Sink SM, `0x29` reject swap to source). 9 V source PDOs stay in the TPS image.
+### Normal unplug vs stuck reset
+- **Normal detach**: TPS Type-C SM handles it. Firmware soft-invalidates session data and clears INITIATE bits only. **No** Disabled→vSafe0V→tSrcRecover window (so fast replug is not blacked out for ~800 ms).
+- **Destructive reset** (`0x28` Disabled → wait vSafe0V → tSrcRecover → restore): only after a **confirmed stuck** state (several agreeing coherent STATUS/TYPEC/ADC samples + separate debounce). Used for leftover VBUS / AttachWait stuck, and for explicit user mode changes.
+- If vSafe0V is **not** reached before the give-up timeout: stay Disabled, latch `session_reset_faulted`, report TPS/BQ VBUS + TYPEC diagnostics — **do not** restore Type-C.
 
-`cc1`/`cc2` are TPS `0x69` pin states (TRM 3.2.27): `1`=Ra and `2`=Rd are **Source-only** detections. `conn` is `STATUS 0x1A` bits 3:1 (`0`=no connection, `6`/`7`=attached). `plug` is `STATUS` bit 0 PlugPresent. `typec` is `0x69` TypeC Port State (`0x60` Attached.SRC, `0x61` Attached.SNK, `0x64` AttachWait.SRC, `0x67` Unattached.SRC, `0x00` Disabled). `rst` increments only when firmware actually starts a silicon reset; `rst_busy=1` while `0x28` is held Disabled waiting vSafe0V.
+### Source Caps freshness
+After `GSrC`, wait for `source_caps_received` for this generation before trusting `RX_SOURCE_CAPS`. A cold register read alone never sets `partner_source_caps_current/fresh`. GSrC fail/timeout does not fall through to stale RX contents.
 
-Expected `TC` after flash:
+### PR_SWAP single initiation path
+`PORT_CONTROL 0x29` carries **PROCESS_SWAP_*** acceptance policy only. Role change is initiated **once** via `SWSk` (Source→Sink yield). Never set `INITIATE_SWAP_*` and send SWSk/SWSr together. If already at the target role, do neither. PORT_CONTROL logs all four bits: `process_snk`, `initiate_snk`, `process_src`, `initiate_src`.
 
-- **iPhone (good, keep)**: later `conn=6/7`, `typec=0x60`, PD `5V/3A` then `9V/3A` (`pd_mv=9000 pd_ma=3000`), `bq_otg=1` only after that contract.
-- **iPad + USB SOURCE**: must leave `conn=0 typec=0x64` + VBUS 5↔0. Next log: `typec=0x60`, `conn=6/7`, `pd_role=2`, `pd_mv=5000` or `9000`, `bq_otg=1` only after the contract. `[PD-RESET]` on unplug/mode change restores **source-only** (`sm=1`), not DRP.
-- **iPad + AUTO**: Try.SRC → Attached.SRC → stay SOURCE (`pd_role=2`, `bq_otg=1` after contract). No software swap to SOURCE.
-- **Charger / 5 V powerbank + AUTO**: `typec=0x61`, `conn=6/7`, `pd_role=1`, `bq_otg=0`, charge on `bq_ichg_ma` / `bq_ibat_ma`.
-- Accidental OTG: PA4 stays low until Source contract.
+### AUTO decision (locked once per plug)
+Inputs: Type-C initial role, fresh Source Caps (+ Dual-Role Power), live sink contract, user mode.
+- Attached.SNK / live sink contract (incl. 5 V powerbank) → **SINK**
+- Attached.SRC + strong fresh caps (V>5 V or >15 W) → **SINK** yield (one SWSk)
+- Attached.SRC otherwise / ambiguous weak DRP → **keep Type-C role** (documented preference; no oscillate)
+- User SINK ONLY / SOURCE ONLY overrides heuristics
 
-Unplug/reattach or `USB SOURCE`/`USB SINK`/`USB AUTO`: PA4 LOW, BQ `ChargeOption3` EN_HIZ=1 EN_OTG=0, `0x28` Disabled until TPS VBUS `<0.8 V` and `tSrcRecover` 800 ms, then `0x28` for **that** mode (DRP+Try.SRC / Source-only / Sink-only), `0x29` swap bits for that mode. Do not treat `AttachWait.SRC` (`typec=0x64`) with vSafe0V as leftover — that is the iPad SOURCE attach. Kick only if CC is live in Unattached, or AttachWait with VBUS still high for 1.5 s.
+### Source power path
+Explicit SM: wait PD contract → confirm BQ ADC VBUS ~5 V → then raise OTG pin / treat path READY. Valid PDO/RDO alone is not enough. Do not drop 5 V while BQ starts.
 
-**Sticky / OTG regressions (fixed):** stale `RX_SOURCE_CAPS` are ignored without a fresh plug event; Attached.SNK always stays SINK; AUTO never initiates PR_SWAP to SOURCE after SINK ONLY → AUTO.
+### BQ ownership
+STM may program/verify static Option0/1/4/ADC (+ BIGCAP) before port activation. During a live contract **TPS owns runtime** Option3 / EN_HIZ / EN_OTG. STM only touches Option3 in stuck-reset or an explicit emergency shutdown (RMW + readback).
+
 
 ---
 
