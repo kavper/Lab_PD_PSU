@@ -1188,30 +1188,55 @@ static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
     }
 }
 
+static bool PowerManager_IsAttachedAsSink(void)
+{
+    return g_pm.status.tps.attached &&
+           (g_pm.status.tps.role == TPS25751_ROLE_SINK);
+}
+
+static bool PowerManager_HasLiveSinkContract(void)
+{
+    return PowerManager_IsAttachedAsSink() &&
+           (g_pm.status.tps.connection_state >= 6U) &&
+           g_pm.status.tps.active_pdo.valid &&
+           g_pm.status.tps.active_rdo.valid;
+}
+
 static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
 {
     uint32_t max_mw;
     uint32_t max_mv;
 
+    /*
+     * Partner is already powering us (Attached.SNK / live sink contract):
+     * always SINK and charge the pack.  A 5 V-only powerbank looks like
+     * "weak source" in the PDO table; treating that as SOURCE enabled OTG
+     * and discharged the pack into the bank after returning to AUTO.
+     */
+    if (PowerManager_HasLiveSinkContract() ||
+        PowerManager_IsAttachedAsSink()) {
+        return TPS25751_ROLE_SINK;
+    }
+
     if (!g_pm.partner_source_caps_fresh ||
         !g_pm.partner_source_caps_current ||
         (g_pm.partner_source_caps.count == 0U)) {
-        /* No fresh Source Caps this plug (GSrC failed / sink-only iPad):
-         * we SOURCE.  Do not keep SINK from a previous powerbank contract
-         * still sitting in Active PDO/RDO or RX_SOURCE_CAPS. */
+        /* No fresh Source Caps and we are not SNK: sink-only gadget
+         * (iPad/phone) → we SOURCE.  Do not resurrect stale RX_SOURCE_CAPS
+         * from a previous powerbank plug. */
         return TPS25751_ROLE_SOURCE;
     }
 
     max_mw = g_pm.partner_source_caps.max_power_mw;
     max_mv = g_pm.partner_source_caps.max_voltage_mv;
 
-    /* Only 5 V at ≤15 W: typical phone/tablet / weak source. */
-    if ((max_mv <= PM_AUTO_WEAK_SRC_MAX_MV) &&
-        (max_mw <= PM_AUTO_WEAK_SRC_MAX_MW)) {
-        return TPS25751_ROLE_SOURCE;
+    /* We are Source (Try.SRC won).  Strong partner Source Caps → yield
+     * and charge the pack; weak 5 V-only dual-role → stay Source. */
+    if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+        (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
+        return TPS25751_ROLE_SINK;
     }
-    /* Anything above 5 V (20 W / 9 V brick, laptop, …) or >15 W at 5 V. */
-    return TPS25751_ROLE_SINK;
+    return TPS25751_ROLE_SOURCE;
 }
 
 static void PowerManager_DecidePolicy(uint32_t now_ms)
@@ -1230,24 +1255,26 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     }
 
     desired = PowerManager_AutoRoleFromPartnerSourceCaps();
-    if (!g_pm.partner_source_caps_fresh ||
-        !g_pm.partner_source_caps_current ||
-        (g_pm.partner_source_caps.count == 0U)) {
+    if (PowerManager_HasLiveSinkContract()) {
+        reason = "LIVE_SINK_CONTRACT_STAY_SINK";
+    } else if (PowerManager_IsAttachedAsSink()) {
+        reason = "ATTACHED_AS_SINK_STAY_SINK";
+    } else if (!g_pm.partner_source_caps_fresh ||
+               !g_pm.partner_source_caps_current ||
+               (g_pm.partner_source_caps.count == 0U)) {
         reason = "NO_FRESH_PARTNER_SOURCE_CAPS_WE_SOURCE";
-    } else if ((max_mv <= PM_AUTO_WEAK_SRC_MAX_MV) &&
-               (max_mw <= PM_AUTO_WEAK_SRC_MAX_MW)) {
-        reason = "PARTNER_LE_15W_5V_WE_SOURCE";
-    } else if (max_mv > PM_AUTO_WEAK_SRC_MAX_MV) {
-        reason = "PARTNER_ABOVE_5V_WE_SINK";
+    } else if ((max_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+               (max_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
+        reason = "PARTNER_STRONG_SRC_WE_SINK";
     } else {
-        reason = "PARTNER_ABOVE_15W_5V_WE_SINK";
+        reason = "PARTNER_WEAK_5V_WE_SOURCE";
     }
 
     g_pm.policy_desired_role = desired;
     g_pm.policy_decided = true;
     PowerManager_QueueAutoSwapControl(desired);
 
-    Debug_Printf("[PD-POLICY] AUTO PDO heuristic source_pdos=%u max=%lumW %lumV current=%s decision=%s reason=%s (SOURCE if <=15W@5V or no caps; SINK if V>5V or >15W)",
+    Debug_Printf("[PD-POLICY] AUTO role source_pdos=%u max=%lumW %lumV current=%s decision=%s reason=%s",
                  g_pm.partner_source_caps.count,
                  (unsigned long)max_mw,
                  (unsigned long)max_mv,
@@ -1277,6 +1304,23 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
     }
 
     current = g_pm.status.tps.role;
+
+    /* Never PR_SWAP / OTG into SOURCE while the partner is already
+     * powering us.  An early Decide with NO_FRESH→SOURCE (or weak 5 V
+     * powerbank classified as SOURCE) would otherwise discharge the pack. */
+    if (PowerManager_HasLiveSinkContract() ||
+        PowerManager_IsAttachedAsSink()) {
+        if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
+            Debug_Printf("[PD-POLICY] override desired=%s → SINK (partner already sourcing to us)",
+                         PowerManager_RoleToString(g_pm.policy_desired_role));
+            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
+            PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
+            g_pm.policy_phase = PM_POLICY_DONE;
+            g_pm.policy_swap_attempted = false;
+        }
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
 
     /* One AUTO decision per plug.  Do not flip desired from the live
      * contract (that was charge-first leftover). */
