@@ -60,6 +60,16 @@ static int32_t HostLink_Ma(float amps)
     return (int32_t)((amps * 1000.0f) + ((amps >= 0.0f) ? 0.5f : -0.5f));
 }
 
+/* 0..10000 duty → 0..1000, meaning 0.0% .. 100.0% (divide by 10 to get percent). */
+static int32_t HostLink_DutyX10(uint32_t duty_10k)
+{
+    if (duty_10k > 10000U) {
+        duty_10k = 10000U;
+    }
+
+    return (int32_t)((duty_10k + 5U) / 10U);
+}
+
 static const char *HostLink_ModeName(void)
 {
     switch (App_GetRequestedMode()) {
@@ -106,7 +116,7 @@ static void HostLink_SendMachineTelemetry(void)
     n = snprintf(line, sizeof(line),
                  "T vin_mv=%ld vout_mv=%ld iout_ma=%ld i_buck_ma=%ld i_boost_ma=%ld "
                  "set_mv=%ld ilim_ma=%ld "
-                 "duty_ppm=%lu ucc_a=%u ucc_c=%u run=%u mode=%s fault=%lu "
+                 "duty_a_x10=%ld duty_c_x10=%ld ucc_a=%u ucc_c=%u run=%u mode=%s fault=%lu "
                  "pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
                  "permit=%u rem_sense=%u "
                  "g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
@@ -123,7 +133,8 @@ static void HostLink_SendMachineTelemetry(void)
                                    ? LdoLink_GetG0Voltage()
                                    : App_GetCvSetpoint()),
                  (long)HostLink_Ma(LdoLink_GetG0Current()),
-                 (unsigned long)(PowerStage_GetDutyA() * 1000000.0f + 0.5f),
+                 (long)HostLink_DutyX10(PowerStage_GetDutyA10k()),
+                 (long)HostLink_DutyX10(PowerStage_GetDutyCPhys10k()),
                  (unsigned int)(PowerStage_IsBuckTrEnActive() ? 1U : 0U),
                  (unsigned int)(PowerStage_IsBoostTrEnActive() ? 1U : 0U),
                  (unsigned int)PSU_IsRunning(),
