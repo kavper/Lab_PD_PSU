@@ -295,9 +295,14 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
          */
         /* pgood is for G0 permit/OUT, not for keeping the pre-reg alive.
          * A garbled TLM with pgood=0 used to drop DCDC and latch VIN_LOW. */
-        want_enable = (ldo.output_on || LdoLink_IsOutputWanted()) &&
-                      (!Prereg_FaultBlocksDcdc(ldo.fault)) &&
-                      (!s_force_disable);
+        if (s_force_disable) {
+            want_enable = false;
+        } else if (LdoLink_IsOutputWanted()) {
+            /* Host ON: never toggle DCDC on a shredded G0 fault token. */
+            want_enable = true;
+        } else {
+            want_enable = ldo.output_on && (!Prereg_FaultBlocksDcdc(ldo.fault));
+        }
 
         Prereg_UpdateSlew(request_v, dt_s, Prereg_NeedVinFloor(&ldo));
         s_status.vpre_command_v = s_command_v;

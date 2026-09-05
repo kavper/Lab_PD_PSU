@@ -596,6 +596,16 @@ static void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
+  /* CubeMX emits DisableFifoMode. G0 115200 needs the 8-byte RX FIFO or
+   * one missed IRQ (86 µs) overruns and shreds TLM / toggles DCDC. */
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_EnableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END USART2_Init 2 */
 
 }

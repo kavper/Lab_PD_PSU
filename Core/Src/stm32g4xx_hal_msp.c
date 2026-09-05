@@ -540,8 +540,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* G0 115200 byte-IT: keep this above typical app IRQs (was 5, lost to ADC DMA). */
-    HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
+    /* G0 115200: preempt DMA leftovers. FIFO still covers a late ISR. */
+    HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 
     /* USER CODE BEGIN USART2_MspInit 1 */

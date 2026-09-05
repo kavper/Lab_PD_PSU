@@ -5,6 +5,7 @@
 #include "fan_pwm.h"
 #include "host_link.h"
 #include "ldo_prereg.h"
+#include "ldo_tlm_parse.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,8 +264,8 @@ static void LdoLink_ParseFaultToken(const char *line)
     const char *p;
     const char *end;
     size_t len;
+    char token[24];
 
-    memset(s_status.fault, 0, sizeof(s_status.fault));
     p = strstr(line, "fault=");
     if (p == NULL) {
         return;
@@ -277,10 +278,33 @@ static void LdoLink_ParseFaultToken(const char *line)
     }
 
     len = (size_t)(end - p);
-    if (len >= sizeof(s_status.fault)) {
-        len = sizeof(s_status.fault) - 1U;
+    if (len == 0U) {
+        return;
     }
-    memcpy(s_status.fault, p, len);
+    if (len >= sizeof(token)) {
+        len = sizeof(token) - 1U;
+    }
+    memcpy(token, p, len);
+    token[len] = '\0';
+
+    /* Keep last good token; garbled VIN_LOW copies must not look like a new fault. */
+    if ((strcmp(token, "NONE") == 0) || (strcmp(token, "none") == 0)) {
+        s_status.fault[0] = '\0';
+        return;
+    }
+    if (strstr(token, "VIN") != NULL) {
+        (void)strncpy(s_status.fault, "VIN_LOW", sizeof(s_status.fault) - 1U);
+        s_status.fault[sizeof(s_status.fault) - 1U] = '\0';
+        return;
+    }
+    if ((strcmp(token, "OT") == 0) ||
+        (strcmp(token, "OC") == 0) ||
+        (strcmp(token, "OCP") == 0) ||
+        (strcmp(token, "SHORT") == 0) ||
+        (strstr(token, "KILL") != NULL)) {
+        (void)strncpy(s_status.fault, token, sizeof(s_status.fault) - 1U);
+        s_status.fault[sizeof(s_status.fault) - 1U] = '\0';
+    }
 }
 
 static bool LdoLink_TxLine(const char *line)
@@ -502,6 +526,10 @@ static void LdoLink_HandleTlmLine(const char *line)
     uint8_t value;
 
     if ((line == NULL) || (strncmp(line, "TLM ", 4U) != 0)) {
+        return;
+    }
+
+    if (!Ldo_TlmLooksComplete(line)) {
         return;
     }
 
@@ -1090,7 +1118,7 @@ void LdoLink_Task(void)
     if (!s_status.telemetry_valid ||
         ((s_status.last_tlm_ms != 0U) &&
          ((uint32_t)(now_ms - s_status.last_tlm_ms) > LDO_TLM_STALE_MS))) {
-        if ((age_ms > LDO_RX_RECOVER_MS) || (s_status.rx_errors > 0U)) {
+        if (age_ms > LDO_RX_RECOVER_MS) {
             LdoLink_RecoverRx(now_ms);
         }
         if ((uint32_t)(now_ms - s_last_health_ms) >= LDO_LINK_HEALTH_MS) {
@@ -1134,7 +1162,8 @@ void LdoLink_OnUartError(UART_HandleTypeDef *huart)
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_PEFLAG(huart);
         huart->ErrorCode = HAL_UART_ERROR_NONE;
-        (void)HAL_UART_AbortReceive(huart);
+        /* HAL already aborted the IT RX on ORE. Do not AbortReceive again —
+         * that drops FIFO contents and retriggers overrun. */
         LdoLink_ArmRx();
     }
 }

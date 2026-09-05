@@ -1,4 +1,5 @@
 #include "dcdc_hs_policy.h"
+#include "ldo_tlm_parse.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -74,6 +75,17 @@ int main(void)
                "10% trailing margin clips mid of a short-ish pulse");
     ExpectNear(Dcdc_AdcTriggerInHsOn(0.03f, 1.00f), 0.05f, 0.001f,
                "tiny HS window falls back to 5%");
+
+    ExpectTrue(Ldo_TlmLooksComplete(
+                   "TLM out=0 mode=0 vset=5000 vout=37 iset=100 iout=1 vin=9256 "
+                   "pgood=1 kill=0 outoff=1 cccv=0 fault=VIN_LOW"),
+               "well-formed TLM is accepted");
+    ExpectTrue(!Ldo_TlmLooksComplete(
+                   "TLM ut0 od=0 vset=5000 vou=3 pgood=1 kill=0 fault=VIN_OW"),
+               "shredded TLM prefix is rejected");
+    ExpectTrue(!Ldo_TlmLooksComplete(
+                   "TLM out=0 mode=0 vset=5000 vout=37 pgood=1 fault=VIN_LOW"),
+               "TLM missing kill= is rejected");
 
     if (g_failures != 0) {
         printf("%d failure(s)\n", g_failures);
