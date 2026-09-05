@@ -120,8 +120,8 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**ADC1 GPIO Configuration
-    PA0     ------> ADC1_IN1  ADC_VBAT
-    PA3     ------> ADC1_IN4  I_OUT_BOOST
+    PA0     ------> ADC1_IN1  ADC_VBAT (VIN, rank 2)
+    PA3     ------> ADC1_IN4  I_OUT_BOOST (rank 1)
     */
     GPIO_InitStruct.Pin = ADC_VBAT_Pin|I_OUT_BOOST_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -176,7 +176,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
     /**ADC2 GPIO Configuration
-    PB2     ------> ADC2_IN12  ADC_VOUT
+    PB2     ------> ADC2_IN12  ADC_VOUT (rank 2)
     */
     GPIO_InitStruct.Pin = ADC_VOUT_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -205,6 +205,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
     /* USER CODE BEGIN ADC2_MspInit 1 */
+    /* PA1 ADC2_IN2 I_IN_BUCK: CubeMX rank1 (currents first). Pin set unchanged. */
     __HAL_RCC_GPIOA_CLK_ENABLE();
     GPIO_InitStruct.Pin = I_IN_BUCK_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;

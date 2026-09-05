@@ -21,9 +21,9 @@ typedef struct {
 } Measurements_t;
 
 /* CubeMX ADC ranks (Lab_PD_PSU.ioc) must match DMA unpacking in measurements.c:
- * ADC1 rank1 PA0 ADC_VBAT VIN, rank2 PA3 I_OUT_BOOST.
- * ADC2 rank1 PB2 ADC_VOUT, rank2 PA1 I_IN_BUCK.
- * ACS37100 I_L_MEAS is not sampled. */
+ * ADC1 rank1 PA3 I_OUT_BOOST (6.5 cyc), rank2 PA0 ADC_VBAT VIN (24.5 cyc).
+ * ADC2 rank1 PA1 I_IN_BUCK (6.5 cyc), rank2 PB2 ADC_VOUT (24.5 cyc).
+ * VIN/VOUT and both HS currents are DMA-window averaged. ACS37100 is unused. */
 
 void Measurements_Init(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc2);
 bool Measurements_Update(Measurements_t *meas);

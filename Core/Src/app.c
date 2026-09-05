@@ -647,7 +647,8 @@ static void App_ApplyDuty(PowerStage_Region_t region,
                           float duty_cmd_a,
                           float duty_cmd_c)
 {
-    float adc_trigger;
+    float buck_hs_end;
+    float boost_hs_end;
 
     duty_cmd_a = App_Clamp(duty_cmd_a, DUTY_MIN_ABS, DUTY_MAX_ABS);
     duty_cmd_c = App_Clamp(duty_cmd_c, DUTY_MIN_ABS, DUTY_MAX_ABS);
@@ -656,24 +657,30 @@ static void App_ApplyDuty(PowerStage_Region_t region,
 
     switch (region) {
         case POWER_REGION_BUCK:
+            /* Buck PWM on TA1 (HS). Boost pass-through: HS static 100%. */
             PowerStage_SetDuty(duty_cmd_a, 0.0f);
-            adc_trigger = App_Clamp(duty_cmd_a + 0.20f, 0.15f, 0.85f);
-            PowerStage_SetAdcTriggerPoint(adc_trigger);
+            buck_hs_end = duty_cmd_a;
+            boost_hs_end = 1.0f;
             break;
 
         case POWER_REGION_BOOST:
-            /* Diagnostic-only path: not selected by automatic CV region logic. */
+            /* Diagnostic-only path: not selected by automatic CV region logic.
+             * Buck pass-through HS=100%. duty_c is boost LS, so HS = 1 − D_C. */
             PowerStage_SetDuty(1.0f, duty_cmd_c);
-            adc_trigger = App_Clamp(duty_cmd_c + 0.20f, 0.15f, 0.85f);
-            PowerStage_SetAdcTriggerPoint(adc_trigger);
+            buck_hs_end = 1.0f;
+            boost_hs_end = 1.0f - duty_cmd_c;
             break;
 
         case POWER_REGION_BUCK_BOOST:
         default:
             PowerStage_SetDuty(duty_cmd_a, duty_cmd_c);
-            PowerStage_SetAdcTriggerPoint(0.60f);
+            buck_hs_end = duty_cmd_a;
+            boost_hs_end = 1.0f - duty_cmd_c;
             break;
     }
+
+    /* CMP3 in the overlap of both HS-ON windows so INA296 S/H is in-pulse. */
+    PowerStage_SetAdcTriggerPoint(Dcdc_AdcTriggerInHsOn(buck_hs_end, boost_hs_end));
 
     app.duty_cmd_a = duty_cmd_a;
     app.duty_cmd_c = duty_cmd_c;

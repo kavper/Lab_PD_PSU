@@ -184,6 +184,7 @@ static void MX_ADC1_Init(void)
   ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC1_Init 1 */
+  /* Kernel 42.5 MHz (PCLK/4). HAL has no ASYNC_DIV3; DIV2=85 MHz is over 12-bit spec. */
   /* USER CODE END ADC1_Init 1 */
 
   /** Common config
@@ -219,9 +220,9 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_4;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_92CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_6CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -232,15 +233,18 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_24CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-  /* Rank 1 PA0 ADC1_IN1 ADC_VBAT = VIN. Rank 2 PA3 ADC1_IN4 I_OUT_BOOST INA296.
-   * I_IN_BUCK is ADC2 rank 2 so both INA296 channels convert in parallel. */
+  /* Rank 1 PA3 ADC1_IN4 I_OUT_BOOST 6.5 cyc (~153 ns S/H at CMP3).
+   * Rank 2 PA0 ADC1_IN1 VIN 24.5 cyc (~576 ns for 51k/4.7k Thevenin ~4.3 kΩ).
+   * Dual scan 6.5+12.5 + 24.5+12.5 = 56 cyc ≈ 1.32 µs < 2.0 µs PWM period.
+   * I_IN_BUCK is ADC2 rank 1 so both INA296 convert in parallel. */
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -259,6 +263,7 @@ static void MX_ADC2_Init(void)
   ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC2_Init 1 */
+  /* Same 42.5 MHz kernel as ADC1. */
   /* USER CODE END ADC2_Init 1 */
 
   /** Common config
@@ -286,9 +291,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_92CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_6CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -299,15 +304,16 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Channel = ADC_CHANNEL_12;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_24CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC2_Init 2 */
-  /* Rank 1 PB2 ADC2_IN12 ADC_VOUT. Rank 2 PA1 ADC2_IN2 I_IN_BUCK INA296.
-   * Matches measurements.c DMA slots 0/1. ACS37100 I_L_MEAS is not sampled. */
+  /* Rank 1 PA1 ADC2_IN2 I_IN_BUCK 6.5 cyc. Rank 2 PB2 ADC2_IN12 VOUT 24.5 cyc.
+   * DMA slots 0/1 in measurements.c. ACS37100 I_L_MEAS is not sampled. */
   /* USER CODE END ADC2_Init 2 */
 
 }
@@ -359,7 +365,7 @@ static void MX_HRTIM1_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_HRTIM_ADCPostScalerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, 10) != HAL_OK)
+  if (HAL_HRTIM_ADCPostScalerConfig(&hhrtim1, HRTIM_ADCTRIGGER_1, 0) != HAL_OK)
   {
     Error_Handler();
   }
@@ -488,6 +494,7 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN HRTIM1_Init 2 */
+  /* Postscaler 0: ADC every PWM period. Dual scan fits in 2 µs so skip is unused. */
   BoardMx_ApplyHrtimFault(&hhrtim1);
   /* USER CODE END HRTIM1_Init 2 */
   HAL_HRTIM_MspPostInit(&hhrtim1);

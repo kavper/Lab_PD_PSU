@@ -44,6 +44,11 @@
 #define BOARD_DIVIDER_BOT_OHM                4700.0f
 #define BOARD_DIVIDER_RATIO \
     ((BOARD_DIVIDER_TOP_OHM + BOARD_DIVIDER_BOT_OHM) / BOARD_DIVIDER_BOT_OHM)
+/*
+ * VIN/VOUT taps (PA0 / PB2): Thevenin ~4.3 kΩ. Firmware uses 24.5 ADC cycles
+ * (~576 ns at 42.5 MHz) then DMA-window averaging. Hardware option, not in
+ * this PCB rev: 4.7–10 nF from the ADC tap to AGND as a charge reservoir.
+ */
 
 #define BOARD_INA296_GAIN                    100.0f
 #define BOARD_INA296_SHUNT_OHM               0.001f

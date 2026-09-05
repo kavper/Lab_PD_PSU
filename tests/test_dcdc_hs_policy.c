@@ -59,6 +59,22 @@ int main(void)
     hits = Dcdc_OcpUpdateHits(hits, false, DCDC_HS_OCP_HIT_LIMIT);
     ExpectTrue(hits == (DCDC_HS_OCP_HIT_LIMIT - 1U), "under-limit decays");
 
+    /* ADC trigger sits in the middle of the overlapping HS-ON windows. */
+    ExpectNear(Dcdc_AdcTriggerInHsOn(0.50f, 1.00f), 0.25f, 0.001f,
+               "buck 50% / boost pass-through → 25%");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(1.00f, 0.60f), 0.30f, 0.001f,
+               "boost LS 40% (HS 60%) / buck pass-through → 30%");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(0.80f, 0.70f), 0.35f, 0.001f,
+               "buck-boost overlap ends at 70% → 35%");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(1.00f, 1.00f), 0.50f, 0.001f,
+               "both HS static 100% → 50%");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(0.12f, 1.00f), 0.05f, 0.001f,
+               "short HS pulse keeps trigger inside the window");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(0.18f, 1.00f), 0.08f, 0.001f,
+               "10% trailing margin clips mid of a short-ish pulse");
+    ExpectNear(Dcdc_AdcTriggerInHsOn(0.03f, 1.00f), 0.05f, 0.001f,
+               "tiny HS window falls back to 5%");
+
     if (g_failures != 0) {
         printf("%d failure(s)\n", g_failures);
         return EXIT_FAILURE;

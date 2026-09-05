@@ -91,4 +91,65 @@ static inline bool Dcdc_OcpTripped(uint32_t hits, uint32_t limit)
     return hits >= limit;
 }
 
+/*
+ * ADC trigger as a fraction of the PWM period, in the overlap of both
+ * high-side ON windows. HS is ON from PER (0) until this end.
+ * S/H for INA296 is ~0.15 µs (~8% of 2 µs), so keep a 10% margin before HS off.
+ */
+#ifndef DCDC_ADC_HS_SAMPLE_MARGIN
+#define DCDC_ADC_HS_SAMPLE_MARGIN            0.10f
+#endif
+
+static inline float Dcdc_MinFloat(float a, float b)
+{
+    return (a < b) ? a : b;
+}
+
+static inline float Dcdc_Clamp01(float value)
+{
+    if (!(value == value)) {
+        return 0.0f;
+    }
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
+}
+
+static inline float Dcdc_AdcTriggerInHsOn(float buck_hs_end, float boost_hs_end)
+{
+    float hs_end;
+    float mid;
+    float max_trig;
+
+    buck_hs_end = Dcdc_Clamp01(buck_hs_end);
+    boost_hs_end = Dcdc_Clamp01(boost_hs_end);
+    hs_end = Dcdc_MinFloat(buck_hs_end, boost_hs_end);
+
+    if (hs_end < 0.04f) {
+        return 0.05f;
+    }
+
+    mid = 0.5f * hs_end;
+    max_trig = hs_end - DCDC_ADC_HS_SAMPLE_MARGIN;
+    if (max_trig < 0.05f) {
+        /* Pulse too short for a 10% trailing margin; stay at 5% of the period. */
+        return 0.05f;
+    }
+    if (mid > max_trig) {
+        mid = max_trig;
+    }
+    if (mid < 0.05f) {
+        mid = 0.05f;
+    }
+    if (mid > 0.95f) {
+        mid = 0.95f;
+    }
+
+    return mid;
+}
+
 #endif /* DCDC_HS_POLICY_H */

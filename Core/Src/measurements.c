@@ -55,9 +55,9 @@ enum {
     MEAS_ERR_DMA_NO_DATA
 };
 
-static float Meas_AdcToVoltage(uint16_t raw)
+static float Meas_CountsToVoltage(float counts)
 {
-    return ((float)raw * MEAS_ADC_VREF_V) / MEAS_ADC_FULL_SCALE;
+    return (counts * MEAS_ADC_VREF_V) / MEAS_ADC_FULL_SCALE;
 }
 
 static float Meas_Iir(float prev, float input)
@@ -287,6 +287,8 @@ bool Measurements_Update(Measurements_t *meas)
     float vbat;
     float mean_i_boost;
     float mean_i_buck;
+    float mean_vin;
+    float mean_vout;
 
     if ((meas == NULL) || (!g_meas_ctx.initialized)) {
         g_meas_ctx.last_error = MEAS_ERR_INIT_ADC1;
@@ -300,15 +302,15 @@ bool Measurements_Update(Measurements_t *meas)
         return false;
     }
 
-    /* ADC1 rank1 DMA[0]: ADC_CHANNEL_1 PA0 ADC_VBAT (VIN via 51k/4.7k).
-     * ADC1 rank2 DMA[1]: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3).
-     * ADC2 rank1 DMA[0]: ADC_CHANNEL_12 PB2 ADC_VOUT.
-     * ADC2 rank2 DMA[1]: ADC_CHANNEL_2 PA1 I_IN_BUCK (INA296A3).
-     * I_L_MEAS / ACS37100 is not sampled. */
-    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
-    raw_i_boost = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
-    raw_vout = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 0U];
-    raw_i_buck = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 1U];
+    /* ADC1 rank1 DMA[0]: ADC_CHANNEL_4 PA3 I_OUT_BOOST (INA296A3), 6.5 cyc.
+     * ADC1 rank2 DMA[1]: ADC_CHANNEL_1 PA0 ADC_VBAT VIN (51k/4.7k), 24.5 cyc.
+     * ADC2 rank1 DMA[0]: ADC_CHANNEL_2 PA1 I_IN_BUCK (INA296A3), 6.5 cyc.
+     * ADC2 rank2 DMA[1]: ADC_CHANNEL_12 PB2 ADC_VOUT, 24.5 cyc.
+     * Currents convert first at CMP3 (mid HS-ON). I_L_MEAS / ACS37100 unused. */
+    raw_i_boost = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 0U];
+    raw_vin = adc1_dma_buffer[(adc1_slot * MEAS_ADC1_CHANNELS) + 1U];
+    raw_i_buck = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 0U];
+    raw_vout = adc2_dma_buffer[(adc2_slot * MEAS_ADC2_CHANNELS) + 1U];
 
     if ((raw_vout == MEAS_DMA_SENTINEL) ||
         (raw_vin == MEAS_DMA_SENTINEL) ||
@@ -322,8 +324,10 @@ bool Measurements_Update(Measurements_t *meas)
         return false;
     }
 
-    if ((!Meas_MeanChannel(adc1_dma_buffer, MEAS_ADC1_CHANNELS, 1U, &mean_i_boost)) ||
-        (!Meas_MeanChannel(adc2_dma_buffer, MEAS_ADC2_CHANNELS, 1U, &mean_i_buck))) {
+    if ((!Meas_MeanChannel(adc1_dma_buffer, MEAS_ADC1_CHANNELS, 0U, &mean_i_boost)) ||
+        (!Meas_MeanChannel(adc1_dma_buffer, MEAS_ADC1_CHANNELS, 1U, &mean_vin)) ||
+        (!Meas_MeanChannel(adc2_dma_buffer, MEAS_ADC2_CHANNELS, 0U, &mean_i_buck)) ||
+        (!Meas_MeanChannel(adc2_dma_buffer, MEAS_ADC2_CHANNELS, 1U, &mean_vout))) {
         g_meas_ctx.last_error = MEAS_ERR_DMA_NO_DATA;
         return false;
     }
@@ -334,8 +338,8 @@ bool Measurements_Update(Measurements_t *meas)
         g_meas_ctx.dma_seen_once = true;
     }
 
-    vout = Meas_AdcToVoltage(raw_vout) * MEAS_VOUT_DIVIDER_RATIO;
-    vin = Meas_AdcToVoltage(raw_vin) * MEAS_VIN_DIVIDER_RATIO;
+    vout = Meas_CountsToVoltage(mean_vout) * MEAS_VOUT_DIVIDER_RATIO;
+    vin = Meas_CountsToVoltage(mean_vin) * MEAS_VIN_DIVIDER_RATIO;
     vbat = vin;
     i_hs_boost = Meas_Ina296AmpereFromCounts(mean_i_boost);
     i_hs_buck = Meas_Ina296AmpereFromCounts(mean_i_buck);
