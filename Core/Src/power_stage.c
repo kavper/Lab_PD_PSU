@@ -19,11 +19,12 @@
 static void PowerStage_SetIsolatedSuppliesPerLeg(bool buck_en, bool boost_en)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port,
-                      BUCK_TR_EN_Pin,
-                      buck_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    /* EN nets are crossed vs the leg they actually power. */
     HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port,
                       BOOST_TR_EN_Pin,
+                      buck_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port,
+                      BUCK_TR_EN_Pin,
                       boost_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
 #else
     (void)buck_en;
