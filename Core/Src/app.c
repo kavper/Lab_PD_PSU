@@ -5,6 +5,7 @@
 #include "bq76922.h"
 #include "control_cv.h"
 #include "dcdc_hs_policy.h"
+#include "dcdc_mode_policy.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
@@ -45,19 +46,18 @@ BQ76922_Device_t g_bq76922;
 #define DUTY_MAX_ABS                         1.000f
 
 #define DUTY_BUCK_MIN                        0.020f
-/* 1.0 allowed: PowerStage switches to StaticHigh+UCC at >=97% HS. */
+/* 1.0 allowed: PowerStage switches to StaticHigh+UCC at >=98% HS. */
 #define DUTY_BUCK_MAX                        1.000f
 
-/* BUCK_BOOST mixed-mode duty limits are set here. */
-#define DUTY_MIXED_A                         0.80f
-#define DUTY_MIXED_B_MIN                     0.03f
-#define DUTY_MIXED_B_MAX                     0.80f
-#define BUCK_BOOST_DUTY_A_BASE               DUTY_MIXED_A
+/* Mixed-mode Dc limits. Da is no longer locked at 0.80 — it glides 0.90→1.00. */
+#define DUTY_MIXED_B_MIN                     0.00f
+#define DUTY_MIXED_B_MAX                     DCDC_DC_MAX
 #define BUCK_BOOST_DUTY_C_MIN                DUTY_MIXED_B_MIN
 #define BUCK_BOOST_DUTY_C_MAX                DUTY_MIXED_B_MAX
 #define BUCK_BOOST_DUTY_C_INIT_MIN           0.05f
 #define BUCK_BOOST_DUTY_C_INIT_MAX           0.30f
 #define BUCK_BOOST_DUTY_C_SLEW_PER_CTRL      0.0008f
+#define BUCK_BOOST_DUTY_A_SLEW_PER_CTRL      0.0008f
 #define BUCK_BOOST_DUTY_C_SOFTSTART_MS       700U
 #define BUCK_BOOST_CTRL_GAIN_NEAR_VIN        0.55f
 #define BUCK_BOOST_CTRL_GAIN_ABOVE_VIN       0.80f
@@ -95,8 +95,10 @@ BQ76922_Device_t g_bq76922;
 #define CV_2P2Z_A1                           0.0000f
 #define CV_2P2Z_A2                           0.0000f
 
-#define REGION_BUCK_ENTER_MARGIN_V           1.50f
-#define REGION_BUCK_EXIT_MARGIN_V            0.80f
+#define REGION_BUCK_ENTER_MARGIN_V           DCDC_BUCK_ENTER_MARGIN_V
+#define REGION_BUCK_EXIT_MARGIN_V            DCDC_BUCK_EXIT_MARGIN_V
+#define REGION_BOOST_ENTER_MARGIN_V          DCDC_BOOST_ENTER_MARGIN_V
+#define REGION_BOOST_EXIT_MARGIN_V           DCDC_BOOST_EXIT_MARGIN_V
 #define REGION_SWITCH_CONFIRM_COUNT          8U
 #define REGION_MIN_DWELL_MS                  200U
 
@@ -142,6 +144,7 @@ typedef struct {
     uint32_t buck_boost_softstart_tick_ms;
     uint32_t low_setpoint_start_until_ms;
 
+    PowerStage_Region_t ctrl_region;
     PowerStage_Region_t region_candidate;
     uint32_t region_candidate_count;
     uint32_t region_last_confirm_count;
@@ -531,54 +534,25 @@ static bool App_ShouldForceLowSetpointBuck(float ramped_setpoint_v)
 
 static PowerStage_Region_t App_SelectRegionBase(float vin, float setpoint_v)
 {
-    if (setpoint_v < CV_LOW_SETPOINT_START_THRESHOLD_V) {
-        return POWER_REGION_BUCK;
-    }
-
-    if (setpoint_v < (vin - REGION_BUCK_ENTER_MARGIN_V)) {
-        return POWER_REGION_BUCK;
-    }
-
-    return POWER_REGION_BUCK_BOOST;
+    return (PowerStage_Region_t)Dcdc_SelectRegion(DCDC_REGION_BUCK, vin, setpoint_v);
 }
 
 static PowerStage_Region_t App_SelectRegionWithHysteresis(PowerStage_Region_t current,
                                                            float vin,
                                                            float setpoint_v)
 {
-    float buck_enter_threshold = vin - REGION_BUCK_ENTER_MARGIN_V;
-    float buck_exit_threshold = vin - REGION_BUCK_EXIT_MARGIN_V;
-
-    switch (current) {
-        case POWER_REGION_BUCK:
-            if (setpoint_v >= buck_exit_threshold) {
-                return POWER_REGION_BUCK_BOOST;
-            }
-            return POWER_REGION_BUCK;
-
-        case POWER_REGION_BOOST:
-            return POWER_REGION_BUCK_BOOST;
-
-        case POWER_REGION_BUCK_BOOST:
-        default:
-            if (setpoint_v <= buck_enter_threshold) {
-                return POWER_REGION_BUCK;
-            }
-            return POWER_REGION_BUCK_BOOST;
-    }
+    return (PowerStage_Region_t)Dcdc_SelectRegion((int)current, vin, setpoint_v);
 }
 
 static PowerStage_Region_t App_LimitRegionStep(PowerStage_Region_t current,
                                                PowerStage_Region_t candidate)
 {
-    if (candidate == POWER_REGION_BOOST) {
+    if ((current == POWER_REGION_BUCK) && (candidate == POWER_REGION_BOOST)) {
         return POWER_REGION_BUCK_BOOST;
     }
-
     if ((current == POWER_REGION_BOOST) && (candidate == POWER_REGION_BUCK)) {
         return POWER_REGION_BUCK_BOOST;
     }
-
     return candidate;
 }
 
@@ -588,47 +562,14 @@ static void App_EstimateDutyForRegion(PowerStage_Region_t region,
                                       float *duty_a,
                                       float *duty_c)
 {
-    float local_a = 0.0f;
-    float local_c = 0.0f;
-    float effective_setpoint_v;
-    float denom;
+    Dcdc_Duties_t d = Dcdc_FeedForwardDuties(vin, setpoint_v);
 
-    vin = App_MaxFloat(vin, 0.10f);
-    effective_setpoint_v = App_MaxFloat(setpoint_v, 0.01f);
-
-    switch (region) {
-        case POWER_REGION_BUCK:
-            if (setpoint_v <= OFF_RAMP_DONE_V) {
-                local_a = 0.0f;
-            } else {
-                local_a = App_Clamp(effective_setpoint_v / vin, DUTY_BUCK_MIN, DUTY_BUCK_MAX);
-            }
-            local_c = 0.0f;
-            break;
-
-        case POWER_REGION_BOOST:
-            local_a = 1.0f;
-            denom = App_MaxFloat(effective_setpoint_v, vin + 0.10f);
-            local_c = 1.0f - (vin / denom);
-            local_c = App_Clamp(local_c,
-                                DUTY_BOOST_MIN,
-                                App_Clamp(BOOST_DUTY_MAX_BRINGUP, DUTY_BOOST_MIN, DUTY_BOOST_MAX));
-            break;
-
-        case POWER_REGION_BUCK_BOOST:
-        default:
-            local_a = BUCK_BOOST_DUTY_A_BASE;
-            denom = App_MaxFloat(effective_setpoint_v, (BUCK_BOOST_DUTY_A_BASE * vin) + 0.10f);
-            local_c = 1.0f - ((BUCK_BOOST_DUTY_A_BASE * vin) / denom);
-            local_c = App_Clamp(local_c, BUCK_BOOST_DUTY_C_MIN, BUCK_BOOST_DUTY_C_MAX);
-            break;
-    }
-
+    (void)region;
     if (duty_a != NULL) {
-        *duty_a = local_a;
+        *duty_a = d.da;
     }
     if (duty_c != NULL) {
-        *duty_c = local_c;
+        *duty_c = d.dc;
     }
 }
 
@@ -663,8 +604,7 @@ static void App_ApplyDuty(PowerStage_Region_t region,
             break;
 
         case POWER_REGION_BOOST:
-            /* Diagnostic-only path: not selected by automatic CV region logic.
-             * Buck pass-through HS=100%. duty_c is boost LS, so HS = 1 − D_C. */
+            /* Buck pass-through HS=100%. duty_c is boost LS, so HS = 1 − D_C. */
             PowerStage_SetDuty(1.0f, duty_cmd_c);
             buck_hs_end = 1.0f;
             boost_hs_end = 1.0f - duty_cmd_c;
@@ -691,51 +631,45 @@ static void App_OnRegionChange(PowerStage_Region_t old_region,
                                float vin,
                                float setpoint_v)
 {
-    float duty_ff_a;
-    float duty_ff_c;
     float control_ff;
+
+    (void)vin;
+    (void)setpoint_v;
 
     if (old_region == new_region) {
         return;
     }
 
-    App_EstimateDutyForRegion(new_region, vin, setpoint_v, &duty_ff_a, &duty_ff_c);
-    if ((new_region == POWER_REGION_BUCK_BOOST) && (old_region == POWER_REGION_BUCK)) {
-        duty_ff_c = App_Clamp(duty_ff_c,
-                              BUCK_BOOST_DUTY_C_INIT_MIN,
-                              BUCK_BOOST_DUTY_C_INIT_MAX);
-    }
-
-    if (new_region == POWER_REGION_BUCK_BOOST) {
-        App_ArmBuckBoostSoftstart(duty_ff_c);
+    /*
+     * Keep the FET duties where they are and retarget the CV actuator to the
+     * new region's primary (Da in buck, Dc otherwise). Jumping to feedforward
+     * here is what made the inductor click.
+     */
+    if (new_region == POWER_REGION_BUCK) {
+        control_ff = app.duty_cmd_a;
     } else {
-        app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
+        control_ff = app.duty_cmd_c;
     }
+    app.buck_boost_duty_c_cap = BUCK_BOOST_DUTY_C_MAX;
 
-    control_ff = App_GetRegionControlFeedForward(new_region, duty_ff_a, duty_ff_c);
-
+    app.ctrl_region = new_region;
     app.region_old_debug = old_region;
     app.region_new_debug = new_region;
     app.region_trans_debug = 1U;
     app.region_trans_cnt++;
     app.region_hold_until_ms = HAL_GetTick() + REGION_MIN_DWELL_MS;
 
-    app.duty_ff_a = duty_ff_a;
-    app.duty_ff_c = duty_ff_c;
-
     App_SetCvLimitsForRegion(new_region);
     ControlCv_Reset(&app.cv, control_ff);
 #if (CONTROL_CV_USE_2P2Z != 0)
     Control2p2z_Reset(&app.cv_2p2z, control_ff);
 #endif
-
-    App_ApplyDuty(new_region, duty_ff_a, duty_ff_c);
 }
 
 static PowerStage_Region_t App_UpdateRegionHysteresis(float vin,
                                                        float setpoint_v)
 {
-    PowerStage_Region_t current = PowerStage_GetRegion();
+    PowerStage_Region_t current = app.ctrl_region;
     PowerStage_Region_t candidate;
     uint32_t now_ms = HAL_GetTick();
 
@@ -752,13 +686,6 @@ static PowerStage_Region_t App_UpdateRegionHysteresis(float vin,
         app.region_candidate = POWER_REGION_BUCK;
         app.region_candidate_count = 0U;
         return POWER_REGION_BUCK;
-    }
-
-    if (current == POWER_REGION_BOOST) {
-        App_OnRegionChange(current, POWER_REGION_BUCK_BOOST, vin, setpoint_v);
-        app.region_candidate = POWER_REGION_BUCK_BOOST;
-        app.region_candidate_count = 0U;
-        return POWER_REGION_BUCK_BOOST;
     }
 
     candidate = App_LimitRegionStep(current, candidate);
@@ -838,7 +765,6 @@ static void App_SaturateForRegion(PowerStage_Region_t region,
     }
 
     if (region == POWER_REGION_BOOST) {
-        /* Pure BOOST remains diagnostic-only; not selected in normal CV operation. */
         float duty_c = ctrl_cmd;
 
         if (duty_c > max_duty) {
@@ -863,6 +789,8 @@ static void App_SaturateForRegion(PowerStage_Region_t region,
     }
 
     {
+        Dcdc_Duties_t ff = Dcdc_FeedForwardDuties(app.meas.vin,
+                                                  ControlCv_GetRampedSetpoint(&app.cv));
         float duty_c = ctrl_cmd;
 
         if (duty_c > max_duty) {
@@ -878,7 +806,7 @@ static void App_SaturateForRegion(PowerStage_Region_t region,
         }
 
         if (duty_cmd_a != NULL) {
-            *duty_cmd_a = BUCK_BOOST_DUTY_A_BASE;
+            *duty_cmd_a = ff.da;
         }
         if (duty_cmd_c != NULL) {
             *duty_cmd_c = duty_c;
@@ -1023,18 +951,25 @@ static void App_UpdateFaultFlagsFast(bool adc_ok)
 static void App_RunCvLoopFast(float dt_s)
 {
     PowerStage_Region_t region;
+    PowerStage_Region_t pwm_region;
+    Dcdc_Duties_t ff;
     float ctrl_cmd;
     float duty_cmd_a;
     float duty_cmd_c;
     bool sat_hi;
     bool sat_lo;
     float ramped_setpoint;
+    float ctrl_gain;
 
     ramped_setpoint = ControlCv_GetRampedSetpoint(&app.cv);
     region = App_UpdateRegionHysteresis(app.meas.vin, ramped_setpoint);
 
     App_UpdateBuckBoostSoftstart(region);
     App_SetCvLimitsForRegion(region);
+
+    ff = Dcdc_FeedForwardDuties(app.meas.vin, ramped_setpoint);
+    app.duty_ff_a = ff.da;
+    app.duty_ff_c = ff.dc;
 
 #if (CONTROL_CV_USE_2P2Z != 0)
     ctrl_cmd = Control2p2z_RunImmediate(&app.cv_2p2z, ramped_setpoint - app.meas.vout);
@@ -1043,22 +978,12 @@ static void App_RunCvLoopFast(float dt_s)
 #endif
 
     if (region == POWER_REGION_BUCK_BOOST) {
-        float ff_duty_a = 0.0f;
-        float ff_duty_c = 0.0f;
-        float ctrl_gain = (ramped_setpoint < app.meas.vin) ?
-                          BUCK_BOOST_CTRL_GAIN_NEAR_VIN :
-                          BUCK_BOOST_CTRL_GAIN_ABOVE_VIN;
-
-        App_EstimateDutyForRegion(region,
-                                  app.meas.vin,
-                                  ramped_setpoint,
-                                  &ff_duty_a,
-                                  &ff_duty_c);
-        (void)ff_duty_a;
-
-        app.duty_ff_a = ff_duty_a;
-        app.duty_ff_c = ff_duty_c;
-        ctrl_cmd = ff_duty_c + ((ctrl_cmd - ff_duty_c) * ctrl_gain);
+        ctrl_gain = (ramped_setpoint < app.meas.vin) ?
+                    BUCK_BOOST_CTRL_GAIN_NEAR_VIN :
+                    BUCK_BOOST_CTRL_GAIN_ABOVE_VIN;
+        ctrl_cmd = ff.dc + ((ctrl_cmd - ff.dc) * ctrl_gain);
+    } else if (region == POWER_REGION_BOOST) {
+        ctrl_cmd = ff.dc + ((ctrl_cmd - ff.dc) * BUCK_BOOST_CTRL_GAIN_ABOVE_VIN);
     }
 
     App_SaturateForRegion(region,
@@ -1068,8 +993,14 @@ static void App_RunCvLoopFast(float dt_s)
                           &sat_hi,
                           &sat_lo);
 
-    if ((region == POWER_REGION_BOOST) ||
-        (region == POWER_REGION_BUCK_BOOST)) {
+    if (region == POWER_REGION_BUCK) {
+        duty_cmd_c = App_SlewLimit(app.duty_cmd_c,
+                                   0.0f,
+                                   BUCK_BOOST_DUTY_C_SLEW_PER_CTRL);
+    } else {
+        duty_cmd_a = App_SlewLimit(app.duty_cmd_a,
+                                   ff.da,
+                                   BUCK_BOOST_DUTY_A_SLEW_PER_CTRL);
         duty_cmd_c = App_SlewLimit(app.duty_cmd_c,
                                    duty_cmd_c,
                                    BUCK_BOOST_DUTY_C_SLEW_PER_CTRL);
@@ -1086,7 +1017,8 @@ static void App_RunCvLoopFast(float dt_s)
     app.mode_top_hits = sat_hi ? 1U : 0U;
     app.mode_bottom_hits = sat_lo ? 1U : 0U;
 
-    App_ApplyDuty(region, duty_cmd_a, duty_cmd_c);
+    pwm_region = (PowerStage_Region_t)Dcdc_TopologyFromDuties(duty_cmd_a, duty_cmd_c);
+    App_ApplyDuty(pwm_region, duty_cmd_a, duty_cmd_c);
 }
 
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
@@ -1299,6 +1231,7 @@ static bool App_EnableStageSlow(void)
     control_ff = App_GetRegionControlFeedForward(region, duty_ff_a, duty_ff_c);
 
     app.region_candidate = region;
+    app.ctrl_region = region;
     app.region_candidate_count = 0U;
     app.region_last_confirm_count = 0U;
     app.region_old_debug = region;
@@ -1696,6 +1629,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     int32_t uvlo_x100;
     int32_t buck_enter_margin_x100;
     int32_t buck_exit_margin_x100;
+    int32_t boost_enter_margin_x100;
+    int32_t boost_exit_margin_x100;
     uint32_t reset_flags;
 
     memset(&app, 0, sizeof(app));
@@ -1739,6 +1674,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     app.last_adc_dma_updates = Measurements_GetDmaUpdateCount();
 
     app.region_candidate = POWER_REGION_BUCK;
+    app.ctrl_region = POWER_REGION_BUCK;
     app.region_old_debug = POWER_REGION_BUCK;
     app.region_new_debug = POWER_REGION_BUCK;
     app.buck_boost_softstart_start_duty_c = BUCK_BOOST_DUTY_C_INIT_MIN;
@@ -1760,6 +1696,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     uvlo_x100 = App_ToFixed(VIN_UVLO_LIMIT, 100);
     buck_enter_margin_x100 = App_ToFixed(REGION_BUCK_ENTER_MARGIN_V, 100);
     buck_exit_margin_x100 = App_ToFixed(REGION_BUCK_EXIT_MARGIN_V, 100);
+    boost_enter_margin_x100 = App_ToFixed(REGION_BOOST_ENTER_MARGIN_V, 100);
+    boost_exit_margin_x100 = App_ToFixed(REGION_BOOST_EXIT_MARGIN_V, 100);
 
     Debug_Printf("\r\n[APP] Start hw=%s ctrl=%lu Hz hold=%lu ms reset=0x%08lX",
                  BOARD_HW_REV_STRING,
@@ -1776,14 +1714,17 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
         Debug_Printf("[APP] WARN: TIM6 ctrl loop start failed");
     }
 
-    Debug_Printf("[APP] Region strategy: BUCK if RSET < VIN-%ld.%02ldV, else BUCK_BOOST (BOOST disabled in auto CV)",
+    Debug_Printf("[APP] Region: BUCK if RSET < VIN-%ld.%02ldV, BOOST if RSET > VIN+%ld.%02ldV, else mixed",
                  App_IntPart(buck_enter_margin_x100, 100),
-                 App_FracPart(buck_enter_margin_x100, 100));
-    Debug_Printf("[APP] BUCK exit threshold: RSET >= VIN-%ld.%02ldV; debug=%lums verbose=%u",
+                 App_FracPart(buck_enter_margin_x100, 100),
+                 App_IntPart(boost_enter_margin_x100, 100),
+                 App_FracPart(boost_enter_margin_x100, 100));
+    Debug_Printf("[APP] BUCK exit VIN-%ld.%02ldV, BOOST exit VIN+%ld.%02ldV; UCC per-leg HS>=98%% off<96%%; debug=%lums",
                  App_IntPart(buck_exit_margin_x100, 100),
                  App_FracPart(buck_exit_margin_x100, 100),
-                 (unsigned long)APP_DEBUG_PERIOD_MS,
-                 (unsigned int)APP_DEBUG_VERBOSE);
+                 App_IntPart(boost_exit_margin_x100, 100),
+                 App_FracPart(boost_exit_margin_x100, 100),
+                 (unsigned long)APP_DEBUG_PERIOD_MS);
     Debug_Printf("[APP] G0 pre-reg: margin=%ld mV floor=%ld mV slew +10/-0.3 V/s permit_settle=150ms",
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
                  (long)(BOARD_VPRE_VIN_FLOOR_V * 1000.0f));

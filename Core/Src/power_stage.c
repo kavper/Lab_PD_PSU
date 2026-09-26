@@ -1022,7 +1022,7 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             need_a = PowerStage_IsBuckRefreshEnabled() &&
                      PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
                                                         ps.tr_en_a_active || ps.refresh_a_active);
-            need_c = PowerStage_IsBuckRefreshEnabled() &&
+            need_c = PowerStage_IsBoostRefreshEnabled() &&
                      PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
                                                         ps.tr_en_c_active || ps.refresh_c_active);
 
@@ -1068,7 +1068,7 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             hs_a_10k = POWER_STAGE_DUTY_SCALE;
             hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
                        0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
-            need_a = PowerStage_IsBoostRefreshEnabled() &&
+            need_a = PowerStage_IsBuckRefreshEnabled() &&
                      PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
                                                         ps.tr_en_a_active || ps.refresh_a_active);
             need_c = PowerStage_IsBoostRefreshEnabled() &&
@@ -1117,9 +1117,11 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
             hs_a_10k = duty_a_10k;
             hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
                        0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
-            need_a = PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+            need_a = PowerStage_IsBuckRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
                                                         ps.tr_en_a_active || ps.refresh_a_active);
-            need_c = PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+            need_c = PowerStage_IsBoostRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
                                                         ps.tr_en_c_active || ps.refresh_c_active);
 
             ps.duty_a_10k = duty_a_10k;

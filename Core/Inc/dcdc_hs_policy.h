@@ -16,11 +16,11 @@
  */
 
 #ifndef DCDC_UCC_HS_DUTY_ON_10K
-#define DCDC_UCC_HS_DUTY_ON_10K          9700U  /* 97.00% HS duty */
+#define DCDC_UCC_HS_DUTY_ON_10K          9800U  /* 98.00% HS duty */
 #endif
 
 #ifndef DCDC_UCC_HS_DUTY_HYST_10K
-#define DCDC_UCC_HS_DUTY_HYST_10K        200U   /* drop EN below 95.00% */
+#define DCDC_UCC_HS_DUTY_HYST_10K        200U   /* drop EN below 96.00% */
 #endif
 
 #ifndef DCDC_HS_OCP_HIT_LIMIT
