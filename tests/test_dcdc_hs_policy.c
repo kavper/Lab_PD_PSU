@@ -41,6 +41,10 @@ int main(void)
     ExpectTrue(!Dcdc_UccNeededForHsDuty(9599U, true), "below 96% drops UCC");
     ExpectTrue(!Dcdc_UccNeededForHsDuty(5000U, false), "50% PWM must not enable UCC");
     ExpectTrue(Dcdc_UccDutyOff10k() == 9600U, "off threshold is 96.00%");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9800U), "98% UCC-on stays PWM");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9600U), "96% is not pass-through");
+    ExpectTrue(Dcdc_HsIsPassThrough(9950U), "99.50% is pass-through");
+    ExpectTrue(Dcdc_HsIsPassThrough(10000U), "100% HS is pass-through");
 
     /* INA296A path: 3.0 V Vref, gain 100, 1 mOhm → 10 A/V, 0 A at 1.5 V. */
     mid = (uint16_t)((1.5f / 3.0f) * 4095.0f + 0.5f);

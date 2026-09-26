@@ -593,30 +593,15 @@ static void App_ApplyDuty(PowerStage_Region_t region,
     duty_cmd_a = App_Clamp(duty_cmd_a, DUTY_MIN_ABS, DUTY_MAX_ABS);
     duty_cmd_c = App_Clamp(duty_cmd_c, DUTY_MIN_ABS, DUTY_MAX_ABS);
 
+    /*
+     * Pass the slewed pair through. Forcing Da=1 or Dc=0 here latches the
+     * buck FET at 100% after a boost visit, so the return path never leaves.
+     */
     PowerStage_SetRegion(region);
+    PowerStage_SetDuty(duty_cmd_a, duty_cmd_c);
 
-    switch (region) {
-        case POWER_REGION_BUCK:
-            /* Buck PWM on TA1 (HS). Boost pass-through: HS static 100%. */
-            PowerStage_SetDuty(duty_cmd_a, 0.0f);
-            buck_hs_end = duty_cmd_a;
-            boost_hs_end = 1.0f;
-            break;
-
-        case POWER_REGION_BOOST:
-            /* Buck pass-through HS=100%. duty_c is boost LS, so HS = 1 − D_C. */
-            PowerStage_SetDuty(1.0f, duty_cmd_c);
-            buck_hs_end = 1.0f;
-            boost_hs_end = 1.0f - duty_cmd_c;
-            break;
-
-        case POWER_REGION_BUCK_BOOST:
-        default:
-            PowerStage_SetDuty(duty_cmd_a, duty_cmd_c);
-            buck_hs_end = duty_cmd_a;
-            boost_hs_end = 1.0f - duty_cmd_c;
-            break;
-    }
+    buck_hs_end = duty_cmd_a;
+    boost_hs_end = 1.0f - duty_cmd_c;
 
     /* CMP3 in the overlap of both HS-ON windows so INA296 S/H is in-pulse. */
     PowerStage_SetAdcTriggerPoint(Dcdc_AdcTriggerInHsOn(buck_hs_end, boost_hs_end));
@@ -993,16 +978,21 @@ static void App_RunCvLoopFast(float dt_s)
                           &sat_hi,
                           &sat_lo);
 
-    if (region == POWER_REGION_BUCK) {
+    {
+        float da_target = duty_cmd_a;
+        float dc_target = duty_cmd_c;
+        float da_step = BUCK_BOOST_DUTY_A_SLEW_PER_CTRL;
+
+        if (region == POWER_REGION_BUCK) {
+            dc_target = 0.0f;
+        }
+        /* Fast buck CV below the overlap. Slow only while a leg is near pass-through. */
+        if ((app.duty_cmd_a < DCDC_MIXED_DA_LO) && (da_target < DCDC_MIXED_DA_LO)) {
+            da_step = 0.05f;
+        }
+        duty_cmd_a = App_SlewLimit(app.duty_cmd_a, da_target, da_step);
         duty_cmd_c = App_SlewLimit(app.duty_cmd_c,
-                                   0.0f,
-                                   BUCK_BOOST_DUTY_C_SLEW_PER_CTRL);
-    } else {
-        duty_cmd_a = App_SlewLimit(app.duty_cmd_a,
-                                   ff.da,
-                                   BUCK_BOOST_DUTY_A_SLEW_PER_CTRL);
-        duty_cmd_c = App_SlewLimit(app.duty_cmd_c,
-                                   duty_cmd_c,
+                                   dc_target,
                                    BUCK_BOOST_DUTY_C_SLEW_PER_CTRL);
     }
 

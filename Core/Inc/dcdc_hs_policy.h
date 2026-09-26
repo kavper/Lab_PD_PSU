@@ -23,6 +23,11 @@
 #define DCDC_UCC_HS_DUTY_HYST_10K        200U   /* drop EN below 96.00% */
 #endif
 
+/* StaticHigh is pass-through only. 98% still PWMs; UCC is GPIO, not a HRTIM mode. */
+#ifndef DCDC_HS_PASSTHROUGH_10K
+#define DCDC_HS_PASSTHROUGH_10K          9950U  /* 99.50% HS */
+#endif
+
 #ifndef DCDC_HS_OCP_HIT_LIMIT
 #define DCDC_HS_OCP_HIT_LIMIT            8U     /* consecutive 4 kHz control cycles */
 #endif
@@ -58,6 +63,12 @@ static inline bool Dcdc_UccNeededForHsDuty(uint32_t hs_duty_10k, bool currently_
     }
 
     return duty >= DCDC_UCC_HS_DUTY_ON_10K;
+}
+
+/* True only for a real pass-through. UCC-at-98% must stay in PWM. */
+static inline bool Dcdc_HsIsPassThrough(uint32_t hs_duty_10k)
+{
+    return Dcdc_ClampDuty10k(hs_duty_10k) >= DCDC_HS_PASSTHROUGH_10K;
 }
 
 static inline float Dcdc_Ina296CountsToAmpere(uint16_t raw,
