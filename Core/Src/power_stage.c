@@ -9,6 +9,8 @@
 #define POWER_STAGE_MASTER_REFRESH_PRESCALER HRTIM_PRESCALERRATIO_DIV4
 #define POWER_STAGE_MASTER_MAX_PERIOD        0xFFFFU
 #define POWER_STAGE_ENABLE_DELAY_MS          5U
+/* UCC pulls EN/FLT low for 200us on a fault report. Longer than that means the node is held low. */
+#define POWER_STAGE_UCC_FAULT_SAMPLES        4U
 #define POWER_STAGE_PERIOD_MIN_TICKS         64U
 #define POWER_STAGE_PERIOD_MAX_TICKS         0xFFDFU
 #define POWER_STAGE_ADC_TRIGGER_10K          5000U
@@ -19,12 +21,16 @@
 static void PowerStage_SetIsolatedSuppliesPerLeg(bool buck_en, bool boost_en)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    /* EN nets are crossed vs the leg they actually power. */
-    HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port,
-                      BOOST_TR_EN_Pin,
-                      buck_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    /*
+     * PC10 BUCK_TR_EN, PC12 BOOST_TR_EN. Each net goes through 18k onto that
+     * UCC33420 EN/FLT pin. High enables (VEN rising 2.1V), low disables
+     * (VEN falling 0.8V). FLT is the same node and must not be driven.
+     */
     HAL_GPIO_WritePin(BUCK_TR_EN_GPIO_Port,
                       BUCK_TR_EN_Pin,
+                      buck_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BOOST_TR_EN_GPIO_Port,
+                      BOOST_TR_EN_Pin,
                       boost_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
 #else
     (void)buck_en;
@@ -36,6 +42,24 @@ static void PowerStage_SetIsolatedSupplies(bool enable)
 {
     PowerStage_SetIsolatedSuppliesPerLeg(enable, enable);
 }
+
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
+/* Sense pins sit on EN/FLT, after the 18k. No pull: pull-up holds the node above 0.8V with EN low, pull-down holds the module off. */
+static void PowerStage_ConfigUccSensePins(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+    gpio.Pin = BUCK_TR_FLT_Pin;
+    HAL_GPIO_Init(BUCK_TR_FLT_GPIO_Port, &gpio);
+
+    gpio.Pin = BOOST_TR_FLT_Pin;
+    HAL_GPIO_Init(BOOST_TR_FLT_GPIO_Port, &gpio);
+}
+#endif
 
 void PowerStage_SetPowerPermit(bool permit)
 {
@@ -95,7 +119,8 @@ typedef struct {
     bool tr_en_c_active;
     bool static_a;
     bool static_c;
-    uint32_t tr_en_rise_ms;
+    uint32_t tr_en_a_rise_ms;
+    uint32_t tr_en_c_rise_ms;
 } PowerStage_Context_t;
 
 static PowerStage_Context_t ps;
@@ -339,22 +364,19 @@ static void PowerStage_ApplyHsBootstrapSupport(bool need_a, bool need_c,
                                                bool *pulse_a, bool *pulse_c)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    bool rising = false;
+    bool rising_a = need_a && !ps.tr_en_a_active;
+    bool rising_c = need_c && !ps.tr_en_c_active;
 
-    if (need_a && !ps.tr_en_a_active) {
-        rising = true;
+    if (rising_a) {
+        ps.tr_en_a_rise_ms = HAL_GetTick();
     }
-    if (need_c && !ps.tr_en_c_active) {
-        rising = true;
+    if (rising_c) {
+        ps.tr_en_c_rise_ms = HAL_GetTick();
     }
 
     ps.tr_en_a_active = need_a;
     ps.tr_en_c_active = need_c;
     PowerStage_SetIsolatedSuppliesPerLeg(ps.tr_en_a_active, ps.tr_en_c_active);
-
-    if (rising) {
-        ps.tr_en_rise_ms = HAL_GetTick();
-    }
 
     /* UCC floating rail holds HS — no LS refresh pulse on EN'd legs. */
     if (pulse_a != NULL) {
@@ -871,10 +893,14 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.refresh_c_active = false;
     ps.tr_en_a_active = false;
     ps.tr_en_c_active = false;
-    ps.tr_en_rise_ms = 0U;
+    ps.tr_en_a_rise_ms = 0U;
+    ps.tr_en_c_rise_ms = 0U;
 
     /* ACS37100 FAULT (HRTIM_FLT3 / PB10) is ignored; OCP uses INA296 HS shunts. */
 
+#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
+    PowerStage_ConfigUccSensePins();
+#endif
     PowerStage_SetIsolatedSupplies(false);
 
     PowerStage_ConfigureComplementaryOutputs();
@@ -1405,20 +1431,49 @@ PowerStage_Region_t PowerStage_GetRegion(void)
 bool PowerStage_IsFaultActive(void)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    /* TR_FLT feedback only for legs whose UCC EN is asserted (after settle).
-     * ACS37100 / HRTIM_FLT3 (series inductor) is not a driver fault. */
-    if ((ps.tr_en_a_active || ps.tr_en_c_active) &&
-        ((HAL_GetTick() - ps.tr_en_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
-        if (ps.tr_en_a_active && PowerStage_BuckTrFaultActive()) {
-            return true;
-        }
-        if (ps.tr_en_c_active && PowerStage_BoostTrFaultActive()) {
-            return true;
-        }
-    }
-#endif
+    static uint8_t buck_low_samples;
+    static uint8_t boost_low_samples;
+    uint32_t now_ms = HAL_GetTick();
+    bool buck_fault = false;
+    bool boost_fault = false;
 
+    /*
+     * EN/FLT is one pin. Low while EN is driven low is just "off", not a fault,
+     * and must not block the next enable. A fault report is a 200us pull-down;
+     * a node held at ground stays low and keeps the module from starting.
+     */
+    if (ps.tr_en_a_active &&
+        ((now_ms - ps.tr_en_a_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
+        if (PowerStage_BuckTrFaultActive()) {
+            if (buck_low_samples < 255U) {
+                buck_low_samples++;
+            }
+        } else {
+            buck_low_samples = 0U;
+        }
+        buck_fault = buck_low_samples >= POWER_STAGE_UCC_FAULT_SAMPLES;
+    } else {
+        buck_low_samples = 0U;
+    }
+
+    if (ps.tr_en_c_active &&
+        ((now_ms - ps.tr_en_c_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
+        if (PowerStage_BoostTrFaultActive()) {
+            if (boost_low_samples < 255U) {
+                boost_low_samples++;
+            }
+        } else {
+            boost_low_samples = 0U;
+        }
+        boost_fault = boost_low_samples >= POWER_STAGE_UCC_FAULT_SAMPLES;
+    } else {
+        boost_low_samples = 0U;
+    }
+
+    return buck_fault || boost_fault;
+#else
     return false;
+#endif
 }
 
 void PowerStage_GetFaultPins(uint8_t *main_flt, uint8_t *buck_flt, uint8_t *boost_flt)

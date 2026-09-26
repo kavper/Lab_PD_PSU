@@ -27,11 +27,11 @@
 /*
  * Bootstrap / UCC high-side support (selective per leg):
  * When upper-FET (HS) duty reaches 98%, that leg alone gets UCC33420 help —
- * never blanket both converters. BUCK_TR_EN follows buck HS (leg A),
- * BOOST_TR_EN follows boost HS (leg C). The leg keeps PWMing at the commanded
- * duty; UCC is only the EN pin. StaticHigh is pass-through (>= 99.5% HS),
- * not the UCC threshold — tying them latches the FET at 100% and reconfigures
- * HRTIM on every EN edge. 200-point hysteresis drops EN below 96%.
+ * never blanket both converters. PC10 BUCK_TR_EN follows buck HS (leg A).
+ * PC12 BOOST_TR_EN follows boost HS (leg C). PC11 and PA15 are the same
+ * EN/FLT nodes, inputs only: the module pulls that node low to report a fault
+ * and will not start while the node is held at ground. Hysteresis drops EN
+ * below 96%. The leg keeps PWMing; StaticHigh is only real pass-through.
  */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
