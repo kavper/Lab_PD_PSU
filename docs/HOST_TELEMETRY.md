@@ -1,5 +1,7 @@
 # Host telemetry (USART1 → H7 / PC parser)
 
+Kontrakt dla HMI (komendy, odpowiedzi, które pola rysować): [HMI_UART.md](HMI_UART.md).
+
 USART1 **PC4 TX / PC5 RX**, 115200 8N1. Default: machine frames only (`VERBOSE 0`).
 
 Do **not** binary-compress `T`/`TB`/`TC`. The H7 parser is ASCII `key=value`. The win is: stop duplicating G0 `TLM`, stop blocking USART1 TX, debounce live `SET`, then raise baud only if a sequencer needs <100 ms `T`.
