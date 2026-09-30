@@ -26,12 +26,13 @@
 
 /*
  * Bootstrap / UCC high-side support (selective per leg):
- * When upper-FET (HS) duty reaches 98%, that leg alone gets UCC33420 help —
+ * When upper-FET (HS) duty reaches 95%, that leg alone gets UCC33420 help —
  * never blanket both converters. PC10 BUCK_TR_EN follows buck HS (leg A).
  * PC12 BOOST_TR_EN follows boost HS (leg C). PC11 and PA15 are the same
  * EN/FLT nodes, inputs only: the module pulls that node low to report a fault
  * and will not start while the node is held at ground. Hysteresis drops EN
- * below 96%. The leg keeps PWMing; StaticHigh is only real pass-through.
+ * below 93%. Startup limits HS to 90% for DCDC_UCC_STARTUP_MS; EN/FLT
+ * is not power-good. StaticHigh is allowed only after that interval.
  */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
@@ -43,15 +44,6 @@
 
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE 1U
-#endif
-
-/* HS duty at/above this (x10000) enables that leg's UCC EN and/or refresh. */
-#ifndef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
-#define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K   DCDC_UCC_HS_DUTY_ON_10K
-#endif
-
-#ifndef POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K
-#define POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K        DCDC_UCC_HS_DUTY_HYST_10K
 #endif
 
 /* Bootstrap refresh frequency is set here; this is not PWM switching frequency. */
@@ -98,6 +90,7 @@ uint32_t PowerStage_GetFswHz(void);
 bool PowerStage_IsBootstrapRefreshActive(void);
 bool PowerStage_IsBootstrapRefreshAActive(void);
 bool PowerStage_IsBootstrapRefreshCActive(void);
+bool PowerStage_IsUccStarting(void);
 bool PowerStage_IsBuckTrEnActive(void);
 bool PowerStage_IsBoostTrEnActive(void);
 uint32_t PowerStage_GetBootstrapRefreshHz(void);
@@ -121,6 +114,8 @@ void PowerStage_SetAdcTriggerPoint10k(uint32_t trigger_point_10k);
 void PowerStage_SetRegion(PowerStage_Region_t region);
 PowerStage_Region_t PowerStage_GetRegion(void);
 bool PowerStage_IsFaultActive(void);
+void PowerStage_UccFaultExti(uint16_t pin);
+void PowerStage_ClearDriverFault(void);
 void PowerStage_GetFaultPins(uint8_t *main_flt, uint8_t *buck_flt, uint8_t *boost_flt);
 bool PowerStage_IsEnabled(void);
 bool PowerStage_IsDischarging(void);

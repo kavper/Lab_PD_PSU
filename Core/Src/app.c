@@ -600,8 +600,8 @@ static void App_ApplyDuty(PowerStage_Region_t region,
     PowerStage_SetRegion(region);
     PowerStage_SetDuty(duty_cmd_a, duty_cmd_c);
 
-    buck_hs_end = duty_cmd_a;
-    boost_hs_end = 1.0f - duty_cmd_c;
+    buck_hs_end = PowerStage_GetDutyA();
+    boost_hs_end = 1.0f - PowerStage_GetDutyC();
 
     /* CMP3 in the overlap of both HS-ON windows so INA296 S/H is in-pulse. */
     PowerStage_SetAdcTriggerPoint(Dcdc_AdcTriggerInHsOn(buck_hs_end, boost_hs_end));
@@ -996,6 +996,15 @@ static void App_RunCvLoopFast(float dt_s)
                                    BUCK_BOOST_DUTY_C_SLEW_PER_CTRL);
     }
 
+    pwm_region = (PowerStage_Region_t)Dcdc_TopologyFromDuties(duty_cmd_a, duty_cmd_c);
+    App_ApplyDuty(pwm_region, duty_cmd_a, duty_cmd_c);
+
+    /* Do not accumulate CV error while the power stage limits startup duty. */
+    if (PowerStage_IsUccStarting()) {
+        sat_hi = true;
+        sat_lo = true;
+    }
+
 #if (CONTROL_CV_USE_2P2Z != 0)
     Control2p2z_Commit(&app.cv_2p2z, sat_hi, sat_lo);
 #else
@@ -1006,9 +1015,6 @@ static void App_RunCvLoopFast(float dt_s)
     app.sat_lo_debug = sat_lo ? 1U : 0U;
     app.mode_top_hits = sat_hi ? 1U : 0U;
     app.mode_bottom_hits = sat_lo ? 1U : 0U;
-
-    pwm_region = (PowerStage_Region_t)Dcdc_TopologyFromDuties(duty_cmd_a, duty_cmd_c);
-    App_ApplyDuty(pwm_region, duty_cmd_a, duty_cmd_c);
 }
 
 #if (POWER_STAGE_TEST_BOOST_PWM_FIXED != 0U)
@@ -1364,6 +1370,7 @@ static void App_DebugTask(void)
     bool refresh_c;
     bool tr_en_a;
     bool tr_en_c;
+    bool ucc_starting;
     App_Mode_t active_mode;
     App_Mode_t requested_mode;
     PowerStage_Region_t active_region;
@@ -1438,6 +1445,7 @@ static void App_DebugTask(void)
     refresh_c = PowerStage_IsBootstrapRefreshCActive();
     tr_en_a = PowerStage_IsBuckTrEnActive();
     tr_en_c = PowerStage_IsBoostTrEnActive();
+    ucc_starting = PowerStage_IsUccStarting();
     refresh_hz = PowerStage_GetBootstrapRefreshHz();
     refresh_period = PowerStage_GetBootstrapRefreshPeriodTicks();
     refresh_pulse = PowerStage_GetBootstrapRefreshPulseTicks();
@@ -1525,7 +1533,7 @@ static void App_DebugTask(void)
                  App_FracPart(pi_x1000, 1000),
                  (unsigned long)pwm_update_cnt);
 
-    Debug_Printf("[PWM] fsw=%luHz per=%lu refresh=%luHz ref_act=%u ref_a=%u ref_c=%u tr_en_a=%u tr_en_c=%u ref_per=%lu ref_pulse=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
+    Debug_Printf("[PWM] fsw=%luHz per=%lu refresh=%luHz ref_act=%u ref_a=%u ref_c=%u tr_en_a=%u tr_en_c=%u ucc_starting=%u ref_per=%lu ref_pulse=%lu A=%ld.%01ld%% C=%ld.%01ld%% cmpA=%lu cmpC=%lu DUTY_CMD_C=%s%ld.%01ld%% DUTY_FF_C=%s%ld.%01ld%% DUTY_C_LIMIT_MIN=%s%ld.%01ld%% DUTY_C_LIMIT_MAX=%s%ld.%01ld%%",
                  (unsigned long)fsw_hz,
                  (unsigned long)hrtim_period,
                  (unsigned long)refresh_hz,
@@ -1534,6 +1542,7 @@ static void App_DebugTask(void)
                  refresh_c ? 1U : 0U,
                  tr_en_a ? 1U : 0U,
                  tr_en_c ? 1U : 0U,
+                 ucc_starting ? 1U : 0U,
                  (unsigned long)refresh_period,
                  (unsigned long)refresh_pulse,
                  App_IntPart(duty_a_hw_x10, 10),
@@ -1742,8 +1751,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 #endif
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
     Debug_Printf("[APP] GaN: UCC TR_EN selective (HS>=%lu.%02lu%% per leg, off<%lu.%02lu%%, TR_FLT feedback)",
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U),
+                 (unsigned long)(DCDC_UCC_HS_DUTY_ON_10K / 100U),
+                 (unsigned long)(DCDC_UCC_HS_DUTY_ON_10K % 100U),
                  (unsigned long)(Dcdc_UccDutyOff10k() / 100U),
                  (unsigned long)(Dcdc_UccDutyOff10k() % 100U));
 #else
@@ -1751,8 +1760,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 #endif
 #if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U)
     Debug_Printf("[APP] GaN: bootstrap support ON (only HS>=%lu.%02lu%% leg; ref_act / TR_EN feedback)",
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K / 100U),
-                 (unsigned long)(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K % 100U));
+                 (unsigned long)(DCDC_UCC_HS_DUTY_ON_10K / 100U),
+                 (unsigned long)(DCDC_UCC_HS_DUTY_ON_10K % 100U));
 #else
     Debug_Printf("[APP] GaN: bootstrap refresh OFF");
 #endif
@@ -1820,6 +1829,7 @@ uint32_t App_GetFaultFlags(void)
 
 void App_ClearFaults(void)
 {
+    PowerStage_ClearDriverFault();
     app.latched_fault_flags = FAULT_NONE;
     app.fault_flags = FAULT_NONE;
     app.ocp_hit_count = 0U;

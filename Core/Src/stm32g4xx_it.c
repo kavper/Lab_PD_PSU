@@ -325,6 +325,8 @@ void EXTI9_5_IRQHandler(void)
 void EXTI15_10_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI15_10_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(BUCK_TR_FLT_Pin);
+  HAL_GPIO_EXTI_IRQHandler(BOOST_TR_FLT_Pin);
 
   /* USER CODE END EXTI15_10_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(BMS_ALERT_Pin);

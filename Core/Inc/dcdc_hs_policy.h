@@ -16,14 +16,66 @@
  */
 
 #ifndef DCDC_UCC_HS_DUTY_ON_10K
-#define DCDC_UCC_HS_DUTY_ON_10K          9800U  /* 98.00% HS duty */
+#ifdef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
+#define DCDC_UCC_HS_DUTY_ON_10K POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
+#else
+#define DCDC_UCC_HS_DUTY_ON_10K          9500U  /* 95.00% commanded HS duty */
+#endif
 #endif
 
 #ifndef DCDC_UCC_HS_DUTY_HYST_10K
-#define DCDC_UCC_HS_DUTY_HYST_10K        200U   /* drop EN below 96.00% */
+#ifdef POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K
+#define DCDC_UCC_HS_DUTY_HYST_10K POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K
+#else
+#define DCDC_UCC_HS_DUTY_HYST_10K        200U   /* drop EN below 93.00% */
+#endif
 #endif
 
-/* StaticHigh is pass-through only. 98% still PWMs; UCC is GPIO, not a HRTIM mode. */
+/* Legacy settings and policy must never disagree with the displayed threshold. */
+#if defined(POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K) && \
+    POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K != DCDC_UCC_HS_DUTY_ON_10K
+#error "Conflicting UCC enable thresholds"
+#endif
+#if defined(POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K) && \
+    POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K != DCDC_UCC_HS_DUTY_HYST_10K
+#error "Conflicting UCC hysteresis"
+#endif
+
+/* Compatibility aliases: command-line overrides above feed this same policy. */
+#ifndef POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K
+#define POWER_STAGE_BOOTSTRAP_DUTY_THRESHOLD_10K DCDC_UCC_HS_DUTY_ON_10K
+#endif
+#ifndef POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K
+#define POWER_STAGE_BOOTSTRAP_DUTY_HYST_10K DCDC_UCC_HS_DUTY_HYST_10K
+#endif
+
+/* Board qualification required: EN/FLT is not power-good. Allow the 16 ms
+ * soft-start timeout to report a fault before trusting a newly enabled rail.
+ * HAL_GetTick has 1 ms granularity, hence the extra startup margin. */
+#ifndef DCDC_UCC_STARTUP_MS
+#define DCDC_UCC_STARTUP_MS              20U
+#endif
+#ifndef DCDC_UCC_STARTUP_MAX_HS_10K
+#define DCDC_UCC_STARTUP_MAX_HS_10K       9000U
+#endif
+#if DCDC_UCC_HS_DUTY_ON_10K > 10000U || \
+    DCDC_UCC_HS_DUTY_HYST_10K >= DCDC_UCC_HS_DUTY_ON_10K || \
+    DCDC_UCC_STARTUP_MAX_HS_10K >= (DCDC_UCC_HS_DUTY_ON_10K - DCDC_UCC_HS_DUTY_HYST_10K)
+#error "Invalid UCC thresholds"
+#endif
+
+static inline bool Dcdc_UccStartupElapsed(uint32_t now_ms, uint32_t rise_ms)
+{
+    return (uint32_t)(now_ms - rise_ms) >= DCDC_UCC_STARTUP_MS;
+}
+
+static inline uint32_t Dcdc_UccLimitHsDuringStartup(uint32_t requested, bool ready)
+{
+    return (!ready && requested > DCDC_UCC_STARTUP_MAX_HS_10K) ?
+           DCDC_UCC_STARTUP_MAX_HS_10K : requested;
+}
+
+/* StaticHigh is pass-through only. 95% still PWMs; UCC is GPIO, not a HRTIM mode. */
 #ifndef DCDC_HS_PASSTHROUGH_10K
 #define DCDC_HS_PASSTHROUGH_10K          9950U  /* 99.50% HS */
 #endif
@@ -65,7 +117,7 @@ static inline bool Dcdc_UccNeededForHsDuty(uint32_t hs_duty_10k, bool currently_
     return duty >= DCDC_UCC_HS_DUTY_ON_10K;
 }
 
-/* True only for a real pass-through. UCC-at-98% must stay in PWM. */
+/* True only for a real pass-through. UCC-at-95% must stay in PWM. */
 static inline bool Dcdc_HsIsPassThrough(uint32_t hs_duty_10k)
 {
     return Dcdc_ClampDuty10k(hs_duty_10k) >= DCDC_HS_PASSTHROUGH_10K;

@@ -33,18 +33,28 @@ int main(void)
     uint16_t four_amp;
     float i;
 
-    /* UCC: off until 98%, then stay on until 96%. */
-    ExpectTrue(!Dcdc_UccNeededForHsDuty(9799U, false), "97.99% must not enable UCC");
-    ExpectTrue(Dcdc_UccNeededForHsDuty(9800U, false), "98.00% must enable UCC");
+    /* UCC: off until 95%, then stay on until 93%. */
+    ExpectTrue(!Dcdc_UccNeededForHsDuty(9499U, false), "94.99% must not enable UCC");
+    ExpectTrue(Dcdc_UccNeededForHsDuty(9500U, false), "95.00% must enable UCC");
     ExpectTrue(Dcdc_UccNeededForHsDuty(10000U, false), "100% HS must enable UCC");
-    ExpectTrue(Dcdc_UccNeededForHsDuty(9600U, true), "hysteresis keeps UCC at 96%");
-    ExpectTrue(!Dcdc_UccNeededForHsDuty(9599U, true), "below 96% drops UCC");
+    ExpectTrue(Dcdc_UccNeededForHsDuty(9300U, true), "hysteresis keeps UCC at 93%");
+    ExpectTrue(!Dcdc_UccNeededForHsDuty(9299U, true), "below 93% drops UCC");
     ExpectTrue(!Dcdc_UccNeededForHsDuty(5000U, false), "50% PWM must not enable UCC");
-    ExpectTrue(Dcdc_UccDutyOff10k() == 9600U, "off threshold is 96.00%");
-    ExpectTrue(!Dcdc_HsIsPassThrough(9800U), "98% UCC-on stays PWM");
-    ExpectTrue(!Dcdc_HsIsPassThrough(9600U), "96% is not pass-through");
+    ExpectTrue(Dcdc_UccDutyOff10k() == 9300U, "off threshold is 93.00%");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9500U), "95% UCC-on stays PWM");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9300U), "93% is not pass-through");
     ExpectTrue(Dcdc_HsIsPassThrough(9950U), "99.50% is pass-through");
     ExpectTrue(Dcdc_HsIsPassThrough(10000U), "100% HS is pass-through");
+
+    ExpectTrue(!Dcdc_UccStartupElapsed(119U, 100U), "startup still limited at 19 ms");
+    ExpectTrue(Dcdc_UccStartupElapsed(120U, 100U), "startup elapsed at 20 ms");
+    ExpectTrue(Dcdc_UccStartupElapsed(10U, UINT32_MAX - 9U), "startup handles tick wrap");
+    ExpectTrue(Dcdc_UccLimitHsDuringStartup(10000U, false) == 9000U,
+               "static HS request stays PWM during startup");
+    ExpectTrue(Dcdc_UccLimitHsDuringStartup(10000U, true) == 10000U,
+               "ready supply permits static HS");
+    ExpectTrue(Dcdc_UccLimitHsDuringStartup(5000U, false) == 5000U,
+               "startup never increases duty");
 
     /* INA296A path: 3.0 V Vref, gain 100, 1 mOhm → 10 A/V, 0 A at 1.5 V. */
     mid = (uint16_t)((1.5f / 3.0f) * 4095.0f + 0.5f);
