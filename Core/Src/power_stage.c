@@ -8,7 +8,9 @@
 #define POWER_STAGE_DUTY_SCALE               10000U
 #define POWER_STAGE_MASTER_REFRESH_PRESCALER HRTIM_PRESCALERRATIO_DIV4
 #define POWER_STAGE_MASTER_MAX_PERIOD        0xFFFFU
-#define POWER_STAGE_UCC_SENSE_SETTLE_MS      1U
+#define POWER_STAGE_ENABLE_DELAY_MS          5U
+/* UCC pulls EN/FLT low for 200us on a fault report. Longer than that means the node is held low. */
+#define POWER_STAGE_UCC_FAULT_SAMPLES        4U
 #define POWER_STAGE_PERIOD_MIN_TICKS         64U
 #define POWER_STAGE_PERIOD_MAX_TICKS         0xFFDFU
 #define POWER_STAGE_ADC_TRIGGER_10K          5000U
@@ -47,7 +49,7 @@ static void PowerStage_ConfigUccSensePins(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
-    gpio.Mode = GPIO_MODE_IT_FALLING;
+    gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
 
@@ -95,8 +97,6 @@ typedef struct {
     PowerStage_OutputMode_t output_mode;
     float duty_a;
     float duty_c;
-    uint32_t requested_a_10k;
-    uint32_t requested_b_10k;
     uint32_t duty_a_10k;
     uint32_t duty_b_10k;
     uint32_t duty_c_cmd_10k;
@@ -115,9 +115,8 @@ typedef struct {
     bool refresh_master_active;
     bool refresh_a_active;
     bool refresh_c_active;
-    volatile bool tr_en_a_active;
-    volatile bool tr_en_c_active;
-    volatile bool ucc_fault_latched;
+    bool tr_en_a_active;
+    bool tr_en_c_active;
     bool static_a;
     bool static_c;
     uint32_t tr_en_a_rise_ms;
@@ -325,9 +324,8 @@ static float PowerStage_10kToFloat(uint32_t duty_10k)
 
 static bool PowerStage_IsBuckRefreshEnabled(void)
 {
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U) || \
-    ((POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U) && \
-     (POWER_STAGE_BOOTSTRAP_REFRESH_BUCK_ENABLE != 0U))
+#if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U) && \
+    (POWER_STAGE_BOOTSTRAP_REFRESH_BUCK_ENABLE != 0U)
     return true;
 #else
     return false;
@@ -336,9 +334,8 @@ static bool PowerStage_IsBuckRefreshEnabled(void)
 
 static bool PowerStage_IsBoostRefreshEnabled(void)
 {
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U) || \
-    ((POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U) && \
-     (POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE != 0U))
+#if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE != 0U) && \
+    (POWER_STAGE_BOOTSTRAP_REFRESH_BOOST_ENABLE != 0U)
     return true;
 #else
     return false;
@@ -348,7 +345,7 @@ static bool PowerStage_IsBoostRefreshEnabled(void)
 /* True when commanded HS duty is so high that LS never refreshes bootstrap. */
 static bool PowerStage_NeedsHsBootstrapSupport(uint32_t hs_duty_10k, bool currently_active)
 {
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY == 0U) && (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE == 0U)
+#if (POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE == 0U)
     (void)hs_duty_10k;
     (void)currently_active;
     return false;
@@ -360,8 +357,8 @@ static bool PowerStage_NeedsHsBootstrapSupport(uint32_t hs_duty_10k, bool curren
 /*
  * Per-leg only: enable UCC TR_EN for legs whose HS duty exceeds the limit.
  * Returns whether that leg should also use HRTIM LS refresh pulses
- * (needed when UCC boards are not present). SetDuty limits actual HS duty
- * while the isolated supply is starting; short FLT events are latched by EXTI.
+ * (needed when UCC boards are not present). No blocking delay here — TR_FLT
+ * is blanked for POWER_STAGE_ENABLE_DELAY_MS after an EN rising edge.
  */
 static void PowerStage_ApplyHsBootstrapSupport(bool need_a, bool need_c,
                                                bool *pulse_a, bool *pulse_c)
@@ -371,11 +368,9 @@ static void PowerStage_ApplyHsBootstrapSupport(bool need_a, bool need_c,
     bool rising_c = need_c && !ps.tr_en_c_active;
 
     if (rising_a) {
-        __HAL_GPIO_EXTI_CLEAR_IT(BUCK_TR_FLT_Pin);
         ps.tr_en_a_rise_ms = HAL_GetTick();
     }
     if (rising_c) {
-        __HAL_GPIO_EXTI_CLEAR_IT(BOOST_TR_FLT_Pin);
         ps.tr_en_c_rise_ms = HAL_GetTick();
     }
 
@@ -633,17 +628,6 @@ bool PowerStage_IsBootstrapRefreshCActive(void)
     return ps.tr_en_c_active || ps.refresh_c_active;
 }
 
-bool PowerStage_IsUccStarting(void)
-{
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    uint32_t now_ms = HAL_GetTick();
-    return (ps.tr_en_a_active && !Dcdc_UccStartupElapsed(now_ms, ps.tr_en_a_rise_ms)) ||
-           (ps.tr_en_c_active && !Dcdc_UccStartupElapsed(now_ms, ps.tr_en_c_rise_ms));
-#else
-    return false;
-#endif
-}
-
 bool PowerStage_IsBuckTrEnActive(void)
 {
     return ps.tr_en_a_active;
@@ -889,8 +873,6 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
     ps.duty_a = 0.0f;
     ps.duty_c = 0.0f;
-    ps.requested_a_10k = 0U;
-    ps.requested_b_10k = 0U;
     ps.duty_a_10k = 0U;
     ps.duty_b_10k = 0U;
     ps.duty_c_cmd_10k = 0U;
@@ -905,7 +887,6 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     ps.last_error = POWER_STAGE_ERR_NONE;
     ps.enabled = false;
     ps.initialized = true;
-    ps.ucc_fault_latched = false;
     ps.discharge_active = false;
     ps.refresh_master_active = false;
     ps.refresh_a_active = false;
@@ -925,6 +906,7 @@ void PowerStage_Init(HRTIM_HandleTypeDef *hhrtim)
     PowerStage_ConfigureComplementaryOutputs();
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
     PowerStage_ApplyBaseTiming();
+    PowerStage_SetDuty(0.0f, 0.0f);
     PowerStage_ForceSafeState();
     (void)PowerStage_StartCounters();
 }
@@ -939,12 +921,15 @@ bool PowerStage_Enable(void)
     ps.last_error = POWER_STAGE_ERR_NONE;
     PowerStage_DisableBurstMode();
 
-    /* Preserve supplies already started by the requested duty. */
+    /* UCC TR_EN stays off until SetDuty sees HS>=threshold on that leg only. */
+    PowerStage_SetIsolatedSupplies(false);
+    ps.tr_en_a_active = false;
+    ps.tr_en_c_active = false;
 
     PowerStage_ConfigureComplementaryOutputs();
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
     PowerStage_ApplyBaseTiming();
-    PowerStage_SetDuty10k(ps.requested_a_10k, ps.requested_b_10k);
+    PowerStage_SetDuty(ps.duty_a, ps.duty_c);
 
     if (PowerStage_IsFaultActive()) {
         ps.last_error = POWER_STAGE_ERR_DRIVER_FAULT;
@@ -964,12 +949,6 @@ bool PowerStage_Enable(void)
         return false;
     }
 
-    if (PowerStage_IsFaultActive()) {
-        ps.last_error = POWER_STAGE_ERR_DRIVER_FAULT;
-        PowerStage_ForceSafeState();
-        return false;
-    }
-
     ps.enabled = true;
     ps.discharge_active = false;
     ps.last_error = POWER_STAGE_ERR_NONE;
@@ -985,17 +964,9 @@ void PowerStage_Disable(void)
 
     (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
     PowerStage_DisableBurstMode();
-    /* Mask intentional EN falling edges before changing the GPIOs. Do not
-     * use SetDuty(0,0): that means 100% boost HS, not an all-off state. */
-    ps.tr_en_a_active = false;
-    ps.tr_en_c_active = false;
+    PowerStage_SetDuty(0.0f, 0.0f);
+
     PowerStage_SetIsolatedSupplies(false);
-    ps.requested_a_10k = 0U;
-    ps.requested_b_10k = 0U;
-    ps.duty_a = 0.0f;
-    ps.duty_c = 0.0f;
-    ps.duty_a_10k = 0U;
-    ps.duty_b_10k = 0U;
     ps.enabled = false;
     ps.discharge_active = false;
     ps.output_mode = POWER_STAGE_OUTPUT_NONE;
@@ -1011,8 +982,26 @@ void PowerStage_Disable(void)
 
 void PowerStage_SuspendOutputsKeepDriverOn(void)
 {
-    /* Legacy API: stopped PWM must not keep either isolated supply enabled. */
-    PowerStage_Disable();
+    if ((!ps.initialized) || (ps.hhrtim == NULL)) {
+        ps.last_error = POWER_STAGE_ERR_NOT_INITIALIZED;
+        return;
+    }
+
+    (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
+    PowerStage_DisableBurstMode();
+    PowerStage_SetDuty(0.0f, 0.0f);
+
+    /* Duty 0 drops HS below threshold → both TR_EN off via SetDuty. */
+    ps.enabled = false;
+    ps.discharge_active = false;
+    ps.output_mode = POWER_STAGE_OUTPUT_NONE;
+    ps.duty_c_cmd_10k = 0U;
+    ps.duty_c_phys_10k = 0U;
+    ps.tc1_expected_10k = 0U;
+    ps.tc2_expected_10k = 0U;
+    ps.refresh_a_active = false;
+    ps.refresh_c_active = false;
+    ps.last_error = POWER_STAGE_ERR_NONE;
 }
 
 void PowerStage_ForceSafeState(void)
@@ -1046,78 +1035,188 @@ void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k)
     prev_pulse_a = ps.refresh_a_active;
     prev_pulse_c = ps.refresh_c_active;
 
-    ps.requested_a_10k = duty_a_10k;
-    ps.requested_b_10k = duty_b_10k;
-    desired_mode = (ps.region == POWER_REGION_BUCK) ? POWER_STAGE_OUTPUT_BUCK :
-                   (ps.region == POWER_REGION_BOOST) ? POWER_STAGE_OUTPUT_BOOST :
-                   POWER_STAGE_OUTPUT_BUCK_BOOST;
-    hs_a_10k = duty_a_10k;
-    hs_c_10k = POWER_STAGE_DUTY_SCALE - duty_b_10k;
-    need_a = PowerStage_IsBuckRefreshEnabled() &&
-             PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
-                                                ps.tr_en_a_active || ps.refresh_a_active);
-    need_c = PowerStage_IsBoostRefreshEnabled() &&
-             PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
-                                                ps.tr_en_c_active || ps.refresh_c_active);
-    if (PowerStage_IsFaultActive()) {
-        PowerStage_ForceSafeState();
-        return;
+    switch (ps.region) {
+        case POWER_REGION_BUCK:
+            desired_mode = POWER_STAGE_OUTPUT_BUCK;
+            /*
+             * Leg A follows commanded HS. Leg C is pass-through only at ~100% HS.
+             * UCC EN is GPIO and must not force StaticHigh.
+             */
+            hs_a_10k = duty_a_10k;
+            hs_c_10k = (duty_b_10k == 0U) ?
+                       POWER_STAGE_DUTY_SCALE :
+                       (POWER_STAGE_DUTY_SCALE - duty_b_10k);
+            need_a = PowerStage_IsBuckRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
+            need_c = PowerStage_IsBoostRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
+
+            ps.duty_a_10k = duty_a_10k;
+            ps.duty_b_10k = duty_b_10k;
+            ps.duty_c_cmd_10k = duty_b_10k;
+            ps.duty_c_phys_10k = duty_b_10k;
+            ps.tc1_expected_10k = hs_c_10k;
+            ps.tc2_expected_10k = duty_b_10k;
+            ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
+            ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
+
+            PowerStage_ApplyHsBootstrapSupport(need_a, need_c, &pulse_a, &pulse_c);
+            static_a = Dcdc_HsIsPassThrough(hs_a_10k) || pulse_a;
+            static_c = Dcdc_HsIsPassThrough(hs_c_10k) || pulse_c;
+
+            reconfig = (ps.output_mode != desired_mode) ||
+                       (ps.static_a != static_a) ||
+                       (ps.static_c != static_c) ||
+                       (prev_pulse_a != pulse_a) ||
+                       (prev_pulse_c != pulse_c);
+
+            if (reconfig) {
+                if (static_a) {
+                    PowerStage_ConfigHalfBridgeA_StaticHigh(pulse_a);
+                } else {
+                    PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
+                }
+                if (static_c) {
+                    PowerStage_ConfigHalfBridgeC_StaticHigh(pulse_c);
+                } else {
+                    PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                }
+            } else {
+                if (!static_a) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
+                        PowerStage_DutyAToCmp(duty_a_10k);
+                }
+                if (!static_c) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
+                        PowerStage_DutyBToCmp(duty_b_10k);
+                }
+            }
+
+            ps.refresh_a_active = pulse_a;
+            ps.refresh_c_active = pulse_c;
+            PowerStage_RefreshMasterSync(pulse_a || pulse_c);
+            break;
+
+        case POWER_REGION_BOOST:
+            desired_mode = POWER_STAGE_OUTPUT_BOOST;
+            /* Buck HS follows the command. StaticHigh only at pass-through. */
+            hs_a_10k = duty_a_10k;
+            hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
+                       0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
+            need_a = PowerStage_IsBuckRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
+            need_c = PowerStage_IsBoostRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
+
+            ps.duty_a_10k = duty_a_10k;
+            ps.duty_b_10k = duty_b_10k;
+            ps.duty_c_cmd_10k = duty_b_10k;
+            ps.duty_c_phys_10k = duty_b_10k;
+            ps.tc1_expected_10k = hs_c_10k;
+            ps.tc2_expected_10k = duty_b_10k;
+            ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
+            ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
+
+            PowerStage_ApplyHsBootstrapSupport(need_a, need_c, &pulse_a, &pulse_c);
+            static_a = Dcdc_HsIsPassThrough(hs_a_10k) || pulse_a;
+            static_c = Dcdc_HsIsPassThrough(hs_c_10k) || pulse_c;
+
+            reconfig = (ps.output_mode != desired_mode) ||
+                       (ps.static_a != static_a) ||
+                       (ps.static_c != static_c) ||
+                       (prev_pulse_a != pulse_a) ||
+                       (prev_pulse_c != pulse_c);
+
+            if (reconfig) {
+                if (static_a) {
+                    PowerStage_ConfigHalfBridgeA_StaticHigh(pulse_a);
+                } else {
+                    PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
+                }
+                if (static_c) {
+                    PowerStage_ConfigHalfBridgeC_StaticHigh(pulse_c);
+                } else {
+                    PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                }
+            } else {
+                if (!static_a) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
+                        PowerStage_DutyAToCmp(duty_a_10k);
+                }
+                if (!static_c) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
+                        PowerStage_DutyBToCmp(duty_b_10k);
+                }
+            }
+
+            ps.refresh_a_active = pulse_a;
+            ps.refresh_c_active = pulse_c;
+            PowerStage_RefreshMasterSync(pulse_a || pulse_c);
+            break;
+
+        case POWER_REGION_BUCK_BOOST:
+        default:
+            desired_mode = POWER_STAGE_OUTPUT_BUCK_BOOST;
+            hs_a_10k = duty_a_10k;
+            hs_c_10k = (duty_b_10k >= POWER_STAGE_DUTY_SCALE) ?
+                       0U : (POWER_STAGE_DUTY_SCALE - duty_b_10k);
+            need_a = PowerStage_IsBuckRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_a_10k,
+                                                        ps.tr_en_a_active || ps.refresh_a_active);
+            need_c = PowerStage_IsBoostRefreshEnabled() &&
+                     PowerStage_NeedsHsBootstrapSupport(hs_c_10k,
+                                                        ps.tr_en_c_active || ps.refresh_c_active);
+
+            ps.duty_a_10k = duty_a_10k;
+            ps.duty_b_10k = duty_b_10k;
+            ps.duty_c_cmd_10k = duty_b_10k;
+            ps.duty_c_phys_10k = duty_b_10k;
+            ps.tc1_expected_10k = hs_c_10k;
+            ps.tc2_expected_10k = duty_b_10k;
+            ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
+            ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
+
+            PowerStage_ApplyHsBootstrapSupport(need_a, need_c, &pulse_a, &pulse_c);
+            static_a = Dcdc_HsIsPassThrough(hs_a_10k) || pulse_a;
+            static_c = Dcdc_HsIsPassThrough(hs_c_10k) || pulse_c;
+
+            reconfig = (ps.output_mode != desired_mode) ||
+                       (ps.static_a != static_a) ||
+                       (ps.static_c != static_c) ||
+                       (prev_pulse_a != pulse_a) ||
+                       (prev_pulse_c != pulse_c);
+
+            if (reconfig) {
+                if (static_a) {
+                    PowerStage_ConfigHalfBridgeA_StaticHigh(pulse_a);
+                } else {
+                    PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
+                }
+                if (static_c) {
+                    PowerStage_ConfigHalfBridgeC_StaticHigh(pulse_c);
+                } else {
+                    PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
+                }
+            } else {
+                if (!static_a) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
+                        PowerStage_DutyAToCmp(duty_a_10k);
+                }
+                if (!static_c) {
+                    ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
+                        PowerStage_DutyBToCmp(duty_b_10k);
+                }
+            }
+
+            ps.refresh_a_active = pulse_a;
+            ps.refresh_c_active = pulse_c;
+            PowerStage_RefreshMasterSync(pulse_a || pulse_c);
+            break;
     }
-    PowerStage_ApplyHsBootstrapSupport(need_a, need_c, &pulse_a, &pulse_c);
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    /* Decide EN from requested duty, never from the temporary limited duty.
-     * Otherwise limiting would turn EN off and restart the timer forever. */
-    uint32_t now_ms = HAL_GetTick();
-    hs_a_10k = Dcdc_UccLimitHsDuringStartup(hs_a_10k,
-                 need_a && Dcdc_UccStartupElapsed(now_ms, ps.tr_en_a_rise_ms));
-    hs_c_10k = Dcdc_UccLimitHsDuringStartup(hs_c_10k,
-                 need_c && Dcdc_UccStartupElapsed(now_ms, ps.tr_en_c_rise_ms));
-    /* Below the enable threshold normal PWM needs no startup restriction. */
-    if (!need_a) { hs_a_10k = duty_a_10k; }
-    if (!need_c) { hs_c_10k = POWER_STAGE_DUTY_SCALE - duty_b_10k; }
-    duty_a_10k = hs_a_10k;
-    duty_b_10k = POWER_STAGE_DUTY_SCALE - hs_c_10k;
-#endif
-    ps.duty_a_10k = duty_a_10k;
-    ps.duty_b_10k = duty_b_10k;
-    ps.duty_c_cmd_10k = ps.requested_b_10k;
-    ps.duty_c_phys_10k = duty_b_10k;
-    ps.duty_a = PowerStage_10kToFloat(duty_a_10k);
-    ps.duty_c = PowerStage_10kToFloat(duty_b_10k);
-    static_a = Dcdc_HsIsPassThrough(hs_a_10k) || pulse_a;
-    static_c = Dcdc_HsIsPassThrough(hs_c_10k) || pulse_c;
-
-    reconfig = (ps.output_mode != desired_mode) ||
-               (ps.static_a != static_a) ||
-               (ps.static_c != static_c) ||
-               (prev_pulse_a != pulse_a) ||
-               (prev_pulse_c != pulse_c);
-
-    if (reconfig) {
-        if (static_a) {
-            PowerStage_ConfigHalfBridgeA_StaticHigh(pulse_a);
-        } else {
-            PowerStage_ConfigHalfBridgeA_Pwm(ps.duty_a);
-        }
-        if (static_c) {
-            PowerStage_ConfigHalfBridgeC_StaticHigh(pulse_c);
-        } else {
-            PowerStage_ConfigHalfBridgeC_Pwm(ps.duty_c);
-        }
-    } else {
-        if (!static_a) {
-            ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_A].CMP1xR =
-                PowerStage_DutyAToCmp(duty_a_10k);
-        }
-        if (!static_c) {
-            ps.hhrtim->Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_C].CMP1xR =
-                PowerStage_DutyBToCmp(duty_b_10k);
-        }
-    }
-
-    ps.refresh_a_active = pulse_a;
-    ps.refresh_c_active = pulse_c;
-    PowerStage_RefreshMasterSync(pulse_a || pulse_c);
 
     ps.static_a = static_a;
     ps.static_c = static_c;
@@ -1154,20 +1253,6 @@ void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods)
     if (every_periods == 0U) {
         every_periods = 1U;
     }
-
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    if (PowerStage_IsFaultActive()) {
-        PowerStage_ForceSafeState();
-        return;
-    }
-    PowerStage_ApplyHsBootstrapSupport(false, true, NULL, NULL);
-    if (!Dcdc_UccStartupElapsed(HAL_GetTick(), ps.tr_en_c_rise_ms)) {
-        (void)HAL_HRTIM_WaveformOutputStop(ps.hhrtim, POWER_STAGE_OUTPUTS);
-        ps.enabled = false;
-        ps.discharge_active = false;
-        return;
-    }
-#endif
 
     pulse_ticks = PowerStage_NsToTicks(pulse_ns);
     if (ps.discharge_active &&
@@ -1259,12 +1344,6 @@ void PowerStage_SetBuckDischarge(uint32_t pulse_ns, uint32_t every_periods)
         return;
     }
 
-    if (PowerStage_IsFaultActive()) {
-        ps.last_error = POWER_STAGE_ERR_DRIVER_FAULT;
-        PowerStage_ForceSafeState();
-        return;
-    }
-
     ps.region = POWER_REGION_BUCK;
     ps.duty_a_10k = 0U;
     ps.duty_b_10k = 0U;
@@ -1349,47 +1428,49 @@ PowerStage_Region_t PowerStage_GetRegion(void)
     return ps.region;
 }
 
-void PowerStage_UccFaultExti(uint16_t pin)
-{
-#if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
-    if (((pin == BUCK_TR_FLT_Pin) && ps.tr_en_a_active) ||
-        ((pin == BOOST_TR_FLT_Pin) && ps.tr_en_c_active)) {
-        ps.ucc_fault_latched = true;
-        /* Stop immediately even if the 200 us pulse ends before the next
-         * control cycle. Foreground code performs the complete shutdown. */
-        if (ps.hhrtim != NULL && ps.hhrtim->Instance != NULL) {
-            ps.hhrtim->Instance->sCommonRegs.ODISR = POWER_STAGE_OUTPUTS;
-        }
-    }
-#else
-    (void)pin;
-#endif
-}
-
-void PowerStage_ClearDriverFault(void)
-{
-    /* Only an explicit reset with both supplies off may clear the latch. */
-    if (!ps.enabled && !ps.tr_en_a_active && !ps.tr_en_c_active) {
-        __HAL_GPIO_EXTI_CLEAR_IT(BUCK_TR_FLT_Pin | BOOST_TR_FLT_Pin);
-        ps.ucc_fault_latched = false;
-    }
-}
-
 bool PowerStage_IsFaultActive(void)
 {
 #if (BOARD_HAS_ISOLATED_GAN_SUPPLY != 0U)
+    static uint8_t buck_low_samples;
+    static uint8_t boost_low_samples;
     uint32_t now_ms = HAL_GetTick();
-    /* Also detect a node that never rises. EXTI catches every falling edge,
-     * including during startup; this short settling time is only for levels. */
-    if ((ps.tr_en_a_active &&
-         ((uint32_t)(now_ms - ps.tr_en_a_rise_ms) >= POWER_STAGE_UCC_SENSE_SETTLE_MS) &&
-         PowerStage_BuckTrFaultActive()) ||
-        (ps.tr_en_c_active &&
-         ((uint32_t)(now_ms - ps.tr_en_c_rise_ms) >= POWER_STAGE_UCC_SENSE_SETTLE_MS) &&
-         PowerStage_BoostTrFaultActive())) {
-        ps.ucc_fault_latched = true;
+    bool buck_fault = false;
+    bool boost_fault = false;
+
+    /*
+     * EN/FLT is one pin. Low while EN is driven low is just "off", not a fault,
+     * and must not block the next enable. A fault report is a 200us pull-down;
+     * a node held at ground stays low and keeps the module from starting.
+     */
+    if (ps.tr_en_a_active &&
+        ((now_ms - ps.tr_en_a_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
+        if (PowerStage_BuckTrFaultActive()) {
+            if (buck_low_samples < 255U) {
+                buck_low_samples++;
+            }
+        } else {
+            buck_low_samples = 0U;
+        }
+        buck_fault = buck_low_samples >= POWER_STAGE_UCC_FAULT_SAMPLES;
+    } else {
+        buck_low_samples = 0U;
     }
-    return ps.ucc_fault_latched;
+
+    if (ps.tr_en_c_active &&
+        ((now_ms - ps.tr_en_c_rise_ms) >= POWER_STAGE_ENABLE_DELAY_MS)) {
+        if (PowerStage_BoostTrFaultActive()) {
+            if (boost_low_samples < 255U) {
+                boost_low_samples++;
+            }
+        } else {
+            boost_low_samples = 0U;
+        }
+        boost_fault = boost_low_samples >= POWER_STAGE_UCC_FAULT_SAMPLES;
+    } else {
+        boost_low_samples = 0U;
+    }
+
+    return buck_fault || boost_fault;
 #else
     return false;
 #endif

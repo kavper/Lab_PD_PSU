@@ -1,6 +1,5 @@
 #include "board_mx.h"
 #include "main.h"
-#include "power_stage.h"
 
 static volatile uint8_t usbpd_irq_pending;
 static volatile uint8_t bms_alert_pending;
@@ -119,6 +118,5 @@ bool BoardMx_TakeBmsAlert(void)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    PowerStage_UccFaultExti(GPIO_Pin);
     BoardMx_GpioExtiCallback(GPIO_Pin);
 }

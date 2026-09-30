@@ -46,16 +46,6 @@ int main(void)
     ExpectTrue(Dcdc_HsIsPassThrough(9950U), "99.50% is pass-through");
     ExpectTrue(Dcdc_HsIsPassThrough(10000U), "100% HS is pass-through");
 
-    ExpectTrue(!Dcdc_UccStartupElapsed(119U, 100U), "startup still limited at 19 ms");
-    ExpectTrue(Dcdc_UccStartupElapsed(120U, 100U), "startup elapsed at 20 ms");
-    ExpectTrue(Dcdc_UccStartupElapsed(10U, UINT32_MAX - 9U), "startup handles tick wrap");
-    ExpectTrue(Dcdc_UccLimitHsDuringStartup(10000U, false) == 9000U,
-               "static HS request stays PWM during startup");
-    ExpectTrue(Dcdc_UccLimitHsDuringStartup(10000U, true) == 10000U,
-               "ready supply permits static HS");
-    ExpectTrue(Dcdc_UccLimitHsDuringStartup(5000U, false) == 5000U,
-               "startup never increases duty");
-
     /* INA296A path: 3.0 V Vref, gain 100, 1 mOhm → 10 A/V, 0 A at 1.5 V. */
     mid = (uint16_t)((1.5f / 3.0f) * 4095.0f + 0.5f);
     i = Dcdc_Ina296CountsToAmpere(mid, 3.0f, 100.0f, 0.001f);
