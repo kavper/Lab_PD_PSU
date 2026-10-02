@@ -20,7 +20,7 @@ Use `boot rcc_csr` to see why the MCU restarted (pin / BOR / software / IWDG).
 On `TEL [ms]` or `?` / `STATUS`:
 
 1. `T …` — PSU / G0 / PD / pre-reg  
-   Extra DCDC keys: `i_buck_ma` / `i_boost_ma` (INA296 high-side averages), `ucc_a` / `ucc_c` (UCC33420 EN, HS duty ≥ 97%).  
+   Extra DCDC keys: `i_buck_ma` / `i_boost_ma` (INA296 high-side averages), `ucc_a` / `ucc_c` (UCC33420 EN, HS duty ≥ 98%, off below 96%).  
    `duty_a_x10` / `duty_c_x10` are switch duties in percent×10 (802 = 80.2%). `duty_a` = buck HS (TA1), `duty_c` = boost LS (TC2). There is no `duty_ppm`.  
    `g0_vout_mv` is the G0 output (do **not** parse forwarded `TLM` — G4 no longer mirrors it).  
    On high-side OCP the G4 also emits a one-shot `E OCP …` line with both branch currents.  

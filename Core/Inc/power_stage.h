@@ -26,12 +26,12 @@
 
 /*
  * Bootstrap / UCC high-side support (selective per leg):
- * When upper-FET (HS) duty reaches 97%, that leg alone gets UCC33420 help —
- * never blanket both converters. This is extra support while the upper switch
- * stays on so long that bootstrap cannot refresh. With UCC boards: assert
- * only that leg's BUCK_TR_EN / BOOST_TR_EN and honor its TR_FLT. Without UCC:
- * StaticHigh + short LS refresh pulses on that leg (HRTIM master, ref_act).
- * 200-point hysteresis drops EN below 95% so 97% does not chatter.
+ * When upper-FET (HS) duty reaches 95%, that leg alone gets UCC33420 help —
+ * never blanket both converters. PC10 BUCK_TR_EN follows buck HS (leg A).
+ * PC12 BOOST_TR_EN follows boost HS (leg C). PC11 and PA15 are the same
+ * EN/FLT nodes, inputs only: the module pulls that node low to report a fault
+ * and will not start while the node is held at ground. Hysteresis drops EN
+ * below 93%. The leg keeps PWMing; StaticHigh is only real pass-through.
  */
 #ifndef POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE
 #define POWER_STAGE_BOOTSTRAP_REFRESH_ENABLE       1U
@@ -114,7 +114,6 @@ void PowerStage_ConfigHalfBridgeC_Pwm(float duty_c);
 void PowerStage_SetDuty(float duty_a, float duty_c);
 void PowerStage_SetDuty10k(uint32_t duty_a_10k, uint32_t duty_b_10k);
 void PowerStage_SetBuckDuty(float duty_a);
-/* Diagnostic-only helper for pure BOOST experiments (not used in normal auto-CV). */
 void PowerStage_SetBoostDuty(float duty_b);
 void PowerStage_SetBuckBoostDuty(float duty_a, float duty_b);
 void PowerStage_SetAdcTriggerPoint(float trigger_point);

@@ -1,4 +1,5 @@
 #include "dcdc_hs_policy.h"
+#include "dcdc_mode_policy.h"
 #include "host_link_policy.h"
 #include "ldo_ctrl_policy.h"
 #include "ldo_tlm_parse.h"
@@ -32,14 +33,18 @@ int main(void)
     uint16_t four_amp;
     float i;
 
-    /* UCC: off until 97%, then stay on until 95%. */
-    ExpectTrue(!Dcdc_UccNeededForHsDuty(9699U, false), "96.99% must not enable UCC");
-    ExpectTrue(Dcdc_UccNeededForHsDuty(9700U, false), "97.00% must enable UCC");
+    /* UCC: off until 95%, then stay on until 93%. */
+    ExpectTrue(!Dcdc_UccNeededForHsDuty(9499U, false), "94.99% must not enable UCC");
+    ExpectTrue(Dcdc_UccNeededForHsDuty(9500U, false), "95.00% must enable UCC");
     ExpectTrue(Dcdc_UccNeededForHsDuty(10000U, false), "100% HS must enable UCC");
-    ExpectTrue(Dcdc_UccNeededForHsDuty(9500U, true), "hysteresis keeps UCC at 95%");
-    ExpectTrue(!Dcdc_UccNeededForHsDuty(9499U, true), "below 95% drops UCC");
+    ExpectTrue(Dcdc_UccNeededForHsDuty(9300U, true), "hysteresis keeps UCC at 93%");
+    ExpectTrue(!Dcdc_UccNeededForHsDuty(9299U, true), "below 93% drops UCC");
     ExpectTrue(!Dcdc_UccNeededForHsDuty(5000U, false), "50% PWM must not enable UCC");
-    ExpectTrue(Dcdc_UccDutyOff10k() == 9500U, "off threshold is 95.00%");
+    ExpectTrue(Dcdc_UccDutyOff10k() == 9300U, "off threshold is 93.00%");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9500U), "95% UCC-on stays PWM");
+    ExpectTrue(!Dcdc_HsIsPassThrough(9300U), "93% is not pass-through");
+    ExpectTrue(Dcdc_HsIsPassThrough(9950U), "99.50% is pass-through");
+    ExpectTrue(Dcdc_HsIsPassThrough(10000U), "100% HS is pass-through");
 
     /* INA296A path: 3.0 V Vref, gain 100, 1 mOhm → 10 A/V, 0 A at 1.5 V. */
     mid = (uint16_t)((1.5f / 3.0f) * 4095.0f + 0.5f);
@@ -83,6 +88,84 @@ int main(void)
                "10% trailing margin clips mid of a short-ish pulse");
     ExpectNear(Dcdc_AdcTriggerInHsOn(0.03f, 1.00f), 0.05f, 0.001f,
                "tiny HS window falls back to 5%");
+
+    {
+        Dcdc_Duties_t d;
+        Dcdc_Duties_t d_lo;
+        Dcdc_Duties_t d_hi;
+        float m_hi = Dcdc_MixedMHi();
+        float prev_da;
+        float prev_dc;
+        int i;
+        float max_dda = 0.0f;
+        float max_ddc = 0.0f;
+
+        d = Dcdc_FeedForwardDuties(15.0f, 7.5f);
+        ExpectNear(d.da, 0.50f, 0.002f, "pure buck Da = M");
+        ExpectNear(d.dc, 0.0f, 0.001f, "pure buck Dc = 0");
+
+        d_lo = Dcdc_FeedForwardDuties(15.0f, 15.0f * DCDC_MIXED_DA_LO);
+        ExpectNear(d_lo.da, DCDC_MIXED_DA_LO, 0.002f, "buck/mixed boundary Da");
+        ExpectNear(d_lo.dc, 0.0f, 0.002f, "buck/mixed boundary Dc = 0");
+
+        d_hi = Dcdc_FeedForwardDuties(15.0f, 15.0f * m_hi);
+        ExpectNear(d_hi.da, 1.0f, 0.002f, "mixed/boost boundary Da = 1");
+        ExpectNear(d_hi.dc, DCDC_MIXED_DC_MIN, 0.003f, "mixed/boost boundary Dc");
+
+        d = Dcdc_FeedForwardDuties(15.0f, 20.0f);
+        ExpectNear(d.da, 1.0f, 0.001f, "pure boost Da = 1");
+        ExpectNear(d.dc, 1.0f - (15.0f / 20.0f), 0.003f, "pure boost Dc = 1-Vin/Vout");
+        ExpectNear(Dcdc_ImpliedM(d.da, d.dc), 20.0f / 15.0f, 0.01f,
+                   "boost implied M tracks Vset/Vin");
+
+        d = Dcdc_FeedForwardDuties(15.0f, 15.0f);
+        ExpectNear(Dcdc_ImpliedM(d.da, d.dc), 1.0f, 0.02f,
+                   "mixed at VIN keeps implied M ≈ 1");
+
+        prev_da = 0.0f;
+        prev_dc = 0.0f;
+        for (i = 40; i <= 180; i++) {
+            float vset = 15.0f * ((float)i / 100.0f);
+            Dcdc_Duties_t step = Dcdc_FeedForwardDuties(15.0f, vset);
+            if (i > 40) {
+                float dda = fabsf(step.da - prev_da);
+                float ddc = fabsf(step.dc - prev_dc);
+                if (dda > max_dda) {
+                    max_dda = dda;
+                }
+                if (ddc > max_ddc) {
+                    max_ddc = ddc;
+                }
+            }
+            prev_da = step.da;
+            prev_dc = step.dc;
+        }
+        ExpectTrue(max_dda < 0.03f, "Da is continuous across 0.40..1.80 M");
+        ExpectTrue(max_ddc < 0.03f, "Dc is continuous across 0.40..1.80 M");
+
+        ExpectTrue(Dcdc_SelectRegion(DCDC_REGION_BUCK, 15.0f, 20.0f) ==
+                   DCDC_REGION_BUCK_BOOST,
+                   "buck must not skip into boost");
+        ExpectTrue(Dcdc_SelectRegion(DCDC_REGION_BOOST, 15.0f, 10.0f) ==
+                   DCDC_REGION_BUCK_BOOST,
+                   "boost must not skip into buck");
+        ExpectTrue(Dcdc_SelectRegion(DCDC_REGION_BUCK_BOOST, 15.0f, 20.0f) ==
+                   DCDC_REGION_BOOST,
+                   "mixed enters boost above VIN+1.5 V");
+        ExpectTrue(Dcdc_SelectRegion(DCDC_REGION_BUCK_BOOST, 15.0f, 10.0f) ==
+                   DCDC_REGION_BUCK,
+                   "mixed enters buck below VIN-1.5 V");
+        ExpectTrue(Dcdc_SelectRegion(DCDC_REGION_BOOST, 15.0f, 20.0f) ==
+                   DCDC_REGION_BOOST,
+                   "boost stays boost well above VIN");
+
+        ExpectTrue(Dcdc_TopologyFromDuties(0.50f, 0.0f) == DCDC_REGION_BUCK,
+                   "Dc=0 is buck topology");
+        ExpectTrue(Dcdc_TopologyFromDuties(1.00f, 0.20f) == DCDC_REGION_BOOST,
+                   "Da=1 and Dc>0 is boost topology");
+        ExpectTrue(Dcdc_TopologyFromDuties(0.92f, 0.04f) == DCDC_REGION_BUCK_BOOST,
+                   "both legs PWM is mixed topology");
+    }
 
     ExpectTrue(Ldo_TlmLooksComplete(
                    "TLM out=0 mode=0 vset=5000 vout=37 iset=100 iout=1 vin=9256 "
