@@ -1,6 +1,7 @@
 #include "debug_uart.h"
 #include "host_link.h"
 #include "ldo_link.h"
+#include "link_uart.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -229,8 +230,10 @@ void Debug_Init(UART_HandleTypeDef *huart)
 
     Debug_RestoreIrq(primask);
 
-    debug_dma_ready = Debug_UartDmaInit(huart);
-    debug_blocking_ready = (!debug_dma_ready) && (huart != NULL);
+    /* USART1 is the binary DMA host link. Blocking TX would stall METER. */
+    (void)Debug_UartDmaInit(huart);
+    debug_dma_ready = false;
+    debug_blocking_ready = false;
 }
 
 void Debug_SetEnabled(bool enabled)
@@ -363,6 +366,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     uint32_t primask;
 
+    LinkUart_OnTxCplt(huart);
     if (huart != debug_uart) {
         return;
     }

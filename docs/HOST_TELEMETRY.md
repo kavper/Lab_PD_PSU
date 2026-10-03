@@ -1,8 +1,8 @@
 # Host telemetry (USART1 → H7 / PC parser)
 
-USART1 **PC4 TX / PC5 RX**, 115200 8N1. Default: machine frames only (`VERBOSE 0`).
+**Production traffic is binary at 460800 8N1.** ASCII `T` / `TB` / `TC` and `TEL` are retired and are not the 5 ms path. The byte layout is `Core/Inc/h7_link_proto.h`. METER is type `0x10` every 5 ms (G4 timer, not an H7 request). BMS and PD are types `0x11` and `0x12` every 200 ms. Diagnostic text, if any, is type `0x20` at the lowest TX priority.
 
-Do **not** binary-compress `T`/`TB`/`TC`. The H7 parser is ASCII `key=value`. The win is: stop duplicating G0 `TLM`, stop blocking USART1 TX, debounce live `SET`, then raise baud only if a sequencer needs <100 ms `T`.
+The rest of this file describes the old ASCII contract. Do not implement H7 from it.
 
 OTP on BQ76922 is **not required**. Blank OTP boots “all cells”; G4 writes **4S `VCell Mode=0x0017` (skip VC4)** in RAM on every wake, then `SLEEP_DISABLE` + `ALL_FETS_ON`. OTP is a factory option only (one-way); do not burn it from this firmware.
 

@@ -3,8 +3,11 @@
 #include "board_rev.h"
 #include "debug_uart.h"
 #include "fan_pwm.h"
+#include "h7_link_proto.h"
 #include "ldo_ctrl_policy.h"
 #include "ldo_prereg.h"
+#include "link_uart.h"
+#include "psu_gui_api.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,7 +26,6 @@
 #define LDO_PROTO_NACK               0x82U
 #define LDO_TLM_PAYLOAD_LENGTH       68U
 #define LDO_FAULT_VIN_LOW            (1UL << 3)
-#define LDO_RX_RING_SIZE             256U
 #define LDO_TLM_STALE_MS             500U
 #define LDO_FAN_FAILSAFE_PERCENT     40U
 #define LDO_LINK_HEALTH_MS           2000U
@@ -32,7 +34,6 @@
 #define LDO_CMD_RETRY_MAX            4U
 #define LDO_VIN_MIN_MV               4500U
 #define LDO_VOUT_ZERO_MV             250U
-#define LDO_LIVE_SET_MIN_MS          80U
 #define LDO_V_MIN                    0.0f
 #define LDO_V_MAX                    27.0f
 #define LDO_I_MIN                    0.0f
@@ -57,11 +58,6 @@ typedef enum {
 } LdoRxState_t;
 
 static UART_HandleTypeDef *s_huart_g0 = NULL;
-static uint8_t s_rx_byte;
-static uint8_t s_rx_ring[LDO_RX_RING_SIZE];
-static volatile uint16_t s_rx_head;
-static volatile uint16_t s_rx_tail;
-static volatile bool s_rx_overflow;
 static LdoRxState_t s_rx_state;
 static uint8_t s_rx_length;
 static uint8_t s_rx_body[LDO_PROTO_MAX_LENGTH];
@@ -82,7 +78,6 @@ static bool s_output_wanted;
 static float s_g0_volts = LDO_DEFAULT_V;
 static float s_g0_amps = LDO_DEFAULT_I;
 static bool s_setpoint_dirty;
-static uint32_t s_last_live_set_ms;
 static LdoLink_CtrlState_t s_ctrl;
 static LdoPendingCmd_t s_pending;
 static uint8_t s_pending_type;
@@ -96,6 +91,19 @@ static bool s_ack_out_on_ok;
 static bool s_ack_out_off_ok;
 static bool s_nack_seen;
 static char s_nack_line[48];
+static LinkUart s_link;
+static bool s_link_drop_latched;
+static LdoPendingSet s_host_pending;
+static bool s_host_inflight;
+static uint8_t s_host_inflight_seq;
+static bool s_host_result_ready;
+static uint8_t s_host_result_seq;
+static uint8_t s_host_result_ack;
+static uint8_t s_host_result_reason;
+static bool s_host_replay_valid;
+static uint8_t s_host_replay_seq;
+static uint8_t s_host_replay_ack;
+static uint8_t s_host_replay_reason;
 
 static float LdoLink_Clampf(float value, float min_v, float max_v)
 {
@@ -108,69 +116,23 @@ static float LdoLink_Clampf(float value, float min_v, float max_v)
     return value;
 }
 
-static void LdoLink_ArmRx(void)
+static void LdoLink_ParseByte(uint8_t byte);
+
+static void LdoLink_OnRxByte(uint8_t ch, void *ctx)
 {
-    HAL_StatusTypeDef st;
-
-    if (s_huart_g0 == NULL) {
-        return;
-    }
-    st = HAL_UART_Receive_IT(s_huart_g0, &s_rx_byte, 1U);
-    if ((st != HAL_OK) && (st != HAL_BUSY)) {
-        Debug_Printf("[LDO] ArmRx fail st=%d err=0x%lX state=%u\r\n",
-                     (int)st,
-                     (unsigned long)s_huart_g0->ErrorCode,
-                     (unsigned int)s_huart_g0->RxState);
-    }
-}
-
-static void LdoLink_FeedRxByte(uint8_t ch)
-{
-    uint16_t next_head;
-
+    (void)ctx;
     s_status.rx_bytes++;
     s_status.last_rx_ms = HAL_GetTick();
     if (s_status.first_rx_len < sizeof(s_status.first_rx)) {
         s_status.first_rx[s_status.first_rx_len++] = ch;
     }
-
-    next_head = (uint16_t)((s_rx_head + 1U) % LDO_RX_RING_SIZE);
-    if (next_head != s_rx_tail) {
-        s_rx_ring[s_rx_head] = ch;
-        s_rx_head = next_head;
-    } else {
-        s_rx_overflow = true;
-    }
+    LdoLink_ParseByte(ch);
 }
 
-/* Polling fallback: if NVIC/IT path is dead, still assemble lines. */
-static void LdoLink_PollRx(void)
+static void LdoLink_ArmRx(void)
 {
-    uint32_t guard = 0U;
-
-    if (s_huart_g0 == NULL) {
-        return;
-    }
-
-    while (__HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_RXNE) && (guard < 64U)) {
-        uint8_t ch = (uint8_t)(s_huart_g0->Instance->RDR & 0xFFU);
-        LdoLink_FeedRxByte(ch);
-        guard++;
-    }
-
-    if (__HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_ORE) ||
-        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_FE) ||
-        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_NE) ||
-        __HAL_UART_GET_FLAG(s_huart_g0, UART_FLAG_PE)) {
-        s_status.rx_errors++;
-        s_status.last_error_code |= s_huart_g0->ErrorCode;
-        if (s_status.last_error_code == 0U) {
-            s_status.last_error_code = 1U;
-        }
-        __HAL_UART_CLEAR_OREFLAG(s_huart_g0);
-        __HAL_UART_CLEAR_NEFLAG(s_huart_g0);
-        __HAL_UART_CLEAR_FEFLAG(s_huart_g0);
-        __HAL_UART_CLEAR_PEFLAG(s_huart_g0);
+    if (s_huart_g0 != NULL) {
+        LinkUart_OnError(s_huart_g0);
     }
 }
 
@@ -215,8 +177,6 @@ static void LdoLink_RecoverRx(uint32_t now_ms)
     __HAL_UART_CLEAR_NEFLAG(s_huart_g0);
     __HAL_UART_CLEAR_FEFLAG(s_huart_g0);
     __HAL_UART_CLEAR_PEFLAG(s_huart_g0);
-    s_rx_head = 0U;
-    s_rx_tail = 0U;
     s_rx_state = LDO_RX_WAIT_SOF1;
     LdoLink_ArmRx();
 }
@@ -269,7 +229,8 @@ static void LdoLink_PutU32Le(uint8_t *data, uint32_t value)
 }
 
 static bool LdoLink_TxFrame(uint8_t type, uint8_t sequence,
-                            const uint8_t *payload, uint8_t payload_length)
+                            const uint8_t *payload, uint8_t payload_length,
+                            LinkUartPri priority)
 {
     uint8_t frame[LDO_PROTO_MAX_FRAME];
     uint8_t length;
@@ -297,12 +258,25 @@ static bool LdoLink_TxFrame(uint8_t type, uint8_t sequence,
     frame[index++] = (uint8_t)crc;
     frame[index++] = (uint8_t)(crc >> 8);
 
-    if (HAL_UART_Transmit(s_huart_g0, frame, index, 20U) != HAL_OK) {
-        Debug_Printf("[LDO] binary TX fail type=0x%02X seq=%u\r\n",
+    if (!LinkUart_Submit(&s_link, priority, 0U, frame, index)) {
+        Debug_Printf("[LDO] binary TX queue full type=0x%02X seq=%u\r\n",
                      (unsigned int)type, (unsigned int)sequence);
         return false;
     }
     return true;
+}
+
+static void LdoLink_PostHostResult(uint8_t seq, bool ack, uint8_t reason)
+{
+    s_host_result_ready = true;
+    s_host_result_seq = seq;
+    s_host_result_ack = ack ? 1U : 0U;
+    s_host_result_reason = reason;
+    s_host_replay_valid = true;
+    s_host_replay_seq = seq;
+    s_host_replay_ack = s_host_result_ack;
+    s_host_replay_reason = reason;
+    s_host_inflight = false;
 }
 
 static void LdoLink_ClearPendingAcks(void)
@@ -336,21 +310,28 @@ static void LdoLink_HardKillFromFault(const char *why)
     LdoPrereg_SetPermitOverrideOff(true);
     LdoPrereg_SetForceDisable(true);
     LdoLink_ClearPendingAcks();
+    if (s_host_inflight) {
+        LdoLink_PostHostResult(s_host_inflight_seq, false, H7_LINK_NACK_UNSAFE);
+    }
+    s_host_pending.valid = false;
     LdoLink_EnterState(LDO_G0_CTRL_FAULT, HAL_GetTick());
 }
 
-static bool LdoLink_SendSet(uint32_t now_ms)
+static bool LdoLink_SendSet(uint32_t now_ms, bool reuse_seq)
 {
     uint8_t payload[8];
     uint32_t v_mv = (uint32_t)((s_g0_volts * 1000.0f) + 0.5f);
     uint32_t i_ma = (uint32_t)((s_g0_amps * 1000.0f) + 0.5f);
 
     LdoLink_ClearPendingAcks();
-    s_pending_seq = s_tx_sequence++;
+    if (!reuse_seq) {
+        s_pending_seq = s_tx_sequence++;
+    }
     s_pending_type = LDO_PROTO_SETPOINT;
     LdoLink_PutU32Le(&payload[0], v_mv);
     LdoLink_PutU32Le(&payload[4], i_ma);
-    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, payload, sizeof(payload))) {
+    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, payload, sizeof(payload),
+                         LINK_UART_PRI_ACK)) {
         return false;
     }
 
@@ -367,7 +348,8 @@ static bool LdoLink_SendOutOn(uint32_t now_ms)
     LdoLink_ClearPendingAcks();
     s_pending_seq = s_tx_sequence++;
     s_pending_type = LDO_PROTO_SET_OUTPUT;
-    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, &enabled, 1U)) {
+    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, &enabled, 1U,
+                         LINK_UART_PRI_ACK)) {
         return false;
     }
     s_pending = LDO_PENDING_OUT_ON;
@@ -382,7 +364,8 @@ static bool LdoLink_SendOutOff(uint32_t now_ms)
     LdoLink_ClearPendingAcks();
     s_pending_seq = s_tx_sequence++;
     s_pending_type = LDO_PROTO_SET_OUTPUT;
-    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, &enabled, 1U)) {
+    if (!LdoLink_TxFrame(s_pending_type, s_pending_seq, &enabled, 1U,
+                         LINK_UART_PRI_SAFETY)) {
         return false;
     }
     s_pending = LDO_PENDING_OUT_OFF;
@@ -401,6 +384,9 @@ static void LdoLink_HandleAck(uint8_t sequence, const uint8_t *payload,
     s_status.ack_ok_count++;
     if ((s_pending == LDO_PENDING_SET) && (payload[0] == LDO_PROTO_SETPOINT)) {
         s_ack_set_ok = true;
+        if (s_host_inflight) {
+            LdoLink_PostHostResult(s_host_inflight_seq, true, 0U);
+        }
     } else if (s_pending == LDO_PENDING_OUT_ON) {
         s_ack_out_on_ok = true;
     } else if (s_pending == LDO_PENDING_OUT_OFF) {
@@ -540,15 +526,6 @@ static void LdoLink_ParseByte(uint8_t byte)
     }
 }
 
-static void LdoLink_ParseRxRing(void)
-{
-    while (s_rx_tail != s_rx_head) {
-        uint8_t byte = s_rx_ring[s_rx_tail];
-        s_rx_tail = (uint16_t)((s_rx_tail + 1U) % LDO_RX_RING_SIZE);
-        LdoLink_ParseByte(byte);
-    }
-}
-
 static void LdoLink_ApplyActuators(uint32_t now_ms)
 {
     uint8_t fan = s_status.fan_percent;
@@ -590,7 +567,29 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
     s_status.output_wanted = s_output_wanted;
     s_status.ctrl_state = s_ctrl;
 
-    if (!s_output_wanted) {
+    if (s_output_wanted && s_status.telemetry_valid &&
+        ((uint32_t)(now_ms - s_status.last_tlm_ms) > LDO_TLM_STALE_MS)) {
+        if (!s_link_drop_latched) {
+            s_link_drop_latched = true;
+            s_output_wanted = false;
+            s_status.output_wanted = false;
+            s_dcdc_permit_request = false;
+            LdoLink_SetPermitPin(false);
+            LdoPrereg_SetForceDisable(true);
+            LdoPrereg_SetPermitOverrideOff(true);
+            PSU_Stop();
+            if (s_host_inflight) {
+                LdoLink_PostHostResult(s_host_inflight_seq, false,
+                                       H7_LINK_NACK_LINK);
+            }
+            s_host_pending.valid = false;
+            Debug_Printf("[LDO] link lost — output stays off until a new ON\r\n");
+        }
+    } else if (LdoLink_TlmFresh(now_ms)) {
+        s_link_drop_latched = false;
+    }
+
+    if (!s_output_wanted && (s_pending == LDO_PENDING_NONE)) {
         if ((s_ctrl != LDO_G0_CTRL_IDLE) &&
             (s_ctrl != LDO_G0_CTRL_SEND_OUT_OFF) &&
             (s_ctrl != LDO_G0_CTRL_WAIT_OUT_OFF_ACK) &&
@@ -670,7 +669,7 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         if (!s_output_wanted) {
             break;
         }
-        if (LdoLink_SendSet(now_ms)) {
+        if (LdoLink_SendSet(now_ms, s_retry_count > 0U)) {
             LdoLink_EnterState(LDO_G0_CTRL_WAIT_SET_ACK, now_ms);
         } else if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
             LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
@@ -678,6 +677,18 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         break;
 
     case LDO_G0_CTRL_WAIT_SET_ACK:
+        if (!s_output_wanted &&
+            (s_ack_set_ok || s_nack_seen || LdoLink_PendingTimedOut(now_ms))) {
+            if (s_host_inflight && !s_ack_set_ok) {
+                LdoLink_PostHostResult(s_host_inflight_seq, false,
+                                       s_nack_seen ? H7_LINK_NACK_UNSAFE
+                                                   : H7_LINK_NACK_TIMEOUT);
+            }
+            LdoLink_ClearPendingAcks();
+            s_retry_count = 0U;
+            LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_OFF, now_ms);
+            break;
+        }
         if (s_ack_set_ok) {
             s_retry_count = 0U;
             if (Ldo_SetAckRequiresVoutZero(false) &&
@@ -786,23 +797,37 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
             }
             break;
         }
-        if (s_nack_seen && (s_pending == LDO_PENDING_SET)) {
+        if ((s_nack_seen || LdoLink_PendingTimedOut(now_ms)) &&
+            (s_pending == LDO_PENDING_SET)) {
+            if (LdoLink_PendingTimedOut(now_ms)) {
+                s_status.cmd_timeout_count++;
+            }
             s_nack_seen = false;
-            s_pending = LDO_PENDING_NONE;
-            s_setpoint_dirty = true;
+            if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+                if (s_host_inflight) {
+                    LdoLink_PostHostResult(s_host_inflight_seq, false,
+                                           H7_LINK_NACK_TIMEOUT);
+                }
+                s_pending = LDO_PENDING_NONE;
+                s_host_pending.valid = false;
+                s_setpoint_dirty = false;
+            } else if (!LdoLink_SendSet(now_ms, true)) {
+                s_pending = LDO_PENDING_NONE;
+            }
+            break;
         }
-        if ((s_pending == LDO_PENDING_SET) && LdoLink_PendingTimedOut(now_ms)) {
-            s_status.cmd_timeout_count++;
-            s_pending = LDO_PENDING_NONE;
-            s_setpoint_dirty = true;
-        }
-        if (s_setpoint_dirty &&
-            (s_pending == LDO_PENDING_NONE) &&
-            Ldo_LiveSetIntervalElapsed(now_ms, s_last_live_set_ms,
-                                       LDO_LIVE_SET_MIN_MS)) {
-            if (LdoLink_SendSet(now_ms)) {
-                s_last_live_set_ms = now_ms;
+        if (s_pending == LDO_PENDING_NONE) {
+            if (s_host_pending.valid) {
+                s_g0_volts = (float)s_host_pending.mv / 1000.0f;
+                s_g0_amps = (float)s_host_pending.ma / 1000.0f;
+                s_host_inflight = true;
+                s_host_inflight_seq = s_host_pending.seq;
+                s_host_pending.valid = false;
                 s_retry_count = 0U;
+                (void)LdoLink_SendSet(now_ms, false);
+            } else if (s_setpoint_dirty) {
+                s_retry_count = 0U;
+                (void)LdoLink_SendSet(now_ms, false);
             }
         }
         break;
@@ -839,6 +864,18 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         LdoLink_EnterState(LDO_G0_CTRL_IDLE, now_ms);
         break;
     }
+
+    if ((s_pending == LDO_PENDING_NONE) && s_host_pending.valid &&
+        (s_ctrl != LDO_G0_CTRL_SEND_OUT_OFF) &&
+        (s_ctrl != LDO_G0_CTRL_WAIT_OUT_OFF_ACK)) {
+        s_g0_volts = (float)s_host_pending.mv / 1000.0f;
+        s_g0_amps = (float)s_host_pending.ma / 1000.0f;
+        s_host_inflight = true;
+        s_host_inflight_seq = s_host_pending.seq;
+        s_host_pending.valid = false;
+        s_retry_count = 0U;
+        (void)LdoLink_SendSet(now_ms, false);
+    }
 }
 
 void LdoLink_Init(UART_HandleTypeDef *huart_g0)
@@ -847,9 +884,6 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     strncpy(s_status.fault, "NONE", sizeof(s_status.fault) - 1U);
 
     s_huart_g0 = huart_g0;
-    s_rx_head = 0U;
-    s_rx_tail = 0U;
-    s_rx_overflow = false;
     LdoLink_ResetParser();
     s_dcdc_permit_request = false;
     s_remote_sense = false;
@@ -859,7 +893,11 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_g0_volts = LDO_DEFAULT_V;
     s_g0_amps = LDO_DEFAULT_I;
     s_setpoint_dirty = false;
-    s_last_live_set_ms = 0U;
+    s_host_pending.valid = false;
+    s_host_inflight = false;
+    s_host_result_ready = false;
+    s_host_replay_valid = false;
+    s_link_drop_latched = false;
     s_ctrl = LDO_G0_CTRL_IDLE;
     s_retry_count = 0U;
     s_tx_sequence = 0U;
@@ -878,8 +916,8 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 #endif
     HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin, GPIO_PIN_RESET);
 
-    LdoLink_ArmRx();
-    Debug_Printf("[LDO] USART2 G0 binary link ready (CRC16 + sequence + ACK)\r\n");
+    LinkUart_Init(&s_link, huart_g0);
+    Debug_Printf("[LDO] USART2 G0 binary link ready (460800 DMA, CRC16)\r\n");
 #if (BOARD_USART2_G0_PIN_SWAP != 0U)
     Debug_Printf("[LDO] USART2 TX/RX SWAP=1 at boot (G0SWAP 0|1 to change)\r\n");
 #else
@@ -911,6 +949,7 @@ void LdoLink_RequestOutput(bool on)
     s_output_wanted = on;
     s_status.output_wanted = on;
     if (on) {
+        s_link_drop_latched = false;
         LdoPrereg_SetForceDisable(false);
         LdoPrereg_SetPermitOverrideOff(false);
         if (s_ctrl == LDO_G0_CTRL_FAULT) {
@@ -920,7 +959,11 @@ void LdoLink_RequestOutput(bool on)
                      (unsigned long)((s_g0_volts * 1000.0f) + 0.5f),
                      (unsigned long)((s_g0_amps * 1000.0f) + 0.5f));
     } else {
-        Debug_Printf("[LDO] output WANT OFF\r\n");
+        s_dcdc_permit_request = false;
+        LdoLink_SetPermitPin(false);
+        LdoPrereg_SetForceDisable(true);
+        LdoPrereg_SetPermitOverrideOff(true);
+        Debug_Printf("[LDO] output WANT OFF (permit dropped)\r\n");
     }
 }
 
@@ -1019,8 +1062,6 @@ void LdoLink_SetUartPinSwap(bool enable)
 
     s_status.first_rx_len = 0U;
     s_status.first_rx_dumped = false;
-    s_rx_head = 0U;
-    s_rx_tail = 0U;
     LdoLink_ResetParser();
     (void)HAL_UART_AbortReceive(s_huart_g0);
     LdoLink_ArmRx();
@@ -1065,16 +1106,8 @@ void LdoLink_Task(void)
     uint32_t now_ms = HAL_GetTick();
     uint32_t age_ms;
 
-    /* Always poll RXNE — recovers if IT/NVIC path is stuck. */
-    LdoLink_PollRx();
-
-    LdoLink_ParseRxRing();
+    LinkUart_Poll(&s_link, LdoLink_OnRxByte, NULL);
     LdoLink_DumpFirstRx();
-    if (s_rx_overflow) {
-        s_rx_overflow = false;
-        s_status.rx_errors++;
-        Debug_Printf("[LDO] WARN: G0 RX ring overflow\r\n");
-    }
 
     if (s_status.last_rx_ms != 0U) {
         age_ms = now_ms - s_status.last_rx_ms;
@@ -1111,12 +1144,7 @@ void LdoLink_Task(void)
 
 void LdoLink_RxCplt(UART_HandleTypeDef *huart)
 {
-    if ((huart == NULL) || (huart != s_huart_g0)) {
-        return;
-    }
-
-    LdoLink_FeedRxByte(s_rx_byte);
-    LdoLink_ArmRx();
+    (void)huart;
 }
 
 void LdoLink_OnUartError(UART_HandleTypeDef *huart)
@@ -1129,10 +1157,55 @@ void LdoLink_OnUartError(UART_HandleTypeDef *huart)
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_PEFLAG(huart);
         huart->ErrorCode = HAL_UART_ERROR_NONE;
-        /* HAL already aborted the IT RX on ORE. Do not AbortReceive again —
-         * that drops FIFO contents and retriggers overrun. */
-        LdoLink_ArmRx();
+        LinkUart_OnError(huart);
     }
+}
+
+int LdoLink_SubmitHostSet(uint8_t seq, uint32_t mv, uint32_t ma,
+                          uint8_t *nack_reason)
+{
+    if ((mv > 27000U) || (ma > 5000U)) {
+        if (nack_reason != NULL) {
+            *nack_reason = H7_LINK_NACK_RANGE;
+        }
+        return LDO_HOST_SET_REPLAY_NACK;
+    }
+    if (Ldo_SameSeqReplay(s_host_replay_valid, s_host_replay_seq, seq)) {
+        if (nack_reason != NULL) {
+            *nack_reason = s_host_replay_reason;
+        }
+        return (s_host_replay_ack != 0U) ? LDO_HOST_SET_REPLAY_ACK
+                                         : LDO_HOST_SET_REPLAY_NACK;
+    }
+    if (s_host_inflight && (seq == s_host_inflight_seq)) {
+        return LDO_HOST_SET_QUEUED;
+    }
+    Ldo_PendingSetStore(&s_host_pending, mv, ma, seq);
+    return LDO_HOST_SET_QUEUED;
+}
+
+bool LdoLink_TakeHostSetResult(uint8_t *seq, uint8_t *ack, uint8_t *reason)
+{
+    if (!s_host_result_ready || (seq == NULL) || (ack == NULL) ||
+        (reason == NULL)) {
+        return false;
+    }
+    *seq = s_host_result_seq;
+    *ack = s_host_result_ack;
+    *reason = s_host_result_reason;
+    s_host_result_ready = false;
+    return true;
+}
+
+uint8_t LdoLink_HostSetPhase(void)
+{
+    if (s_host_inflight) {
+        return H7_SET_PHASE_INFLIGHT;
+    }
+    if (s_host_pending.valid) {
+        return H7_SET_PHASE_PENDING;
+    }
+    return H7_SET_PHASE_IDLE;
 }
 
 bool LdoLink_IsPowerPermitted(void)
