@@ -563,7 +563,7 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 1 */
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 460800;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -596,16 +596,7 @@ static void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
-  /* CubeMX emits DisableFifoMode. G0 115200 needs the 8-byte RX FIFO or
-   * one missed IRQ (86 µs) overruns and shreds TLM / toggles DCDC. */
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_EnableFifoMode(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* 460800 DMA: leave the FIFO disabled. RX is circular DMA, not byte IRQs. */
   /* USER CODE END USART2_Init 2 */
 
 }
@@ -624,7 +615,7 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 1 */
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 460800;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -651,17 +642,7 @@ static void MX_USART1_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART1_Init 2 */
-  /* CubeMX emits DisableFifoMode. Host SET on USART1 collides with T/TB/TC
-   * TX; the 8-byte RX FIFO covers one missed IRQ so slider commands are
-   * not shredded into SET 1.300 / ERR CMD. */
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_EnableFifoMode(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* 460800 DMA: leave the FIFO disabled. */
   /* USER CODE END USART1_Init 2 */
 
 }

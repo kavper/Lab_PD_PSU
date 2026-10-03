@@ -6,8 +6,8 @@
 #include <stdint.h>
 
 /*
- * G0 LDO link on USART2 PB3 TX / PB4 RX (115200 8N1).
- * Protocol: docs/G4_LDO_UART.md + LDO_controller docs/G4_G0_UART_PROTOCOL.md
+ * G0 LDO link on USART2 PB3 TX / PB4 RX (460800 8N1, DMA).
+ * Protocol v2: docs/G4_LDO_UART.md and LDO_controller docs/G4_G0_UART_PROTOCOL_V2.md.
  */
 
 typedef enum {
@@ -82,6 +82,16 @@ void LdoLink_SetG0Current(float amps);
 float LdoLink_GetG0Voltage(void);
 float LdoLink_GetG0Current(void);
 LdoLink_CtrlState_t LdoLink_GetCtrlState(void);
+
+/* Host SET: one G0 transaction in flight, one overwritten pending V+I.
+ * Result is delivered only after the G0 ACK/NACK/timeout. Same SEQ replays. */
+#define LDO_HOST_SET_QUEUED          0
+#define LDO_HOST_SET_REPLAY_ACK      1
+#define LDO_HOST_SET_REPLAY_NACK     2
+int LdoLink_SubmitHostSet(uint8_t seq, uint32_t mv, uint32_t ma,
+                          uint8_t *nack_reason);
+bool LdoLink_TakeHostSetResult(uint8_t *seq, uint8_t *ack, uint8_t *reason);
+uint8_t LdoLink_HostSetPhase(void);
 
 /*
  * Remote sense path (PB6 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).

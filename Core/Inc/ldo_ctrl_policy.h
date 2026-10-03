@@ -14,15 +14,31 @@ static inline bool Ldo_SetAckRequiresVoutZero(bool already_running)
     return !already_running;
 }
 
-/* Coalesce slider spam on USART2; 80 ms is one G0 TLM + ACK window. */
-static inline bool Ldo_LiveSetIntervalElapsed(uint32_t now_ms,
-                                              uint32_t last_set_ms,
-                                              uint32_t min_ms)
+/*
+ * Live SET is not time-coalesced. One G4→G0 transaction may be in flight.
+ * A second complete V+I overwrites the single pending slot.
+ * The same SEQ is a replay and must not be applied again.
+ */
+typedef struct {
+    bool valid;
+    uint32_t mv;
+    uint32_t ma;
+    uint8_t seq;
+} LdoPendingSet;
+
+static inline void Ldo_PendingSetStore(LdoPendingSet *pending, uint32_t mv,
+                                       uint32_t ma, uint8_t seq)
 {
-    if (last_set_ms == 0U) {
-        return true;
-    }
-    return ((uint32_t)(now_ms - last_set_ms) >= min_ms);
+    pending->valid = true;
+    pending->mv = mv;
+    pending->ma = ma;
+    pending->seq = seq;
+}
+
+static inline bool Ldo_SameSeqReplay(bool have_result, uint8_t stored_seq,
+                                     uint8_t seq)
+{
+    return have_result && (stored_seq == seq);
 }
 
 #endif /* LDO_CTRL_POLICY_H */

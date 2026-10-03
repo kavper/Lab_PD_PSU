@@ -84,7 +84,7 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 
 ## Bring-up sequence
 
-1. Flash G0 + G4. Connect isolator UART (115200).
+1. Flash G0 + G4 together. Isolator UART is 460800 8N1, DMA, telemetry every 5 ms.
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
 3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends binary atomic SETPOINT → binary SET_OUTPUT=1.
 4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
@@ -105,4 +105,4 @@ Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`**
 | `g0_tlm` rising, `g0_vout_mv` tracking | Link OK — check G0 LED / `g0_kill` / `pgood` via G0 TLM on USART2, `g0_out` on `T` |
 | `permit=1` but G0 `kill=1` | Firmware was driving PERMIT on wrong pad (was PB6/REMOTE_ON); must be **PB7** |
 
-Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
+Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 460800; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
