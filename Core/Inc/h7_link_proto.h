@@ -48,6 +48,7 @@
 #define H7_LINK_METER                0x10U
 #define H7_LINK_BMS_TLM              0x11U
 #define H7_LINK_PD_TLM               0x12U
+#define H7_LINK_AUX_TLM              0x13U /* G0 DAC, NTC, fan, PGOOD, bleed */
 #define H7_LINK_TEXT                 0x20U
 #define H7_LINK_ACK                  0x81U /* u8 acknowledged type */
 #define H7_LINK_NACK                 0x82U /* u8 rejected type, u8 reason */
@@ -61,8 +62,29 @@
 #define H7_LINK_NACK_LINK            7U
 
 #define H7_LINK_METER_BYTES          72U
-#define H7_LINK_BMS_BYTES            56U
+#define H7_LINK_BMS_BYTES            72U
 #define H7_LINK_PD_BYTES             64U
+#define H7_LINK_AUX_BYTES            24U
+
+/* BMS bytes 0..52 match the previous 56-byte payload (53..55 stay zero). */
+#define H7_BMS_PASSQ_MAH             56U /* i32, DASTATUS6 mAh, signed */
+#define H7_BMS_SESSION_MAH           60U /* i32, zero; not a G4 coulomb counter */
+#define H7_BMS_SOC_PERMILLE          64U /* u16, from passQ after a voltage seed; 0xFFFF unknown */
+#define H7_BMS_CC1_MA                66U /* i16 */
+#define H7_BMS_INT_TEMP_DK           68U /* i16, 0.1 K; 0 = unread */
+#define H7_BMS_BALANCE               70U /* u8, bit0 = cell 1 */
+#define H7_BMS_SOC_FLAGS             71U /* u8, BMS_SOC_FLAG_* */
+
+#define H7_AUX_DAC_CV_MV             0U  /* u32, G0 CV DAC readback */
+#define H7_AUX_DAC_CC_MV             4U  /* u32, G0 CC DAC readback */
+#define H7_AUX_T1_CC                 8U  /* i16 °C×10, MOSFET; 253 = 25.3 °C; INT16_MIN invalid */
+#define H7_AUX_T2_CC                 10U /* i16 °C×10, ambient */
+#define H7_AUX_T3_CC                 12U /* i16 °C×10, bleeder */
+#define H7_AUX_T4_CC                 14U /* i16 °C×10, 3.3 V LDO / 15→5 V area */
+#define H7_AUX_FAN                   16U /* u8 percent */
+#define H7_AUX_PGOOD                 17U /* u8 */
+#define H7_AUX_BLEED                 18U /* u8 */
+#define H7_AUX_VALID                 19U /* u8, 1 when the G0 telemetry is live */
 
 #define H7_METER_VIN_MV              0U
 #define H7_METER_VOUT_MV             4U

@@ -238,7 +238,7 @@ static void HostLink_SendHelp(void)
         "HELP G4 USART1 460800 binary. METER 5 ms, BMS/PD 200 ms.\r\n"
         "  TEXT_CMD 0x21 carries these lines. TEL is ignored.\r\n"
         "  ON / OFF / SET V= I= / PERMIT / REMOTE / BMS / USB\r\n"
-        "  VERBOSE 0|1   TEXT diagnostics only, lowest TX priority\r\n"
+        "  VERBOSE       ignored on the production link\r\n"
         "  G0DIAG / G0SWAP / CLR / STATUS\r\n");
 }
 
@@ -428,17 +428,8 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "VERBOSE")) {
-        if ((*arg == '\0') || HostLink_EqToken(arg, "1") || HostLink_EqToken(arg, "ON")) {
-            Debug_SetEnabled(true);
-            HostLink_Tx("OK VERBOSE 1 (TEXT frames, lowest priority)\r\n");
-            return;
-        }
-        if (HostLink_EqToken(arg, "0") || HostLink_EqToken(arg, "OFF")) {
-            Debug_SetEnabled(false);
-            HostLink_Tx("OK VERBOSE 0\r\n");
-            return;
-        }
-        HostLink_Tx("ERR VERBOSE use: VERBOSE 0|1\r\n");
+        (void)arg;
+        HostLink_Tx("OK VERBOSE ignored (production link, TEXT only)\r\n");
         return;
     }
     if (HostLink_EqToken(line, "BMS") || HostLink_EqToken(line, "BMSREINIT")) {
@@ -733,6 +724,13 @@ static void HostLink_QueueSlow(void)
     H7Link_PutU16(&bms_payload[46], (uint16_t)bms.stack_mv);
     H7Link_PutI32(&bms_payload[48], bms.cc2_ma);
     bms_payload[52] = bms.sample_valid ? 1U : 0U;
+    H7Link_PutI32(&bms_payload[H7_BMS_PASSQ_MAH], bms.passq_mah);
+    H7Link_PutI32(&bms_payload[H7_BMS_SESSION_MAH], bms.session_mah);
+    H7Link_PutU16(&bms_payload[H7_BMS_SOC_PERMILLE], bms.soc_permille);
+    H7Link_PutU16(&bms_payload[H7_BMS_CC1_MA], (uint16_t)bms.cc1_ma);
+    H7Link_PutU16(&bms_payload[H7_BMS_INT_TEMP_DK], (uint16_t)bms.int_temp_dk);
+    bms_payload[H7_BMS_BALANCE] = bms.balance_mask;
+    bms_payload[H7_BMS_SOC_FLAGS] = bms.soc_flags;
 
     if (pm.bq.input_present) flags |= 0x01U;
     if (pm.bq.in_precharge) flags |= 0x02U;
@@ -769,6 +767,30 @@ static void HostLink_QueueSlow(void)
                               H7_LINK_BMS_BYTES, LINK_UART_PRI_SLOW, 0U);
     (void)HostLink_QueueFrame(H7_LINK_PD_TLM, s_host_tx_seq++, pd_payload,
                               H7_LINK_PD_BYTES, LINK_UART_PRI_SLOW, 1U);
+    {
+        uint8_t aux_payload[H7_LINK_AUX_BYTES];
+        LdoLink_Status_t ldo;
+        uint8_t i;
+
+        memset(aux_payload, 0, sizeof(aux_payload));
+        LdoLink_GetStatus(&ldo);
+        H7Link_PutU32(&aux_payload[H7_AUX_DAC_CV_MV], ldo.dac_cv_mv);
+        H7Link_PutU32(&aux_payload[H7_AUX_DAC_CC_MV], ldo.dac_cc_mv);
+        for (i = 0U; i < 4U; i++) {
+            int16_t deci_c = ldo.telemetry_valid ? ldo.temp_centi_c[i]
+                                                 : (int16_t)INT16_MIN;
+
+            /* G0 already scaled to °C×10. Copy the int16; do not rescale. */
+            H7Link_PutU16(&aux_payload[H7_AUX_T1_CC + (uint8_t)(2U * i)],
+                          (uint16_t)deci_c);
+        }
+        aux_payload[H7_AUX_FAN] = ldo.fan_percent;
+        aux_payload[H7_AUX_PGOOD] = ldo.pgood;
+        aux_payload[H7_AUX_BLEED] = ldo.bleed_request;
+        aux_payload[H7_AUX_VALID] = ldo.telemetry_valid ? 1U : 0U;
+        (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
+                                  H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
+    }
 }
 
 static void HostLink_FinishOn(bool ack, uint8_t reason)
