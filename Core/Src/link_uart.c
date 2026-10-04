@@ -95,17 +95,20 @@ static void LinkUart_PumpTx(LinkUart *link)
         length = link->fast_len;
         link->fast_pending = false;
         have = true;
-    } else if (link->slow_pending[0]) {
-        memcpy(link->tx, link->slow[0], link->slow_len[0]);
-        length = link->slow_len[0];
-        link->slow_pending[0] = false;
-        have = true;
-    } else if (link->slow_pending[1]) {
-        memcpy(link->tx, link->slow[1], link->slow_len[1]);
-        length = link->slow_len[1];
-        link->slow_pending[1] = false;
-        have = true;
-    } else if (link->text_count > 0U) {
+    } else {
+        uint8_t slot;
+
+        for (slot = 0U; slot < LINK_UART_SLOW_SLOTS; slot++) {
+            if (link->slow_pending[slot]) {
+                memcpy(link->tx, link->slow[slot], link->slow_len[slot]);
+                length = link->slow_len[slot];
+                link->slow_pending[slot] = false;
+                have = true;
+                break;
+            }
+        }
+    }
+    if (!have && (link->text_count > 0U)) {
         have = LinkUart_FifoPop(link->text, link->text_len, &link->text_head,
                                 &link->text_tail, &link->text_count, link->tx,
                                 &length);
@@ -215,7 +218,7 @@ bool LinkUart_Submit(LinkUart *link, LinkUartPri pri, uint8_t slow_index,
         link->fast_pending = true;
         return true;
     }
-    if (slow_index > 1U) {
+    if (slow_index >= LINK_UART_SLOW_SLOTS) {
         return false;
     }
     memcpy(link->slow[slow_index], frame, length);

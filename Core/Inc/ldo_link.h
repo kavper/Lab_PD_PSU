@@ -42,6 +42,9 @@ typedef struct {
     uint32_t iset_ma;
     uint32_t iout_ma;
     uint32_t vpre_mv;
+    uint32_t dac_cv_mv;
+    uint32_t dac_cc_mv;
+    int16_t temp_centi_c[4]; /* T1 MOSFET, T2 ambient, T3 bleeder, T4 LDO */
     uint32_t fault_flags;
     bool vpre_present;
     uint32_t last_tlm_ms;

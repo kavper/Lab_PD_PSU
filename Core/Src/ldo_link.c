@@ -212,6 +212,11 @@ static uint16_t LdoLink_Crc16Update(uint16_t crc, uint8_t byte)
     return crc;
 }
 
+static int16_t LdoLink_GetI16Le(const uint8_t *data)
+{
+    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
 static uint32_t LdoLink_GetU32Le(const uint8_t *data)
 {
     return (uint32_t)data[0] |
@@ -427,6 +432,8 @@ static void LdoLink_HandleTelemetry(const uint8_t *payload,
     s_status.vout_mv = LdoLink_GetU32Le(&payload[0]);
     s_status.iout_ma = LdoLink_GetU32Le(&payload[4]);
     s_status.vin_mv = LdoLink_GetU32Le(&payload[8]);
+    s_status.dac_cv_mv = LdoLink_GetU32Le(&payload[12]);
+    s_status.dac_cc_mv = LdoLink_GetU32Le(&payload[16]);
     s_status.vset_mv = LdoLink_GetU32Le(&payload[20]);
     s_status.iset_ma = LdoLink_GetU32Le(&payload[24]);
     s_status.vpre_mv = LdoLink_GetU32Le(&payload[28]);
@@ -442,6 +449,10 @@ static void LdoLink_HandleTelemetry(const uint8_t *payload,
         (void)strncpy(s_status.fault, "G0_FLAGS", sizeof(s_status.fault) - 1U);
     }
     s_status.fault[sizeof(s_status.fault) - 1U] = '\0';
+    s_status.temp_centi_c[0] = LdoLink_GetI16Le(&payload[56]);
+    s_status.temp_centi_c[1] = LdoLink_GetI16Le(&payload[58]);
+    s_status.temp_centi_c[2] = LdoLink_GetI16Le(&payload[60]);
+    s_status.temp_centi_c[3] = LdoLink_GetI16Le(&payload[62]);
     s_status.fan_percent = payload[64];
     s_status.kill_reported = payload[65] != 0U;
     s_status.cc_cv = payload[66] != 0U;
@@ -881,6 +892,10 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
 void LdoLink_Init(UART_HandleTypeDef *huart_g0)
 {
     memset(&s_status, 0, sizeof(s_status));
+    s_status.temp_centi_c[0] = (int16_t)INT16_MIN;
+    s_status.temp_centi_c[1] = (int16_t)INT16_MIN;
+    s_status.temp_centi_c[2] = (int16_t)INT16_MIN;
+    s_status.temp_centi_c[3] = (int16_t)INT16_MIN;
     strncpy(s_status.fault, "NONE", sizeof(s_status.fault) - 1U);
 
     s_huart_g0 = huart_g0;

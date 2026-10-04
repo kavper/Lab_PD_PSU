@@ -201,10 +201,14 @@ int main(void)
                        "bad CRC has no effect");
         }
         ExpectTrue(H7_LINK_METER_BYTES == 72U, "METER payload is 72 bytes");
+        ExpectTrue(H7_LINK_BMS_BYTES == 72U, "BMS payload is 72 bytes");
+        ExpectTrue(H7_LINK_AUX_BYTES == 24U, "AUX payload is 24 bytes");
         ExpectTrue((H7_LINK_METER_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                    "METER frame fits in 120 bytes");
         ExpectTrue((H7_LINK_BMS_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                    "BMS frame fits in 120 bytes");
+        ExpectTrue((H7_LINK_AUX_BYTES + 7U) <= H7_LINK_MAX_FRAME,
+                   "AUX frame fits in 120 bytes");
         ExpectTrue((H7_LINK_PD_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                    "PD frame fits in 120 bytes");
     }

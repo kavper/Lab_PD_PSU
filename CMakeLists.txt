@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/board_mx.c
     Core/Src/bq25731.c
     Core/Src/bq76922.c
+    Core/Src/bms_soc.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
     Core/Src/fan_pwm.c

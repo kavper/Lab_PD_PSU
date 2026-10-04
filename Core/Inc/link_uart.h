@@ -14,6 +14,7 @@
 #define LINK_UART_RX_BYTES           512U
 #define LINK_UART_FRAME_MAX          120U
 #define LINK_UART_FIFO_DEPTH         4U
+#define LINK_UART_SLOW_SLOTS         3U
 
 typedef enum {
     LINK_UART_PRI_SAFETY = 0,
@@ -43,9 +44,9 @@ typedef struct {
     uint8_t fast[LINK_UART_FRAME_MAX];
     uint16_t fast_len;
     bool fast_pending;
-    uint8_t slow[2][LINK_UART_FRAME_MAX];
-    uint16_t slow_len[2];
-    bool slow_pending[2];
+    uint8_t slow[LINK_UART_SLOW_SLOTS][LINK_UART_FRAME_MAX];
+    uint16_t slow_len[LINK_UART_SLOW_SLOTS];
+    bool slow_pending[LINK_UART_SLOW_SLOTS];
     uint8_t text[LINK_UART_FIFO_DEPTH][LINK_UART_FRAME_MAX];
     uint16_t text_len[LINK_UART_FIFO_DEPTH];
     uint8_t text_head;

@@ -75,6 +75,15 @@ typedef struct {
     uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
+    /* Session SOC. passq is the AFE register; session_mah is the G4 integral. */
+    int32_t passq_mah;
+    int32_t session_mah;
+    uint16_t soc_permille;
+    int16_t cc1_ma;
+    int16_t int_temp_dk;
+    uint8_t balance_mask;
+    uint8_t soc_flags;
+    bool passq_valid;
 } BQ76922_Snapshot_t;
 
 typedef struct {
