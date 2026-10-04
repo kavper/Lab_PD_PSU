@@ -246,18 +246,18 @@ Wejście ma około 18,3 kΩ (220 kΩ || 20 kΩ) i 10 nF, więc stała czasowa to
 
 Spadki: `DP = local_mv − remote_p_mv`, `DN = remote_n_mv`, `VD = remote_p_mv − remote_n_mv`. Osobno pilnowane są DP, DN, suma DP+DN oraz górny zakres lokalnego pomiaru.
 
-Limity przewodów i błąd toru to dwa zestawy liczb. Do sprawdzenia na płytce: 500 mV na przewód i 1000 mV łącznie (`SENSE_DROP_WIRE_MV`, `SENSE_DROP_SUM_MV`). To punkt startowy pomiaru, nie zamknięta specyfikacja. Budżet jednego toru, bez zapisanej kalibracji DMM: 1,85% (dzielnik 220 kΩ / 20 kΩ, rezystory 1%, najgorszy stosunek) i 40 mV (około 4 LSB przy 8,8 mV). Przy 12 V sam błąd DP ma około 0,5 V, więc odczyt 800 mV jeszcze przechodzi. Próg niskiego napięcia wychodzi z tego budżetu: lokalne Vout musi być wyższe niż `(500 mV + 2×40 mV) / (1 − 0,019)`, czyli 592 mV. Poniżej kod to `NOT_READY` i cewka zostaje w local.
+Limity przewodów i błąd toru to dwa zestawy liczb. Do sprawdzenia na płytce: 500 mV na przewód i 1000 mV łącznie (`SENSE_DROP_WIRE_MV`, `SENSE_DROP_SUM_MV`). To punkt startowy pomiaru, nie zamknięta specyfikacja. Budżet jednego toru, bez zapisanej kalibracji DMM: 1,85% (dzielnik 220 kΩ / 20 kΩ, rezystory 1%, najgorszy stosunek) i 40 mV (około 4 LSB przy 8,8 mV). Przy 12 V sam błąd DP ma około 0,5 V, więc odczyt 800 mV jeszcze przechodzi. Próg niskiego napięcia wychodzi z tego budżetu: lokalne Vout musi być wyższe niż `(500 mV + 2×40 mV) / (1 − 0,019)`, czyli 592 mV. Poniżej kod to `NOT_READY`. To osobny stan od awarii remote: przed kliknięciem cewka zostaje w local, a po kliknięciu zostaje zamknięta i PERMIT zostaje. Zwarcie obciążenia w CC, które ściąga wyjście do zera, jest właśnie tym stanem.
 
-R112 4,7 kΩ dociąga odłączony plus do `240 / 244,7` napięcia wyjścia, około 98,1%. R115 4,7 kΩ trzyma odłączony minus przy masie. Taki odczyt mieści się w spadku i dostaje `OK` zarówno przed kliknięciem K1, jak i później, także w CV. Pełne wykrycie przerwy w czasie pracy wymaga osobnej diagnostyki sprzętowej.
+R112 i R115 (4,7 kΩ) siedzą przy wspólnych stykach `V_SNS_P` / `V_SNS_N`. Dociągają przewody remote dopiero przy załączonym K1. Wtedy odłączony plus czyta `240 / 244,7` napięcia wyjścia, około 98,1%, a odłączony minus zostaje przy masie. Taki odczyt dostaje `OK` i nie jest wykrytą przerwą. Przed załączeniem te rezystory nie sięgają przewodów: odłączony plus opada do masy na własnym dzielniku i blokuje kliknięcie. Pełne wykrycie przerwy przy pracującym K1 wymaga osobnej diagnostyki sprzętowej.
 
-Przed załączeniem zły przewód zostawia cewkę w local i nie rusza PERMIT. Po załączeniu błąd spadku, brak próbki ADC albo — tylko w CV — trzy próbki, w których VD mija nastawę, otwierają K1, zdejmują PERMIT i zapalają bit2. W CC napięcie na obciążeniu nie jest porównywane z nastawą. Ponowne remote wymaga `REMOTE 0`, potem `REMOTE 1` i znowu trzech zgodnych próbek. Najbliższe `ON` hosta zdejmuje blokadę PERMIT; zatrzask cewki trzyma się osobno.
+Przed załączeniem zły przewód zostawia cewkę w local i nie rusza PERMIT. OFF hosta puszcza K1 bez zatrzasku. Po załączeniu błąd spadku, brak próbki ADC albo — tylko w CV — trzy próbki, w których VD mija nastawę, najpierw schodzą ścieżką natychmiastowego OFF (pin PERMIT od razu), a dopiero potem puszczają K1 i zapalają bit2. W CC napięcie na obciążeniu nie jest porównywane z nastawą. Ponowne remote wymaga `REMOTE 0`, potem `REMOTE 1` i znowu trzech zgodnych próbek. Najbliższe `ON` hosta zdejmuje blokadę PERMIT; zatrzask cewki trzyma się osobno.
 
 `sense_code`:
 
 | Kod | Nazwa | Co pokazać |
 |---:|---|---|
 | 0 | OK | DP, DN i suma mieszczą się w limicie plus budżet błędu |
-| 1 | NOT_READY | lokalne Vout poniżej progu z budżetu (592 mV przy limicie 500 mV). Przewody nie są oceniane |
+| 1 | NOT_READY | lokalne Vout poniżej 592 mV. Przewody nie są oceniane. Przy zamkniętym K1 to nie jest awaria: cewka i PERMIT zostają. OFF hosta i tak wraca do local |
 | 2 | DROP_P | spadek na plusie poza limitem i błędem pomiaru |
 | 3 | DROP_SUM | każdy przewód osobno wchodzi, suma nie |
 | 4 | REVERSED | minus jest przy wyjściu, plus nie |

@@ -33,7 +33,50 @@ static SenseInput Sample(uint32_t local_mv, uint32_t remote_p_mv,
     in.have_sample = true;
     in.compare_setpoint = compare;
     in.wanted = wanted;
+    in.output_on = true;
     return in;
+}
+
+typedef struct {
+    bool permit;
+    bool relay;
+    bool permit_saw_relay;
+    bool relay_saw_permit;
+    int tick;
+    int permit_tick;
+    int relay_tick;
+    int permit_calls;
+} SensePlant;
+
+static void PlantPermit(void *ctx)
+{
+    SensePlant *plant = (SensePlant *)ctx;
+
+    plant->permit_saw_relay = plant->relay;
+    plant->permit = false;
+    plant->permit_calls++;
+    plant->permit_tick = ++plant->tick;
+}
+
+static void PlantRelay(void *ctx, bool closed)
+{
+    SensePlant *plant = (SensePlant *)ctx;
+
+    plant->relay_saw_permit = plant->permit;
+    plant->relay = closed;
+    plant->relay_tick = ++plant->tick;
+}
+
+static void PlantReset(SensePlant *plant, bool relay)
+{
+    plant->permit = true;
+    plant->relay = relay;
+    plant->permit_saw_relay = false;
+    plant->relay_saw_permit = true;
+    plant->tick = 0;
+    plant->permit_tick = 0;
+    plant->relay_tick = 0;
+    plant->permit_calls = 0;
 }
 
 static SenseStep Feed(SenseGate *gate, SenseInput in)
@@ -101,15 +144,15 @@ int main(void)
     ExpectEq(Sense_Classify(12000U, 6000U, 6000U), SENSE_SHORT,
              "sense leads shorted together at mid-rail");
 
-    /* Plus held at ground is a real DP fault. R112 would not read 0 V. */
+    /* Before K1, an open wire has no R112 pull and sits near ground. */
     ExpectEq(Sense_Classify(12000U, 0U, 0U), SENSE_DROP_P,
-             "plus at ground is an excessive drop");
+             "open remote leads before K1 read near ground");
 
-    /* R112/R115 signature, before K1. This is not a detected break. */
+    /* 98.1% is the open-plus reading only after K1 ties COM to the wire. */
     ExpectEq(Sense_Classify(12000U, open_p, 0U), SENSE_OK,
-             "open plus via R112 and open minus via R115 read as a small drop");
+             "with K1 closed, R112/R115 look like a small drop");
     ExpectEq(Sense_Classify(24000U, Sense_OpenPlusMv(24000U), 0U), SENSE_OK,
-             "the same open pair at 24 V is still inside the budget");
+             "the same closed-relay open pair at 24 V stays inside the budget");
 
     ExpectEq(Sense_Classify(min_local - 1U, min_local - 1U, 0U), SENSE_NOT_READY,
              "below the budget threshold the leads are not judged");
@@ -127,15 +170,16 @@ int main(void)
     ExpectEq(Sense_Classify(2000U, 1400U, 500U), SENSE_OK,
              "the same pair passes the 1000 mV bench sum");
 
-    /* Before close: R112 signature is allowed to close. It is not an open code. */
+    /* Before close the open pair is near ground, so K1 stays open. */
     Sense_GateInit(&gate);
     Sense_GateRequest(&gate, true);
     for (i = 0U; i < 3U; i++) {
-        step = Feed(&gate, Sample(12000U, open_p, 0U, 12000U, false, true));
+        step = Feed(&gate, Sample(12000U, 0U, 0U, 12000U, false, true));
     }
-    ExpectEq(step.code, SENSE_OK, "R112 signature before close stays OK");
-    ExpectTrue(step.closed, "the undetectable open is not blocked before K1");
-    ExpectTrue(!step.drop_permit, "that close does not drop PERMIT");
+    ExpectEq(step.code, SENSE_DROP_P, "open leads before K1");
+    ExpectTrue(!step.closed, "open leads before K1 do not close the relay");
+    ExpectTrue(!step.drop_permit && !step.latched,
+               "a refused close leaves PERMIT up and does not latch");
 
     Sense_GateInit(&gate);
     Sense_GateRequest(&gate, true);
@@ -164,9 +208,8 @@ int main(void)
     ExpectTrue(!step.drop_permit, "a fault before close does not drop PERMIT");
     ExpectTrue(!step.latched, "a fault before close does not latch");
 
-    /* After close: R112 signature is still not a break and not critical.
-     * In CV the 1.9% deficit also sits inside the VD error, so the setpoint
-     * check does not turn it into a detected break either. */
+    /* After close, R112/R115 pull the open wires. That is not a detected break.
+     * In CV the 1.9% deficit also sits inside the VD error. */
     Sense_GateInit(&gate);
     CloseGood(&gate);
     for (i = 0U; i < 3U; i++) {
@@ -242,6 +285,75 @@ int main(void)
     ExpectTrue(!step.closed, "CV fault opens K1");
     ExpectTrue(step.drop_permit, "CV fault drops PERMIT");
     ExpectTrue(step.latched, "CV fault latches");
+
+    /* CC load short: the output falls through the floor to 0 V and stays remote. */
+    Sense_GateInit(&gate);
+    CloseGood(&gate);
+    step = Feed(&gate, Sample(2000U, 1700U, 150U, 12000U, false, true));
+    ExpectEq(step.code, SENSE_OK, "CC still above the floor is a normal drop");
+    ExpectTrue(step.closed && !step.drop_permit, "CC above the floor stays remote");
+    step = Feed(&gate, Sample(400U, 400U, 0U, 12000U, false, true));
+    ExpectEq(step.code, SENSE_NOT_READY, "CC under 592 mV is low voltage");
+    ExpectTrue(step.closed, "a CC short leaves K1 closed");
+    ExpectTrue(!step.drop_permit && !step.latched, "a CC short does not fault");
+    step = Feed(&gate, Sample(0U, 0U, 0U, 12000U, false, true));
+    ExpectEq(step.code, SENSE_NOT_READY, "CC at 0 V is still low voltage");
+    ExpectTrue(step.closed && !step.latched && !step.drop_permit,
+               "CC at 0 V keeps PERMIT and the relay");
+    step = Feed(&gate, Sample(12000U, 11600U, 300U, 12000U, false, true));
+    ExpectEq(step.code, SENSE_OK, "CC recovery is OK again");
+    ExpectTrue(step.closed && !step.latched, "CC recovery stays remote");
+
+    /* Host OFF releases K1 and does not latch, even while voltage is still high. */
+    in = Sample(12000U, 11600U, 300U, 12000U, false, true);
+    in.output_on = false;
+    step = Feed(&gate, in);
+    ExpectTrue(!step.closed, "OFF returns the relay to local");
+    ExpectTrue(!step.latched && !step.drop_permit, "OFF does not latch or drop PERMIT");
+    in.output_on = true;
+    for (i = 0U; i < 2U; i++) {
+        step = Feed(&gate, in);
+        ExpectTrue(!step.closed, "after OFF the close streak starts over");
+    }
+    step = Feed(&gate, in);
+    ExpectTrue(step.closed && !step.latched, "three new samples may close again");
+
+    /* OFF while a real fault is latched must leave that latch set. */
+    step = Feed(&gate, Sample(12000U, 0U, 0U, 12000U, false, true));
+    ExpectTrue(step.latched && step.drop_permit, "wiring fault after close still latches");
+    in = Sample(400U, 0U, 0U, 12000U, false, true);
+    in.output_on = false;
+    step = Feed(&gate, in);
+    ExpectTrue(step.latched && !step.closed && !step.drop_permit,
+               "OFF keeps an existing latch and does not drop PERMIT again");
+
+    /* Critical path: PERMIT pin off, then K1. */
+    {
+        SensePlant plant;
+
+        Sense_GateInit(&gate);
+        CloseGood(&gate);
+        PlantReset(&plant, true);
+        step = Feed(&gate, Sample(12000U, 200U, 11800U, 12000U, false, true));
+        ExpectTrue(step.drop_permit && !step.closed, "reversed leads after close are critical");
+        Sense_Commit(&step, true, &plant, PlantPermit, PlantRelay);
+        ExpectEq((unsigned)plant.permit_calls, 1U, "the critical step drops PERMIT once");
+        ExpectTrue(plant.permit_saw_relay, "PERMIT drops while K1 is still closed");
+        ExpectTrue(!plant.relay_saw_permit, "K1 opens only after PERMIT is already off");
+        ExpectTrue(plant.permit_tick != 0 && plant.relay_tick > plant.permit_tick,
+                   "the PERMIT callback runs before the relay callback");
+        ExpectTrue(!plant.permit && !plant.relay, "both the pin and the relay end released");
+
+        PlantReset(&plant, true);
+        Sense_GateInit(&gate);
+        CloseGood(&gate);
+        in = Sample(12000U, 11600U, 300U, 12000U, false, true);
+        in.output_on = false;
+        step = Feed(&gate, in);
+        Sense_Commit(&step, true, &plant, PlantPermit, PlantRelay);
+        ExpectEq((unsigned)plant.permit_calls, 0U, "OFF does not take the permit-off path");
+        ExpectTrue(!plant.relay && plant.permit, "OFF opens only the relay");
+    }
 
     /* ADC loss while still local. */
     Sense_GateInit(&gate);

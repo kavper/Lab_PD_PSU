@@ -1,6 +1,7 @@
 #ifndef SENSE_CHECK_H
 #define SENSE_CHECK_H
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -13,15 +14,18 @@
  * to 3.3 V and ground. The ADC reference is 3.0 V, so full scale is 36 V.
  *
  * PB0 and PB1 stay on REMOTE_P and REMOTE_N. K1 only moves the LDO sense
- * amp: coil off, COM is local VOUT and local GND; coil on, COM is the
- * remote pair. The wire check therefore runs while regulation is still local.
+ * amp: coil off, COM (V_SNS_P / V_SNS_N) is local VOUT and local GND; coil
+ * on, COM is the remote pair. The wire check therefore runs while regulation
+ * is still local.
  *
- * R112 (4.7 kΩ) sits from local VOUT onto REMOTE_P. The divider loads it
- * with 240 kΩ, so an open positive lead rests at 240/244.7 of Vout (98.1%).
- * R115 (4.7 kΩ) holds an open negative lead at ground, the same reading as
- * a return lead with no current. That pair is inside a normal drop and is
- * reported as OK. It is not a detected break. A break that must be caught
- * while K1 is closed needs a different hardware diagnostic.
+ * R112 and R115 (4.7 kΩ) sit on those common contacts, from local VOUT to
+ * V_SNS_P and from V_SNS_N to ground. They reach the remote wires only while
+ * K1 is energized. An open positive lead then rests at 240/244.7 of Vout
+ * (98.1%), and an open negative lead rests at ground. That pair is inside a
+ * normal drop and is reported as OK. It is not a detected break. Before K1
+ * closes, the same resistors do not pull the remote wires: an open lead falls
+ * toward ground on its own divider and blocks the close. A break that must
+ * be caught while K1 is closed needs a different hardware diagnostic.
  *
  * Each channel's uncalibrated error is separate from the cable-drop limits.
  * No DMM trim is stored. SENSE_GAIN_PPM and SENSE_OFFSET_MV are the budget:
@@ -43,8 +47,14 @@
  * reading. Before K1 closes it also requires SENSE_OK_STREAK samples that
  * agree within the channel budget. After close it keeps watching the drops
  * and a missed conversion. In CV it also waits for VD to meet the setpoint;
- * in CC that comparison stays off. A critical sample opens the relay,
- * latches it open, and asks the caller to drop PERMIT.
+ * in CC that comparison stays off, and a descent of the output to zero is
+ * the low-voltage state rather than a wiring fault.
+ *
+ * Below Sense_MinLocalMv the sample is NOT_READY. That is separate from a
+ * remote failure: with K1 already closed the relay stays shut and PERMIT
+ * stays up, including a CC load short that falls to 0 V. Host OFF opens the
+ * relay and does not latch. A real fault asks the caller to drop PERMIT
+ * first and only then to open K1, and it latches remote off.
  */
 
 #define SENSE_DIVIDER_NUM            12U
@@ -74,7 +84,7 @@
 
 enum {
     SENSE_OK = 0,         /* DP, DN and the sum sit inside limit + error */
-    SENSE_NOT_READY = 1,  /* local Vout is below the budget threshold */
+    SENSE_NOT_READY = 1,  /* local Vout is below the budget threshold; not a fault */
     SENSE_DROP_P = 2,     /* positive drop outside the wire limit and its error */
     SENSE_DROP_SUM = 3,   /* each wire passes, the sum does not */
     SENSE_REVERSED = 4,   /* negative lead is up at the output, positive is not */
@@ -100,6 +110,7 @@ typedef struct {
     bool have_sample;
     bool compare_setpoint;
     bool wanted;
+    bool output_on; /* host output request; OFF releases K1 without a latch */
 } SenseInput;
 
 typedef struct {
@@ -186,6 +197,7 @@ static inline uint32_t Sense_MinLocalMv(uint32_t wire_limit_mv)
     return (uint32_t)((num + den - 1ULL) / den);
 }
 
+/* Voltage at an open REMOTE_P pin while K1 ties it to V_SNS_P. */
 static inline uint32_t Sense_OpenPlusMv(uint32_t local_mv)
 {
     return (uint32_t)(((uint64_t)local_mv * (uint64_t)SENSE_OPEN_PLUS_NUM) /
@@ -416,6 +428,28 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
         return step;
     }
 
+    /*
+     * Host OFF. The output path has already dropped PERMIT. Release K1
+     * without creating a latch, and leave a latch that a real fault set.
+     */
+    if (!in->output_on) {
+        gate->closed = false;
+        gate->streak = 0U;
+        gate->cv_streak = 0U;
+        gate->have_prev = false;
+        if (in->have_sample) {
+            gate->code = Sense_Classify(in->local_mv, in->remote_p_mv,
+                                        in->remote_n_mv);
+        } else {
+            gate->code = SENSE_NO_SAMPLE;
+        }
+        step.code = gate->code;
+        step.closed = false;
+        step.latched = gate->latched;
+        step.drop_permit = false;
+        return step;
+    }
+
     if (!in->have_sample) {
         gate->have_prev = false;
         gate->streak = 0U;
@@ -433,6 +467,22 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
 
     code = Sense_Classify(in->local_mv, in->remote_p_mv, in->remote_n_mv);
     gate->code = code;
+
+    /*
+     * Low voltage is not a wiring fault. A closed relay stays closed through
+     * a CC short or any other descent under the budget floor. PERMIT stays.
+     */
+    if (code == SENSE_NOT_READY) {
+        gate->have_prev = false;
+        gate->streak = 0U;
+        gate->cv_streak = 0U;
+        gate->closed = was_closed;
+        step.code = SENSE_NOT_READY;
+        step.closed = was_closed;
+        step.latched = false;
+        step.drop_permit = false;
+        return step;
+    }
 
     if (code != SENSE_OK) {
         gate->have_prev = false;
@@ -501,6 +551,25 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
     step.closed = true;
     step.latched = false;
     return step;
+}
+
+typedef void (*SensePermitOffFn)(void *ctx);
+typedef void (*SenseRelayFn)(void *ctx, bool closed);
+
+/*
+ * A critical step drops the output (PERMIT pin included) and only then opens
+ * K1. Host OFF has drop_permit clear, so this only moves the relay.
+ */
+static inline void Sense_Commit(const SenseStep *step, bool relay_closed,
+                               void *ctx, SensePermitOffFn permit_off,
+                               SenseRelayFn drive)
+{
+    if ((step->drop_permit) && (permit_off != NULL)) {
+        permit_off(ctx);
+    }
+    if ((drive != NULL) && (relay_closed != step->closed)) {
+        drive(ctx, step->closed);
+    }
 }
 
 #endif /* SENSE_CHECK_H */

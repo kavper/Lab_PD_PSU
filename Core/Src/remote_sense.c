@@ -3,7 +3,6 @@
 #include "board_rev.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
-#include "ldo_prereg.h"
 #include "sense_check.h"
 
 #define SENSE_SPIN_LIMIT                 200000U
@@ -34,12 +33,19 @@ static void RemoteSense_Drive(bool closed)
                  (unsigned int)s_gate.code);
 }
 
-static void RemoteSense_DropPermit(void)
+static void RemoteSense_PermitOff(void *ctx)
 {
-    LdoPrereg_SetPermitOverrideOff(true);
-    LdoPrereg_SetForceDisable(true);
-    Debug_Printf("[SENSE] critical code=%u permit off, local, latched\r\n",
+    (void)ctx;
+    /* Pin and output request change here, before RemoteSense_Drive. */
+    LdoLink_RequestOutput(false);
+    Debug_Printf("[SENSE] critical code=%u permit pin off, output off\r\n",
                  (unsigned int)s_gate.code);
+}
+
+static void RemoteSense_DriveCb(void *ctx, bool closed)
+{
+    (void)ctx;
+    RemoteSense_Drive(closed);
 }
 
 static bool RemoteSense_ConfigInjected(ADC_HandleTypeDef *hadc)
@@ -222,6 +228,7 @@ void RemoteSense_Task(void)
     in.have_sample = sampled;
     in.compare_setpoint = false;
     in.wanted = s_gate.wanted;
+    in.output_on = LdoLink_IsOutputWanted();
 
     if (sampled) {
         s_local_mv = Sense_MvToU16(local_mv);
@@ -239,8 +246,5 @@ void RemoteSense_Task(void)
     }
 
     step = Sense_GateStep(&s_gate, &in);
-    if (step.drop_permit) {
-        RemoteSense_DropPermit();
-    }
-    RemoteSense_Drive(step.closed);
+    Sense_Commit(&step, s_closed, NULL, RemoteSense_PermitOff, RemoteSense_DriveCb);
 }
