@@ -4,6 +4,7 @@
 #include "board_rev.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
+#include "prereg_request.h"
 
 #include <string.h>
 
@@ -11,6 +12,8 @@
 #define LDO_TLM_STALE_MS                     500U
 #define PREREG_SLEW_UP_V_PER_S               10.0f
 #define PREREG_SLEW_DOWN_V_PER_S             0.3f
+/* CC fold stays at or above the VIN floor, so it may come down faster. */
+#define PREREG_SLEW_DOWN_CC_V_PER_S          5.0f
 #define PREREG_REGULATION_BAND_V             0.50f
 #define PREREG_PERMIT_SETTLE_MS              150U
 #define PREREG_PERMIT_RELEASE_MS             50U
@@ -91,9 +94,14 @@ static bool Prereg_NeedVinFloor(const LdoLink_Status_t *ldo)
     return (ldo != NULL) && ldo->output_on;
 }
 
+/* Filtered mode, not the raw CC/CV pin. A pin glitch must not drop the floor. */
+static bool Prereg_InCc(const LdoLink_Status_t *ldo)
+{
+    return (ldo != NULL) && (ldo->mode == LDO_G0_MODE_CC);
+}
+
 static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
 {
-    float request_v;
     float floor_v;
 
     if (ldo == NULL) {
@@ -104,47 +112,34 @@ static float Prereg_ComputeRequestV(const LdoLink_Status_t *ldo)
     }
 
     floor_v = Prereg_ActiveFloorV(ldo);
-
-    /* OUT off but host still wants output: hold CV floor (never dive to 3 V). */
-    if (!ldo->output_on) {
-        if (LdoLink_IsOutputWanted()) {
-            return Prereg_ClampV(floor_v);
-        }
-        return BOARD_VPRE_MIN_V;
-    }
-
-    /*
-     * Floor at max(vset+margin, VIN_FLOOR). G0 in CC asks for vout+margin;
-     * when the load collapses vout that request falls toward VPRE_MIN and
-     * used to slew the pre-reg into a VIN_LOW death spiral.
-     */
-    if (ldo->vpre_present && (ldo->vpre_mv > 0U)) {
-        request_v = (float)ldo->vpre_mv / 1000.0f;
-    } else if ((ldo->cc_cv != 0U) || (ldo->mode == LDO_G0_MODE_CC)) {
-        request_v = ((float)ldo->vout_mv / 1000.0f) + BOARD_VPRE_MARGIN_V;
-    } else {
-        request_v = floor_v;
-    }
-
-    if (request_v < floor_v) {
-        request_v = floor_v;
-    }
-
-    return Prereg_ClampV(request_v);
+    return Prereg_SelectRequestV(ldo->output_on,
+                                 LdoLink_IsOutputWanted(),
+                                 Prereg_InCc(ldo),
+                                 ldo->vpre_present && (ldo->vpre_mv > 0U),
+                                 (float)ldo->vpre_mv / 1000.0f,
+                                 (float)ldo->vout_mv / 1000.0f,
+                                 floor_v,
+                                 BOARD_VPRE_MARGIN_V,
+                                 BOARD_VPRE_VIN_FLOOR_V,
+                                 BOARD_VPRE_MIN_V,
+                                 BOARD_VPRE_MAX_V);
 }
 
-static void Prereg_UpdateSlew(float request_v, float dt_s, bool hold_vin_floor)
+static void Prereg_UpdateSlew(float request_v, float dt_s, bool hold_vin_floor,
+                              bool cc_fold)
 {
     float delta;
     float max_up;
     float max_down;
+    float down_v_per_s;
 
     if (dt_s <= 0.0f) {
         return;
     }
 
+    down_v_per_s = cc_fold ? PREREG_SLEW_DOWN_CC_V_PER_S : PREREG_SLEW_DOWN_V_PER_S;
     max_up = PREREG_SLEW_UP_V_PER_S * dt_s;
-    max_down = PREREG_SLEW_DOWN_V_PER_S * dt_s;
+    max_down = down_v_per_s * dt_s;
     delta = request_v - s_command_v;
 
     if (delta > max_up) {
@@ -155,7 +150,7 @@ static void Prereg_UpdateSlew(float request_v, float dt_s, bool hold_vin_floor)
 
     s_command_v = Prereg_ClampV(s_command_v + delta);
 
-    /* Hard stop: never command below G0 VIN_LOW while output is wanted/on. */
+    /* Hard stop: 6 V, which is 1.5 V above G0's 4.5 V VIN_LOW trip. */
     if (hold_vin_floor && (s_command_v < BOARD_VPRE_VIN_FLOOR_V)) {
         s_command_v = BOARD_VPRE_VIN_FLOOR_V;
     }
@@ -304,7 +299,8 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
             want_enable = ldo.output_on && (!Prereg_FaultBlocksDcdc(ldo.fault));
         }
 
-        Prereg_UpdateSlew(request_v, dt_s, Prereg_NeedVinFloor(&ldo));
+        Prereg_UpdateSlew(request_v, dt_s, Prereg_NeedVinFloor(&ldo),
+                          ldo.output_on && Prereg_InCc(&ldo));
         s_status.vpre_command_v = s_command_v;
 
         s_status.regulation_ok =
@@ -343,7 +339,7 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.vpre_request_v = request_v;
         s_status.vpre_g0_v = 0.0f;
         want_enable = true;
-        Prereg_UpdateSlew(request_v, dt_s, true);
+        Prereg_UpdateSlew(request_v, dt_s, true, false);
         s_status.vpre_command_v = s_command_v;
         s_status.regulation_ok =
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
@@ -385,7 +381,7 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_out_of_reg_since_ms = 0U;
 
         if (s_command_v > BOARD_VPRE_MIN_V) {
-            Prereg_UpdateSlew(BOARD_VPRE_MIN_V, dt_s, false);
+            Prereg_UpdateSlew(BOARD_VPRE_MIN_V, dt_s, false, false);
         } else {
             s_command_v = BOARD_VPRE_MIN_V;
         }

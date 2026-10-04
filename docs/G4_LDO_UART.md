@@ -21,15 +21,15 @@ Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse 
 |---|---|
 | `out=0`, host idle (`g0_want=0`) | disable DCDC, ramp command → 3 V |
 | `out=0`, host wants ON | `max(host_vset, tlm_vset) + 1.5 V`, floored at **6 V** |
-| CV (`cccv=0`) | same floor (or `vpre=` from TLM if present) |
-| CC (`cccv=1`) | `max(vout + 1.5 V, vset + 1.5 V, 6 V)` — do **not** follow collapsed `vout` |
+| CV (`mode=1`) | `max(vpre, vset + 1.5 V, 6 V)` |
+| CC (`mode=2`, filtered) | G0 `vpre` = measured `vout + 1.5 V`, clamped to `[6 V, vset + 1.5 V]`. Do **not** lift that request back to `vset + 1.5 V` — the difference would sit on the LDO. A raw `cccv` blip does not fold. |
 | Stale TLM while `g0_want=1` | **hold** CV/VIN floor (do not dive to 3 V) |
 
 `fault=VIN_LOW` does **not** disable the pre-reg DCDC (that fault is caused by a low rail; killing DCDC worsens the spiral). Other faults still drop enable.
 
 Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 1.5 V, **VIN floor 6 V**.
 
-Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, non-blocking fault, G0 `out=1` or want).
+Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Confirmed CC folds down at 5 V/s and still never commands below 6 V while output is wanted or on. **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, non-blocking fault, G0 `out=1` or want).
 
 ## Pin / module map (schematic U7)
 

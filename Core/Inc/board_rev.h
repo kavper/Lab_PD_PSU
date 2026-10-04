@@ -102,10 +102,10 @@
 #define BOARD_VPRE_MAX_V                     36.0f
 #define BOARD_VPRE_MARGIN_V                  1.5f
 /*
- * G0 CONSOLE_MINIMUM_VIN_MV is 6.0 V. While OUT is on OR host still wants
- * output, never command the DCDC below this floor — even if G0 CC collapses
- * vout, OUT is forced off (VIN_LOW/CC), or TLM goes stale (which used to
- * slew toward VPRE_MIN and starve VIN → VIN_LOW kill).
+ * G0 VIN_LOW trips at CONSOLE_MINIMUM_VIN_MV (4.5 V). While OUT is on OR
+ * the host still wants output, never command the DCDC below 6.0 V. CC may
+ * follow Vout + margin down to this floor. Following it on to VPRE_MIN
+ * used to starve VIN and latch VIN_LOW.
  */
 #define BOARD_VPRE_VIN_FLOOR_V               6.0f
 

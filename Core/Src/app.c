@@ -1788,7 +1788,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  App_FracPart(buck_exit_margin_x100, 100),
                  (unsigned long)APP_DEBUG_PERIOD_MS,
                  (unsigned int)APP_DEBUG_VERBOSE);
-    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV floor=%ld mV slew +10/-0.3 V/s permit_settle=150ms",
+    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV floor=%ld mV slew +10/-0.3 V/s CC fold -5 V/s permit_settle=150ms",
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
                  (long)(BOARD_VPRE_VIN_FLOOR_V * 1000.0f));
 #if (BMS_ENABLE != 0U)
