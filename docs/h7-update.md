@@ -216,7 +216,11 @@ Bajty 0…19 są takie jak przy payloadzie 24 B. Potem jest self-test pomiaru zd
 
 Temperatury to już przeliczone NTC z G0, int16 w dziesiątych stopnia Celsjusza (`253` = 25,3 °C). To nie są kody ADC. `INT16_MIN` (`0x8000`) = brak pomiaru albo telemetria G0 starsza niż 500 ms. Źródło na G0: payload telemetrii `0x80`, offsety 56, 58, 60, 62 (po surowym i filtrowanym ADC, których H7 nie dostaje).
 
-Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. `0xFFFF` = brak próbki. Przekaźnik K1 klika dopiero po trzech zgodnych próbkach OK. `flags1` bitu remote w METER oznacza, że cewka już jest załączona, nie że H7 o to poprosiło.
+Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. Pełna skala to 36,000 V. `0xFFFF` = brak próbki. PB0 i PB1 siedzą na przewodach REMOTE_P / REMOTE_N. K1 przełącza tylko to, co widzi wzmacniacz błędu LDO. Sprawdzenie przewodów idzie więc przy regulacji local.
+
+Wejście ma około 18,3 kΩ (220 kΩ || 20 kΩ) i 10 nF, więc stała czasowa to około 0,19 ms. Próbka co 100 ms jest już ustalona. Trzy kolejne próbki OK muszą się ze sobą zgadzać w granicach błędu toru, zanim cewka kliknie.
+
+`flags1` bitu remote w METER oznacza, że cewka już jest załączona, nie że H7 o to poprosiło.
 
 | Offset | Typ | Pole |
 |---:|---|---|
@@ -234,27 +238,35 @@ Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. `0x
 | 22 | u16 | `remote_p_mv` — REMOTE_P (PB0) |
 | 24 | u16 | `remote_n_mv` — REMOTE_N (PB1) |
 | 26 | u8 | `sense_code` |
-| 27 | u8 | `sense_flags`: bit0 cewka K1 załączona, bit1 H7/host prosi o remote |
+| 27 | u8 | `sense_flags`: bit0 cewka K1 załączona, bit1 H7/host prosi o remote, bit2 zatrzask po błędzie krytycznym |
 | 28 | u16 | `fan_rpm`. Dwa zbocza opadające na obrót. `0` = stoi albo tachometr nie daje impulsów. `0xFFFF` = pierwsza sekunda pomiaru jeszcze nie minęła |
 | 30…31 | — | zera |
 
 `fan_rpm` jest liczone na G4 z PA5, bramka 1 s, i wkładane w tę samą wolną ramkę AUX (200 ms) co przekaźnik. Między bramkami H7 dostaje ostatnią wartość. PWM na PA7 jest odwrócony tranzystorem Q9: 0 % zatrzymuje wentylator, 100 % puszcza go na pełne obroty.
 
+Spadki: `DP = local_mv − remote_p_mv`, `DN = remote_n_mv`, `VD = remote_p_mv − remote_n_mv`. Osobno pilnowane są DP, DN, suma DP+DN oraz górny zakres lokalnego pomiaru.
+
+Limity przewodów i błąd toru to dwa zestawy liczb. Do sprawdzenia na płytce: 500 mV na przewód i 1000 mV łącznie (`SENSE_DROP_WIRE_MV`, `SENSE_DROP_SUM_MV`). To punkt startowy pomiaru, nie zamknięta specyfikacja. Budżet jednego toru, bez zapisanej kalibracji DMM: 1,85% (dzielnik 220 kΩ / 20 kΩ, rezystory 1%, najgorszy stosunek) i 40 mV (około 4 LSB przy 8,8 mV). Przy 12 V sam błąd DP ma około 0,5 V, więc odczyt 800 mV jeszcze przechodzi. Próg niskiego napięcia wychodzi z tego budżetu: lokalne Vout musi być wyższe niż `(500 mV + 2×40 mV) / (1 − 0,019)`, czyli 592 mV. Poniżej kod to `NOT_READY` i cewka zostaje w local.
+
+R112 4,7 kΩ dociąga odłączony plus do `240 / 244,7` napięcia wyjścia, około 98,1%. R115 4,7 kΩ trzyma odłączony minus przy masie. Taki odczyt mieści się w spadku i dostaje `OK` zarówno przed kliknięciem K1, jak i później, także w CV. Pełne wykrycie przerwy w czasie pracy wymaga osobnej diagnostyki sprzętowej.
+
+Przed załączeniem zły przewód zostawia cewkę w local i nie rusza PERMIT. Po załączeniu błąd spadku, brak próbki ADC albo — tylko w CV — trzy próbki, w których VD mija nastawę, otwierają K1, zdejmują PERMIT i zapalają bit2. W CC napięcie na obciążeniu nie jest porównywane z nastawą. Ponowne remote wymaga `REMOTE 0`, potem `REMOTE 1` i znowu trzech zgodnych próbek. Najbliższe `ON` hosta zdejmuje blokadę PERMIT; zatrzask cewki trzyma się osobno.
+
 `sense_code`:
 
 | Kod | Nazwa | Co pokazać |
 |---:|---|---|
-| 0 | OK | przewody wyglądają dobrze; po trzech próbkach wolno kliknąć przekaźnik |
-| 1 | NOT_READY | Vout jest za niskie, żeby pasmo przy masie i pasmo przy wyjściu były rozłączne. Przy minimalnym oknie 1,5 V test odmawia remote do 3 V włącznie; poniżej 2 V też nie ocenia przewodów |
-| 2 | OPEN | oba przewody przy masie: odpięte albo brak plusa |
-| 3 | OPEN_P | plus odpięty, minus nie jest ani przy masie, ani przy Vout |
-| 4 | REVERSED | przewody zamienione (minus widzi Vout) |
-| 5 | N_ON_POUT | oba przewody na plusie wyjścia |
-| 6 | P_MISMATCH | plus nie jest ani przy Vout, ani odpięty |
-| 7 | N_HIGH | plus pasuje, minus jest wyraźnie nad masą |
-| 8 | NO_SAMPLE | ADC jeszcze nic nie zmierzył |
-
-Odpięty minus przy braku prądu czyta się tak samo jak minus podłączony do masy obciążenia, więc ten jeden przypadek wchodzi w OK. Zamiana przewodów i brak plusa przekaźnika nie puszczają.
+| 0 | OK | DP, DN i suma mieszczą się w limicie plus budżet błędu |
+| 1 | NOT_READY | lokalne Vout poniżej progu z budżetu (592 mV przy limicie 500 mV). Przewody nie są oceniane |
+| 2 | DROP_P | spadek na plusie poza limitem i błędem pomiaru |
+| 3 | DROP_SUM | każdy przewód osobno wchodzi, suma nie |
+| 4 | REVERSED | minus jest przy wyjściu, plus nie |
+| 5 | N_ON_POUT | oba sense na plusie wyjścia |
+| 6 | SHORT | oba sense zwarte, wspólne napięcie poza legalnym spadkiem |
+| 7 | DROP_N | spadek na minusie poza limitem i błędem pomiaru |
+| 8 | NO_SAMPLE | konwersja ADC się nie skończyła |
+| 9 | LOCAL_HIGH | lokalny odczyt na pełnej skali 36 V albo wyżej |
+| 10 | CV_VD | K1 już załączone, tryb CV, VD nie schodzi do nastawy przez trzy próbki. W CC tego kodu nie ma |
 
 ### PD_TLM, payload 64 B
 

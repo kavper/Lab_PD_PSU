@@ -52,11 +52,11 @@ Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Co
 ## Local vs remote sense
 
 - **Default at boot:** local only (`REMOTE_ON` = LOW). The DCDC still regulates from `ADC_VOUT` (PB2). K1 switches the LDO Kelvin sense, not that ADC.
-- Host `REMOTE ON` / `REMOTE 1` requests remote sense. The relay stays off until three self-test samples, 100 ms apart, read OK.
-- The self-test compares PB14 (local Vout), PB0 (REMOTE_P) and PB1 (REMOTE_N) through the 12:1 dividers. Tolerance is loose: 25% of Vout, at least 1.5 V. The ground band and the Vout band share that window, so the test refuses remote while they meet. With the 1.5 V floor that is every local reading up to 3 V, including the old “below 2 V” case.
-- OK clicks the relay. Swapped leads, both leads on the positive output, an open positive lead, or a positive lead that matches neither Vout nor ground keep the relay in local and report a code on AUX.
-- Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately.
-- An open negative lead at no current reads the same as a lead on the load return, so that one case is not separable and is reported as OK.
+- Host `REMOTE ON` / `REMOTE 1` requests remote sense. PB0/PB1 stay on the remote wires, so the check runs while K1 is still local. The relay stays off until three samples, 100 ms apart, read OK and agree within the ADC error.
+- The input filter is about 0.19 ms, so a 100 ms sample is settled. The check is DP = local − remote_p, DN = remote_n, and DP+DN, plus a saturated local reading. Cable limits (500 mV per wire, 1000 mV total) and the per-channel error (1.85% and 40 mV, no stored trim) are separate. The 500/1000 mV pair is a bench starting point. The low-voltage floor falls out of that budget (592 mV at the 500 mV wire limit).
+- R112 (4.7 kΩ) holds an open positive lead at about 98.1% of Vout. R115 holds an open negative lead at ground. That pair is reported as OK. It is not a detected break, before or after K1 closes.
+- A wiring fault before close leaves the relay local and leaves PERMIT alone. After close, a drop fault, a missed conversion, or (in CV only) VD missing the setpoint for three samples opens the relay, drops PERMIT, and latches remote off until the host sends REMOTE 0 and then REMOTE 1. CC does not compare VD with the voltage setpoint.
+- Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately and clears the latch. The next host ON clears the permit override.
 
 ## Fan
 

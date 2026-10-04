@@ -11,6 +11,7 @@ void RemoteSense_Task(void);
 void RemoteSense_Request(bool enable);
 bool RemoteSense_IsClosed(void);
 bool RemoteSense_IsWanted(void);
+bool RemoteSense_IsLatched(void);
 uint8_t RemoteSense_Code(void);
 uint16_t RemoteSense_LocalMv(void);
 uint16_t RemoteSense_RemotePMv(void);

@@ -2,18 +2,19 @@
 
 #include "board_rev.h"
 #include "debug_uart.h"
+#include "ldo_link.h"
+#include "ldo_prereg.h"
 #include "sense_check.h"
 
-#define SENSE_PERIOD_MS                  100U
 #define SENSE_SPIN_LIMIT                 200000U
 #define SENSE_VREF_MV                    ((uint32_t)(BOARD_VREF_V * 1000.0f + 0.5f))
+#define SENSE_G0_MODE_CV                 1U
+#define SENSE_G0_TLM_FRESH_MS            500U
 
 static ADC_HandleTypeDef *s_hadc;
 static bool s_configured;
-static bool s_wanted;
 static bool s_closed;
-static uint8_t s_code = SENSE_NO_SAMPLE;
-static uint8_t s_ok_streak;
+static SenseGate s_gate;
 static uint16_t s_local_mv = SENSE_MV_MISSING;
 static uint16_t s_remote_p_mv = SENSE_MV_MISSING;
 static uint16_t s_remote_n_mv = SENSE_MV_MISSING;
@@ -30,7 +31,15 @@ static void RemoteSense_Drive(bool closed)
                       closed ? GPIO_PIN_SET : GPIO_PIN_RESET);
     Debug_Printf("[SENSE] relay %s code=%u\r\n",
                  closed ? "REMOTE" : "LOCAL",
-                 (unsigned int)s_code);
+                 (unsigned int)s_gate.code);
+}
+
+static void RemoteSense_DropPermit(void)
+{
+    LdoPrereg_SetPermitOverrideOff(true);
+    LdoPrereg_SetForceDisable(true);
+    Debug_Printf("[SENSE] critical code=%u permit off, local, latched\r\n",
+                 (unsigned int)s_gate.code);
 }
 
 static bool RemoteSense_ConfigInjected(ADC_HandleTypeDef *hadc)
@@ -105,14 +114,27 @@ static bool RemoteSense_Sample(uint32_t *local_mv, uint32_t *remote_p_mv,
     return true;
 }
 
+static bool RemoteSense_CompareSetpoint(uint32_t *setpoint_mv)
+{
+    LdoLink_Status_t ldo;
+    uint32_t now_ms = HAL_GetTick();
+
+    LdoLink_GetStatus(&ldo);
+    if ((!ldo.telemetry_valid) || (ldo.last_tlm_ms == 0U) ||
+        ((uint32_t)(now_ms - ldo.last_tlm_ms) > SENSE_G0_TLM_FRESH_MS)) {
+        return false;
+    }
+    *setpoint_mv = ldo.vset_mv;
+    /* mode 1 is CV. mode 2 is CC: VD follows the load, not the voltage set. */
+    return ldo.mode == SENSE_G0_MODE_CV;
+}
+
 void RemoteSense_Init(ADC_HandleTypeDef *hadc)
 {
     s_hadc = hadc;
     s_configured = false;
-    s_wanted = false;
     s_closed = false;
-    s_code = SENSE_NO_SAMPLE;
-    s_ok_streak = 0U;
+    Sense_GateInit(&s_gate);
     s_local_mv = SENSE_MV_MISSING;
     s_remote_p_mv = SENSE_MV_MISSING;
     s_remote_n_mv = SENSE_MV_MISSING;
@@ -129,11 +151,10 @@ void RemoteSense_Init(ADC_HandleTypeDef *hadc)
 
 void RemoteSense_Request(bool enable)
 {
-    if (enable == s_wanted) {
+    if (enable == s_gate.wanted) {
         return;
     }
-    s_wanted = enable;
-    s_ok_streak = 0U;
+    Sense_GateRequest(&s_gate, enable);
     Debug_Printf("[SENSE] request %s\r\n", enable ? "REMOTE" : "LOCAL");
     if (!enable) {
         RemoteSense_Drive(false);
@@ -147,12 +168,17 @@ bool RemoteSense_IsClosed(void)
 
 bool RemoteSense_IsWanted(void)
 {
-    return s_wanted;
+    return s_gate.wanted;
+}
+
+bool RemoteSense_IsLatched(void)
+{
+    return s_gate.latched;
 }
 
 uint8_t RemoteSense_Code(void)
 {
-    return s_code;
+    return s_gate.code;
 }
 
 uint16_t RemoteSense_LocalMv(void)
@@ -176,7 +202,10 @@ void RemoteSense_Task(void)
     uint32_t local_mv = 0U;
     uint32_t remote_p_mv = 0U;
     uint32_t remote_n_mv = 0U;
-    uint8_t code;
+    uint32_t setpoint_mv = 0U;
+    SenseInput in;
+    SenseStep step;
+    bool sampled;
 
     if (s_task_started &&
         ((uint32_t)(now_ms - s_last_ms) < SENSE_PERIOD_MS)) {
@@ -185,40 +214,33 @@ void RemoteSense_Task(void)
     s_task_started = true;
     s_last_ms = now_ms;
 
-    if (!RemoteSense_Sample(&local_mv, &remote_p_mv, &remote_n_mv)) {
-        s_code = SENSE_NO_SAMPLE;
+    sampled = RemoteSense_Sample(&local_mv, &remote_p_mv, &remote_n_mv);
+    in.local_mv = local_mv;
+    in.remote_p_mv = remote_p_mv;
+    in.remote_n_mv = remote_n_mv;
+    in.setpoint_mv = 0U;
+    in.have_sample = sampled;
+    in.compare_setpoint = false;
+    in.wanted = s_gate.wanted;
+
+    if (sampled) {
+        s_local_mv = Sense_MvToU16(local_mv);
+        s_remote_p_mv = Sense_MvToU16(remote_p_mv);
+        s_remote_n_mv = Sense_MvToU16(remote_n_mv);
+        if (s_gate.closed &&
+            RemoteSense_CompareSetpoint(&setpoint_mv)) {
+            in.compare_setpoint = true;
+            in.setpoint_mv = setpoint_mv;
+        }
+    } else {
         s_local_mv = SENSE_MV_MISSING;
         s_remote_p_mv = SENSE_MV_MISSING;
         s_remote_n_mv = SENSE_MV_MISSING;
-        s_ok_streak = 0U;
-        RemoteSense_Drive(false);
-        return;
     }
 
-    s_local_mv = Sense_MvToU16(local_mv);
-    s_remote_p_mv = Sense_MvToU16(remote_p_mv);
-    s_remote_n_mv = Sense_MvToU16(remote_n_mv);
-    code = Sense_Classify(local_mv, remote_p_mv, remote_n_mv);
-    if (code != s_code) {
-        Debug_Printf("[SENSE] code %u -> %u local=%lu p=%lu n=%lu\r\n",
-                     (unsigned int)s_code,
-                     (unsigned int)code,
-                     (unsigned long)local_mv,
-                     (unsigned long)remote_p_mv,
-                     (unsigned long)remote_n_mv);
-        s_code = code;
+    step = Sense_GateStep(&s_gate, &in);
+    if (step.drop_permit) {
+        RemoteSense_DropPermit();
     }
-
-    if ((!s_wanted) || (code != SENSE_OK)) {
-        s_ok_streak = 0U;
-        RemoteSense_Drive(false);
-        return;
-    }
-
-    if (s_ok_streak < SENSE_OK_STREAK) {
-        s_ok_streak++;
-    }
-    if (s_ok_streak >= SENSE_OK_STREAK) {
-        RemoteSense_Drive(true);
-    }
+    RemoteSense_Drive(step.closed);
 }
