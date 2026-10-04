@@ -11,6 +11,7 @@
 #include "host_link.h"
 #include "measurements.h"
 #include "power_manager.h"
+#include "remote_sense.h"
 #include "power_stage.h"
 #include "status_led.h"
 
@@ -1704,6 +1705,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     App_TimebaseInit();
 
     PowerStage_Init(hhrtim);
+    /* Injected sense channels before the regular HRTIM DMA starts. */
+    RemoteSense_Init(hadc1);
     Measurements_Init(hadc1, hadc2);
 
     ControlCv_Init(&app.cv,
@@ -1838,6 +1841,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 void App_Run(void)
 {
     LdoLink_Task();
+    RemoteSense_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_PublishOcpEvent();
     App_ControlSlowTask();

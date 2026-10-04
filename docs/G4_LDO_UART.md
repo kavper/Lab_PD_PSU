@@ -43,18 +43,19 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 | POWER_PERMIT_G4 | **PB7** | `ldo_prereg.c` → `ldo_link.c` (HIGH=ena, Low/reset=LDO zabity) |
 | I2C_USBPD_IRQ | **PB9** | EXTI |
 | Local Vout sense (DCDC) | PB2 `ADC_VOUT` | `measurements.c` (CV) |
-| ADC_LOCAL_VOUT | **PB14** | analog (no DMA rank yet) |
+| ADC_LOCAL_VOUT | **PB14** ADC1_IN5 | injected self-test, 220 kΩ / 20 kΩ |
 | I_L_ZERO | **PB15** | analog (no DMA rank yet) |
-| Remote Kelvin sense | PB0/PB1 `ADC_REMOTE_P/N` | analog inputs (no DMA ranks yet) |
+| Remote Kelvin sense | PB0 ADC1_IN15 / PB1 ADC1_IN12 | injected self-test, same divider |
 | PA2 | NC | — |
 
 ## Local vs remote sense
 
-- **Default at boot:** local only (`REMOTE_ON` = LOW). CV regulation always uses `ADC_VOUT` (PB2).
-- Host `REMOTE ON` / `REMOTE 1` asserts `REMOTE_ON` (**PB6**) to switch the hardware remote sense path.
-- Host `REMOTE OFF` / `REMOTE 0` returns to local.
-- Telemetry `T` line includes `rem_sense=0|1`.
-- Open-lead / differential remote ADC readback needs PB0/PB1 added to ADC DMA ranks later; until then remote is a GPIO path switch only.
+- **Default at boot:** local only (`REMOTE_ON` = LOW). The DCDC still regulates from `ADC_VOUT` (PB2). K1 switches the LDO Kelvin sense, not that ADC.
+- Host `REMOTE ON` / `REMOTE 1` requests remote sense. The relay stays off until three self-test samples, 100 ms apart, read OK.
+- The self-test compares PB14 (local Vout), PB0 (REMOTE_P) and PB1 (REMOTE_N) through the 12:1 dividers. Tolerance is loose: 25% of Vout, at least 1.5 V. Below 2 V the test does not judge.
+- OK clicks the relay. Swapped leads, both leads on the positive output, an open positive lead, or a positive lead that matches neither Vout nor ground keep the relay in local and report a code on AUX.
+- Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately.
+- An open negative lead at no current reads the same as a lead on the load return, so that one case is not separable and is reported as OK.
 
 ## Host UART commands (USART1)
 

@@ -202,7 +202,7 @@ int main(void)
         }
         ExpectTrue(H7_LINK_METER_BYTES == 72U, "METER payload is 72 bytes");
         ExpectTrue(H7_LINK_BMS_BYTES == 72U, "BMS payload is 72 bytes");
-        ExpectTrue(H7_LINK_AUX_BYTES == 24U, "AUX payload is 24 bytes");
+        ExpectTrue(H7_LINK_AUX_BYTES == 32U, "AUX payload is 32 bytes");
         ExpectTrue((H7_LINK_METER_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                    "METER frame fits in 120 bytes");
         ExpectTrue((H7_LINK_BMS_BYTES + 7U) <= H7_LINK_MAX_FRAME,

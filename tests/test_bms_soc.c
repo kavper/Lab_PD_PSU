@@ -103,8 +103,10 @@ int main(void)
     ExpectTrue((H7_LINK_BMS_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                "BMS frame fits in 120 bytes");
     ExpectTrue(H7_LINK_AUX_TLM == 0x13U, "AUX telemetry type is 0x13");
-    ExpectTrue(H7_LINK_AUX_BYTES == 24U, "AUX payload is 24 bytes");
+    ExpectTrue(H7_LINK_AUX_BYTES == 32U, "AUX payload is 32 bytes");
     ExpectTrue(H7_AUX_VALID == 19U, "AUX valid flag sits at byte 19");
+    ExpectTrue(H7_AUX_LOCAL_MV == 20U, "local sense millivolts follow the valid flag");
+    ExpectTrue(H7_AUX_SENSE_CODE == 26U, "sense code is a single byte");
     ExpectTrue((H7_LINK_AUX_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                "AUX frame fits in 120 bytes");
 
