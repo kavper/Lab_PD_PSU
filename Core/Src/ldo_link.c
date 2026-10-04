@@ -1,4 +1,5 @@
 #include "ldo_link.h"
+#include "ldo_tlm_layout.h"
 
 #include "board_rev.h"
 #include "debug_uart.h"
@@ -24,7 +25,7 @@
 #define LDO_PROTO_TELEMETRY          0x80U
 #define LDO_PROTO_ACK                0x81U
 #define LDO_PROTO_NACK               0x82U
-#define LDO_TLM_PAYLOAD_LENGTH       68U
+#define LDO_TLM_PAYLOAD_LENGTH       LDO_TLM_BYTES
 #define LDO_FAULT_VIN_LOW            (1UL << 3)
 #define LDO_TLM_STALE_MS             500U
 #define LDO_FAN_FAILSAFE_PERCENT     40U
@@ -210,11 +211,6 @@ static uint16_t LdoLink_Crc16Update(uint16_t crc, uint8_t byte)
                               : (uint16_t)(crc << 1);
     }
     return crc;
-}
-
-static int16_t LdoLink_GetI16Le(const uint8_t *data)
-{
-    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
 }
 
 static uint32_t LdoLink_GetU32Le(const uint8_t *data)
@@ -432,16 +428,16 @@ static void LdoLink_HandleTelemetry(const uint8_t *payload,
     s_status.vout_mv = LdoLink_GetU32Le(&payload[0]);
     s_status.iout_ma = LdoLink_GetU32Le(&payload[4]);
     s_status.vin_mv = LdoLink_GetU32Le(&payload[8]);
-    s_status.dac_cv_mv = LdoLink_GetU32Le(&payload[12]);
-    s_status.dac_cc_mv = LdoLink_GetU32Le(&payload[16]);
+    s_status.dac_cv_mv = LdoLink_GetU32Le(&payload[LDO_TLM_DAC_CV_MV]);
+    s_status.dac_cc_mv = LdoLink_GetU32Le(&payload[LDO_TLM_DAC_CC_MV]);
     s_status.vset_mv = LdoLink_GetU32Le(&payload[20]);
     s_status.iset_ma = LdoLink_GetU32Le(&payload[24]);
     s_status.vpre_mv = LdoLink_GetU32Le(&payload[28]);
     s_status.vpre_present = true;
     s_status.mode = payload[32];
     s_status.output_on = payload[33] != 0U;
-    s_status.bleed_request = payload[34] != 0U;
-    s_status.pgood = payload[35] != 0U;
+    s_status.bleed_request = payload[LDO_TLM_BLEED] != 0U;
+    s_status.pgood = payload[LDO_TLM_PGOOD] != 0U;
     s_status.fault_flags = LdoLink_GetU32Le(&payload[36]);
     if (s_status.fault_flags == 0U) {
         (void)strncpy(s_status.fault, "NONE", sizeof(s_status.fault) - 1U);
@@ -449,11 +445,11 @@ static void LdoLink_HandleTelemetry(const uint8_t *payload,
         (void)strncpy(s_status.fault, "G0_FLAGS", sizeof(s_status.fault) - 1U);
     }
     s_status.fault[sizeof(s_status.fault) - 1U] = '\0';
-    s_status.temp_centi_c[0] = LdoLink_GetI16Le(&payload[56]);
-    s_status.temp_centi_c[1] = LdoLink_GetI16Le(&payload[58]);
-    s_status.temp_centi_c[2] = LdoLink_GetI16Le(&payload[60]);
-    s_status.temp_centi_c[3] = LdoLink_GetI16Le(&payload[62]);
-    s_status.fan_percent = payload[64];
+    s_status.temp_centi_c[0] = LdoTlm_TempCenti(payload, 0U);
+    s_status.temp_centi_c[1] = LdoTlm_TempCenti(payload, 1U);
+    s_status.temp_centi_c[2] = LdoTlm_TempCenti(payload, 2U);
+    s_status.temp_centi_c[3] = LdoTlm_TempCenti(payload, 3U);
+    s_status.fan_percent = payload[LDO_TLM_FAN];
     s_status.kill_reported = payload[65] != 0U;
     s_status.cc_cv = payload[66] != 0U;
     s_status.outoff_reported = payload[67] != 0U;

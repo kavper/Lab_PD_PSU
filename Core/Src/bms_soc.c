@@ -4,17 +4,23 @@
 
 #define BMS_SOC_DT_MAX_MS            5000U
 #define BMS_SOC_MAH_SCALE            3600000LL
-#define BMS_SOC_BALANCE_REFRESH_MS   10000U
+/* AFE drops a host balance mask after 20 s. Refresh sooner. RAM only. */
+#define BMS_SOC_BALANCE_REFRESH_MS   5000U
 #define BMS_SOC_BALANCE_CHG_MA       100
 #define BMS_SOC_CAP_MIN_MAH          100
 #define BMS_SOC_CAP_MAX_MAH          200000
-#define BMS_SOC_LEARN_MIN_PERMILLE   500
+#define BMS_SOC_LEARN_MIN_PERMILLE   400
 #define BMS_SOC_LEARN_MIN_MAH        100
+/* Live Li-ion correction time constant. Ends only; the flat middle is ignored. */
+#define BMS_SOC_END_TAU_MS           180000U
 
 #define BMS_SOC_LIION_REST_MA        40
 #define BMS_SOC_LIION_REST_MS        (30U * 60U * 1000U)
-#define BMS_SOC_LIION_ANCHOR_HIGH_MV 4100
-#define BMS_SOC_LIION_ANCHOR_LOW_MV  3400
+/* Capacity anchors are the upper and lower knees, not empty and absolute full. */
+#define BMS_SOC_LIION_ANCHOR_HIGH_MV 4000
+#define BMS_SOC_LIION_ANCHOR_LOW_MV  3600
+#define BMS_SOC_LIION_TRACK_LOW_MV   3450
+#define BMS_SOC_LIION_TRACK_HIGH_MV  4000
 #define BMS_SOC_LIION_BAL_START_MV   4000
 #define BMS_SOC_LIION_BAL_STOP_MV    3900
 
@@ -205,6 +211,43 @@ static void BmsSoc_Learn(uint16_t permille, bool high)
     s.learned = true;
 }
 
+/* Li-ion only. Seed at a steep end, then walk toward that curve. */
+static void BmsSoc_TrackEnds(int16_t min_mv, uint32_t dt, bool snapped)
+{
+    uint16_t target;
+    int32_t err;
+    int32_t step;
+
+    if ((s.chem != BMS_SOC_CHEM_LIION) || snapped) {
+        return;
+    }
+    if ((min_mv > BMS_SOC_LIION_TRACK_LOW_MV) &&
+        (min_mv < BMS_SOC_LIION_TRACK_HIGH_MV)) {
+        return;
+    }
+    target = BmsSoc_OcvPermille(min_mv);
+    if (!s.valid) {
+        s.valid = true;
+        s.soc_mA_ms = (int64_t)target * (int64_t)s.capacity_mah * 3600LL;
+        return;
+    }
+    if ((dt == 0U) || (s.capacity_mah <= 0)) {
+        return;
+    }
+    err = (int32_t)target - (int32_t)BmsSoc_Permille();
+    step = (int32_t)(((int64_t)err * (int64_t)dt) / (int64_t)BMS_SOC_END_TAU_MS);
+    if ((step == 0) && (err != 0)) {
+        step = (err > 0) ? 1 : -1;
+    }
+    if ((err > 0) && (step > err)) {
+        step = err;
+    } else if ((err < 0) && (step < err)) {
+        step = err;
+    }
+    s.soc_mA_ms += (int64_t)step * (int64_t)s.capacity_mah * 3600LL;
+    BmsSoc_ClampSoc();
+}
+
 static void BmsSoc_QualifyRest(int16_t ocv_mv)
 {
     uint16_t permille = BmsSoc_OcvPermille(ocv_mv);
@@ -379,6 +422,8 @@ bool BmsSoc_OnSample(uint32_t now_ms,
     int32_t rest_ma;
     uint32_t rest_ms;
     int16_t ocv_mv = 0;
+    bool snapped = false;
+    bool have_cell = false;
 
     if ((out == NULL) || (cell_mv == NULL) || (cell_count == 0U) ||
         (cell_count > 8U)) {
@@ -426,7 +471,16 @@ bool BmsSoc_OnSample(uint32_t now_ms,
         if (((uint32_t)(now_ms - s.rest_since_ms) >= rest_ms) &&
             BmsSoc_MinUsedMv(cell_mv, cell_count, cell_used_mask, &ocv_mv)) {
             BmsSoc_QualifyRest(ocv_mv);
+            snapped = true;
+            have_cell = true;
         }
+    }
+    if (!have_cell) {
+        have_cell = BmsSoc_MinUsedMv(cell_mv, cell_count, cell_used_mask,
+                                     &ocv_mv);
+    }
+    if (have_cell) {
+        BmsSoc_TrackEnds(ocv_mv, dt, snapped);
     }
 
     s.balance_mask = BmsSoc_BalanceMask(cc2_ma, cell_mv, cell_count,

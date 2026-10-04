@@ -2263,6 +2263,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
 
         BQ76922_PublishSoc(dev, now_ms, &soc);
         if (soc.balance_write) {
+            /* RAM subcommand. Does not touch Balancing Configuration or OTP. */
             status = BQ76922_WriteRamU2(dev, BQ76922_SUBCMD_CB_ACTIVE_CELLS,
                                         soc.balance_cells);
             if (BQ76922_NoteCommsResult(dev, status)) {

@@ -1,8 +1,10 @@
 #include "bms_soc.h"
 #include "h7_link_proto.h"
+#include "ldo_tlm_layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int g_failures;
 
@@ -150,6 +152,8 @@ int main(void)
     ExpectEqU(out.soc_permille, 950U, "4100 mV snaps to 950 permille");
     ExpectTrue((out.flags & BMS_SOC_FLAG_LEARNED) != 0U,
                "opposite anchors learn capacity");
+    /* Leave the steep end. Live tracking must not fight this coulomb step. */
+    FillMv(cells, 3700);
     for (i = 0U; i < 32U; i++) {
         now += 1000U;
         Sample(now, -3600, cells, &out);
@@ -172,7 +176,7 @@ int main(void)
     ExpectTrue(!out.balance_write, "an unchanged mask is not rewritten at once");
     now += 10000U;
     Sample(now, 200, cells, &out);
-    ExpectTrue(out.balance_write, "a live mask is refreshed at 10 s");
+    ExpectTrue(out.balance_write, "a live mask is refreshed inside 20 s");
     BmsSoc_NoteBalanceSent(now);
     cells[0] = 4025;
     cells[1] = 4026;
@@ -196,6 +200,84 @@ int main(void)
     ExpectTrue((out.flags & BMS_SOC_FLAG_PASSQ_VALID) != 0U, "passQ flag");
     ExpectEqI(out.passq_mah, -4, "passQ is reported and is not the session");
     ExpectEqI(out.session_mah, 0, "passQ does not move the session integral");
+
+    /* Steep ends estimate SOC under current. The flat middle does not. */
+    BmsSoc_Reset();
+    FillMv(cells, 3700);
+    Sample(0U, 500, cells, &out);
+    ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
+              "middle of the Li-ion curve does not invent SOC");
+    FillMv(cells, 4100);
+    Sample(1000U, 500, cells, &out);
+    ExpectEqU(out.soc_permille, 950U, "the high end seeds SOC without a rest");
+    ExpectTrue((out.flags & BMS_SOC_FLAG_VALID) != 0U, "seeded SOC is valid");
+    FillMv(cells, 3700);
+    Sample(2000U, 3600, cells, &out);
+    ExpectEqU(out.soc_permille, 950U,
+              "middle voltage under current does not pull SOC");
+    FillMv(cells, 3300);
+    Sample(3000U, -100, cells, &out);
+    ExpectEqU(out.soc_permille, 945U,
+              "the low end corrects gently instead of snapping");
+
+    /* 3.6 V to 4.0 V is enough to learn. Empty (3.0 V) is not required. */
+    BmsSoc_Reset();
+    FillMv(cells, 3600);
+    now = 0U;
+    Sample(now, 0, cells, &out);
+    Pump(&now, 30U * 60U * 1000U, 0, cells, &out);
+    ExpectEqU(out.soc_permille, 300U, "3600 mV rest is the low knee");
+    Pump(&now, 108U * 5000U, 1000, cells, &out);
+    ExpectEqI(out.session_mah, 150, "partial transfer is 150 mAh");
+    FillMv(cells, 4000);
+    Pump(&now, (30U * 60U * 1000U) + 5000U, 0, cells, &out);
+    ExpectEqU(out.soc_permille, 820U, "4000 mV rest is the high knee");
+    ExpectTrue((out.flags & BMS_SOC_FLAG_LEARNED) != 0U,
+               "capacity learns without a discharge to empty");
+    FillMv(cells, 3700);
+    for (i = 0U; i < 28U; i++) {
+        now += 1000U;
+        Sample(now, -3600, cells, &out);
+    }
+    ExpectEqU(out.soc_permille, 722U, "learned 288 mAh moves SOC by 28 mAh");
+
+    BmsSoc_Reset();
+    BmsSoc_SetChemistry(BMS_SOC_CHEM_LFP);
+    FillMv(cells, 3450);
+    Sample(0U, 500, cells, &out);
+    ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
+              "LFP does not take a live voltage seed");
+
+    {
+        uint8_t frame[LDO_TLM_BYTES];
+
+        memset(frame, 0, sizeof(frame));
+        frame[LDO_TLM_TEMP_RAW] = 0xD0;
+        frame[LDO_TLM_TEMP_RAW + 1U] = 0x07; /* raw ADC 2000 */
+        frame[LDO_TLM_TEMP_FILTERED] = 0x08;
+        frame[LDO_TLM_TEMP_FILTERED + 1U] = 0x07; /* filtered ADC 1800 */
+        frame[LDO_TLM_TEMP_CENTI] = 0xE2;
+        frame[LDO_TLM_TEMP_CENTI + 1U] = 0x09; /* 2530 = 25.30 °C */
+        frame[LDO_TLM_TEMP_CENTI + 2U] = 0x6B;
+        frame[LDO_TLM_TEMP_CENTI + 3U] = 0x09; /* 2411 */
+        frame[LDO_TLM_TEMP_CENTI + 4U] = 0x1E;
+        frame[LDO_TLM_TEMP_CENTI + 5U] = 0x0C; /* 3102 */
+        frame[LDO_TLM_TEMP_CENTI + 6U] = 0xF3;
+        frame[LDO_TLM_TEMP_CENTI + 7U] = 0x0A; /* 2803 */
+        ExpectEqI(LdoTlm_TempCenti(frame, 0U), 2530,
+                  "AUX temperature is centi-°C, not the raw ADC block");
+        ExpectEqI(LdoTlm_TempCenti(frame, 1U), 2411, "T2 centi-°C");
+        ExpectEqI(LdoTlm_TempCenti(frame, 2U), 3102, "T3 centi-°C");
+        ExpectEqI(LdoTlm_TempCenti(frame, 3U), 2803, "T4 centi-°C");
+        ExpectTrue(LDO_TLM_TEMP_RAW == 40U, "raw ADC stays at G0 offset 40");
+        ExpectTrue(LDO_TLM_TEMP_FILTERED == 48U, "filtered ADC stays at G0 offset 48");
+        ExpectTrue(LDO_TLM_TEMP_CENTI == 56U, "centi-°C starts at G0 offset 56");
+        ExpectTrue(LDO_TLM_FAN == 64U, "fan stays at G0 offset 64");
+        ExpectTrue(H7_AUX_T1_CC == 8U, "H7 AUX T1 is offset 8");
+        ExpectTrue(H7_AUX_T2_CC == 10U, "H7 AUX T2 is offset 10");
+        ExpectTrue(H7_AUX_T3_CC == 12U, "H7 AUX T3 is offset 12");
+        ExpectTrue(H7_AUX_T4_CC == 14U, "H7 AUX T4 is offset 14");
+    }
 
     if (g_failures != 0) {
         printf("%d failure(s)\n", g_failures);

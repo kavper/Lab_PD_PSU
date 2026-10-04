@@ -8,10 +8,13 @@
  * Session state of charge for a 4S1P pack. RAM only: nothing here is
  * written to flash, EEPROM, or BQ76922 OTP.
  *
- * Coulomb counting (CC2, mA) is the source of mAh. Open-circuit voltage
- * is applied only after a qualified rest, and the nominal capacity below
- * is a tuning start — not a measured cell fact. The AFE accumulated-charge
- * register is reported separately and is not the session integral.
+ * Coulomb counting (CC2, mA) is the source of mAh. A qualified rest
+ * calibrates from open-circuit voltage. While current is flowing, Li-ion
+ * SOC is also seeded and gently pulled toward the curve at its steep ends.
+ * The flat middle is not treated as a precise voltage reading. Nominal
+ * capacity below is a tuning start, not a measured cell fact. Capacity is
+ * learned between the upper and lower knees, without a discharge to empty.
+ * The AFE accumulated-charge register is reported separately.
  */
 
 #define BMS_SOC_NOMINAL_CELL_MAH     2500
