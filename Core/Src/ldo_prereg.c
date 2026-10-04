@@ -18,11 +18,8 @@
 #define PREREG_REGULATION_BAND_V             0.50f
 #define PREREG_REG_SETTLE_MS                 150U
 #define PREREG_REG_RELEASE_MS                50U
-/* One noisy sample at the floor must not release POWER_KILL. */
-#define PREREG_PERMIT_RAIL_HOLD_MS           40U
 
 static LdoPrereg_Status_t s_status;
-static DcdcPermitRail s_permit_rail;
 static float s_command_v;
 static uint32_t s_last_task_ms;
 static uint32_t s_regulation_since_ms;
@@ -203,7 +200,6 @@ void LdoPrereg_Init(void)
     s_regulation_since_ms = 0U;
     s_out_of_reg_since_ms = 0U;
     s_last_permit_granted = false;
-    Dcdc_PermitRailInit(&s_permit_rail);
     s_force_disable = false;
     s_status.force_disable = false;
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
@@ -263,7 +259,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
     bool g0_fresh;
     bool want_enable;
     bool want_permit;
-    bool rail_ready;
 
     dt_ms = now_ms - s_last_task_ms;
     s_last_task_ms = now_ms;
@@ -279,13 +274,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
     s_status.g0_active = g0_fresh;
     s_status.dcdc_measured_v = dcdc_measured_v;
     s_status.g0_cccv = ldo.cc_cv;
-    rail_ready = Dcdc_PermitRailUpdate(&s_permit_rail,
-                                       dcdc_enabled,
-                                       dcdc_measured_v,
-                                       BOARD_VPRE_VIN_FLOOR_V,
-                                       BOARD_VPRE_PERMIT_HOLD_V,
-                                       now_ms,
-                                       PREREG_PERMIT_RAIL_HOLD_MS);
 
     if (g0_fresh) {
         if (!ldo.output_on) {
@@ -320,8 +308,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
 
         want_permit = Dcdc_PermitAllowed(want_enable,
-                                         dcdc_enabled,
-                                         rail_ready,
                                          s_status.permit_override_off);
 
 #if (BOARD_BRINGUP_LOCAL_CV != 0U)
@@ -357,8 +343,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.regulation_ok =
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
         want_permit = Dcdc_PermitAllowed(want_enable,
-                                         dcdc_enabled,
-                                         rail_ready,
                                          s_status.permit_override_off);
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
         if ((!want_permit) && (!s_status.permit_override_off)) {
