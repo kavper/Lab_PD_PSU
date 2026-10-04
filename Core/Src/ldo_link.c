@@ -4,6 +4,7 @@
 #include "board_rev.h"
 #include "debug_uart.h"
 #include "fan_pwm.h"
+#include "fan_tach.h"
 #include "h7_link_proto.h"
 #include "ldo_ctrl_policy.h"
 #include "ldo_prereg.h"
@@ -917,6 +918,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     LdoLink_ClearPendingAcks();
 
     FanPwm_Init();
+    FanTach_Init();
     LdoLink_SetBleed(false);
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
     LdoLink_SetPermitPin(true);

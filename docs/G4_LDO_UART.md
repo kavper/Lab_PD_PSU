@@ -37,7 +37,8 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 |---|---|---|
 | G0 isolated UART | USART2 **PB3 TX / PB4 RX** AF7 | `ldo_link.c` |
 | H7 / PC host | USART1 PC4/PC5 | `host_link.c` |
-| Fan PWM | **PA7** TIM17_CH1 AF1 | `fan_pwm.c` (PA6 is NC) |
+| Fan PWM | **PA7** TIM17_CH1 AF1 | `fan_pwm.c` (Q9 inverts; PA6 is NC) |
+| Fan tach | **PA5** TIM2_CH1 AF1 | `fan_tach.c`, 2 pulses/rev |
 | BLEED_ON | **PB5** | `ldo_link.c` |
 | REMOTE_ON | **PB6** | `ldo_link.c` (default LOW) |
 | POWER_PERMIT_G4 | **PB7** | `ldo_prereg.c` → `ldo_link.c` (HIGH=ena, Low/reset=LDO zabity) |
@@ -56,6 +57,14 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 - OK clicks the relay. Swapped leads, both leads on the positive output, an open positive lead, or a positive lead that matches neither Vout nor ground keep the relay in local and report a code on AUX.
 - Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately.
 - An open negative lead at no current reads the same as a lead on the load return, so that one case is not separable and is reported as OK.
+
+## Fan
+
+G0 sends `fan` as 0..100. That number is already the higher of the output-power map (0 W → 0 %, 150 W → 100 %) and the NTC map (25 °C → 0 %, 60 °C → 100 %). G4 copies it onto PA7 and does not draw its own curve. If G0 telemetry is older than 500 ms the pin is forced to 40 %.
+
+Q9 inverts PA7 onto J7 pin 4. A 4-wire fan runs while that pin is high, so 0 % holds PA7 high (fan stopped) and 100 % holds PA7 low (fan pull-up, full speed).
+
+PA5 counts falling edges on the open-collector tach (two per revolution) for one second. RPM goes out on AUX byte 28 (`0xFFFF` until the first second closes, `0` when the fan is stopped or the tach wire is open). Bytes 30..31 stay zero.
 
 ## Host UART commands (USART1)
 

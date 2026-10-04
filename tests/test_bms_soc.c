@@ -107,6 +107,7 @@ int main(void)
     ExpectTrue(H7_AUX_VALID == 19U, "AUX valid flag sits at byte 19");
     ExpectTrue(H7_AUX_LOCAL_MV == 20U, "local sense millivolts follow the valid flag");
     ExpectTrue(H7_AUX_SENSE_CODE == 26U, "sense code is a single byte");
+    ExpectTrue(H7_AUX_FAN_RPM == 28U, "fan tach RPM is the u16 at byte 28");
     ExpectTrue((H7_LINK_AUX_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                "AUX frame fits in 120 bytes");
 
