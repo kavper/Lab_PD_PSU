@@ -81,10 +81,10 @@
 #define H7_AUX_T2_CC                 10U /* i16 °C×10, ambient */
 #define H7_AUX_T3_CC                 12U /* i16 °C×10, bleeder */
 #define H7_AUX_T4_CC                 14U /* i16 °C×10, 3.3 V LDO / 15→5 V area */
-#define H7_AUX_FAN                   16U /* u8 percent */
+#define H7_AUX_FAN                   16U /* u8 percent actually applied to the fan */
 #define H7_AUX_PGOOD                 17U /* u8 */
 #define H7_AUX_BLEED                 18U /* u8 */
-#define H7_AUX_VALID                 19U /* u8, 1 when the G0 telemetry is live */
+#define H7_AUX_VALID                 19U /* u8, 1 only while G0 telemetry is younger than 500 ms */
 #define H7_AUX_LOCAL_MV              20U /* u16, ADC_LOCAL_VOUT after the 12:1 divider; 0xFFFF = no sample */
 #define H7_AUX_REMOTE_P_MV           22U /* u16, REMOTE_P, same scale */
 #define H7_AUX_REMOTE_N_MV           24U /* u16, REMOTE_N, same scale */

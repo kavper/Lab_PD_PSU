@@ -551,6 +551,7 @@ static void LdoLink_ApplyActuators(uint32_t now_ms)
     LdoLink_SetBleed(s_status.bleed_request != 0U);
     FanPwm_SetPercent(fan);
     s_applied_fan = fan;
+    s_status.fan_applied = fan;
 
     permit = s_dcdc_permit_request;
     if (s_applied_permit != permit) {

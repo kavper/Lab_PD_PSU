@@ -776,20 +776,26 @@ static void HostLink_QueueSlow(void)
 
         memset(aux_payload, 0, sizeof(aux_payload));
         LdoLink_GetStatus(&ldo);
-        H7Link_PutU32(&aux_payload[H7_AUX_DAC_CV_MV], ldo.dac_cv_mv);
-        H7Link_PutU32(&aux_payload[H7_AUX_DAC_CC_MV], ldo.dac_cc_mv);
-        for (i = 0U; i < 4U; i++) {
-            int16_t deci_c = ldo.telemetry_valid ? ldo.temp_centi_c[i]
-                                                 : (int16_t)INT16_MIN;
+        {
+            uint32_t now_ms = HAL_GetTick();
+            bool g0_fresh = ldo.telemetry_valid && (ldo.last_tlm_ms != 0U) &&
+                            ((uint32_t)(now_ms - ldo.last_tlm_ms) <= H7_LINK_G0_STALE_MS);
 
-            /* G0 already scaled to °C×10. Copy the int16; do not rescale. */
-            H7Link_PutU16(&aux_payload[H7_AUX_T1_CC + (uint8_t)(2U * i)],
-                          (uint16_t)deci_c);
+            H7Link_PutU32(&aux_payload[H7_AUX_DAC_CV_MV], ldo.dac_cv_mv);
+            H7Link_PutU32(&aux_payload[H7_AUX_DAC_CC_MV], ldo.dac_cc_mv);
+            for (i = 0U; i < 4U; i++) {
+                int16_t deci_c = g0_fresh ? ldo.temp_centi_c[i] : (int16_t)INT16_MIN;
+
+                /* G0 already scaled to °C×10. Copy the int16; do not rescale. */
+                H7Link_PutU16(&aux_payload[H7_AUX_T1_CC + (uint8_t)(2U * i)],
+                              (uint16_t)deci_c);
+            }
+            /* Applied duty, including the 40 % failsafe after the link goes quiet. */
+            aux_payload[H7_AUX_FAN] = ldo.fan_applied;
+            aux_payload[H7_AUX_PGOOD] = ldo.pgood;
+            aux_payload[H7_AUX_BLEED] = ldo.bleed_request;
+            aux_payload[H7_AUX_VALID] = g0_fresh ? 1U : 0U;
         }
-        aux_payload[H7_AUX_FAN] = ldo.fan_percent;
-        aux_payload[H7_AUX_PGOOD] = ldo.pgood;
-        aux_payload[H7_AUX_BLEED] = ldo.bleed_request;
-        aux_payload[H7_AUX_VALID] = ldo.telemetry_valid ? 1U : 0U;
         H7Link_PutU16(&aux_payload[H7_AUX_LOCAL_MV], RemoteSense_LocalMv());
         H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_P_MV], RemoteSense_RemotePMv());
         H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_N_MV], RemoteSense_RemoteNMv());

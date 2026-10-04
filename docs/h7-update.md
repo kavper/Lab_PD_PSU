@@ -212,7 +212,7 @@ UI czterech cel: tak jak dziś, pomiń ogniwo ≤ 0 (fizyczne odczepy 1, 2, 3, 5
 
 Bajty 0…19 są takie jak przy payloadzie 24 B. Potem jest self-test pomiaru zdalnego, a na bajtach 28…29 obroty wentylatora. Bajty 30…31 zostają zerami. Ramka ma 39 B (`LEN` = 34).
 
-Temperatury to już przeliczone NTC z G0, int16 w dziesiątych stopnia Celsjusza (`253` = 25,3 °C). To nie są kody ADC. `INT16_MIN` (`0x8000`) = brak pomiaru. Źródło na G0: payload telemetrii `0x80`, offsety 56, 58, 60, 62 (po surowym i filtrowanym ADC, których H7 nie dostaje).
+Temperatury to już przeliczone NTC z G0, int16 w dziesiątych stopnia Celsjusza (`253` = 25,3 °C). To nie są kody ADC. `INT16_MIN` (`0x8000`) = brak pomiaru albo telemetria G0 starsza niż 500 ms. Źródło na G0: payload telemetrii `0x80`, offsety 56, 58, 60, 62 (po surowym i filtrowanym ADC, których H7 nie dostaje).
 
 Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. `0xFFFF` = brak próbki. Przekaźnik K1 klika dopiero po trzech zgodnych próbkach OK. `flags1` bitu remote w METER oznacza, że cewka już jest załączona, nie że H7 o to poprosiło.
 
@@ -224,10 +224,10 @@ Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. `0x
 | 10 | i16 | T2 otoczenie, °C×10 |
 | 12 | i16 | T3 bleeder, °C×10 |
 | 14 | i16 | T4 okolica 3,3 V LDO / 15→5 V, °C×10 |
-| 16 | u8 | fan, procent. Wyższe z mapy mocy (0 W = 0 %, 150 W = 100 %) i mapy temperatury (25 °C = 0 %, 60 °C = 100 %) |
+| 16 | u8 | fan, procent naprawdę wystawiony na PWM. Przy żywej telemetrii G0 jest to wyższe z mapy mocy (0 W = 0 %, 150 W = 100 %) i mapy temperatury (25 °C = 0 %, 60 °C = 100 %). Gdy G0 milczy dłużej niż 500 ms, jest to awaryjne 40 % |
 | 17 | u8 | PGOOD |
 | 18 | u8 | bleed — 1 także przy wyłączonym wyjściu, gdy Vout < 4 V, i przez cały czas gdy wyjście jest off |
-| 19 | u8 | valid — 1 gdy telemetria G0 jest żywa |
+| 19 | u8 | valid — 1 tylko gdy ostatnia poprawna telemetria G0 jest młodsza niż 500 ms. Starsza ramka nie zostawia tu jedynki |
 | 20 | u16 | `local_mv` — ADC_LOCAL_VOUT (PB14) |
 | 22 | u16 | `remote_p_mv` — REMOTE_P (PB0) |
 | 24 | u16 | `remote_n_mv` — REMOTE_N (PB1) |

@@ -31,7 +31,8 @@ typedef struct {
     bool output_on;
     uint8_t mode;
     uint8_t bleed_request;
-    uint8_t fan_percent;
+    uint8_t fan_percent; /* last request from G0 */
+    uint8_t fan_applied; /* duty actually written to FAN_PWM */
     uint8_t pgood;
     uint8_t kill_reported;
     uint8_t outoff_reported;
