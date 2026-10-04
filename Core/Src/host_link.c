@@ -12,6 +12,7 @@
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
+#include "remote_sense.h"
 #include "host_link_policy.h"
 
 #include <ctype.h>
@@ -788,6 +789,13 @@ static void HostLink_QueueSlow(void)
         aux_payload[H7_AUX_PGOOD] = ldo.pgood;
         aux_payload[H7_AUX_BLEED] = ldo.bleed_request;
         aux_payload[H7_AUX_VALID] = ldo.telemetry_valid ? 1U : 0U;
+        H7Link_PutU16(&aux_payload[H7_AUX_LOCAL_MV], RemoteSense_LocalMv());
+        H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_P_MV], RemoteSense_RemotePMv());
+        H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_N_MV], RemoteSense_RemoteNMv());
+        aux_payload[H7_AUX_SENSE_CODE] = RemoteSense_Code();
+        aux_payload[H7_AUX_SENSE_FLAGS] =
+            (uint8_t)((RemoteSense_IsClosed() ? 0x01U : 0U) |
+                      (RemoteSense_IsWanted() ? 0x02U : 0U));
         (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
                                   H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
     }

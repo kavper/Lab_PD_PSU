@@ -8,6 +8,7 @@
 #include "ldo_ctrl_policy.h"
 #include "ldo_prereg.h"
 #include "link_uart.h"
+#include "remote_sense.h"
 #include "psu_gui_api.h"
 
 #include <stdio.h>
@@ -68,7 +69,6 @@ static uint16_t s_rx_received_crc;
 
 static LdoLink_Status_t s_status;
 static bool s_dcdc_permit_request;
-static bool s_remote_sense;
 static uint8_t s_applied_bleed;
 static uint8_t s_applied_fan;
 static bool s_applied_permit;
@@ -897,7 +897,6 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_huart_g0 = huart_g0;
     LdoLink_ResetParser();
     s_dcdc_permit_request = false;
-    s_remote_sense = false;
     s_last_health_ms = 0U;
     s_last_recover_ms = 0U;
     s_output_wanted = false;
@@ -1090,17 +1089,13 @@ bool LdoLink_IsUartPinSwapEnabled(void)
 
 void LdoLink_SetRemoteSense(bool enable)
 {
-    s_remote_sense = enable;
-    HAL_GPIO_WritePin(REMOTE_ON_GPIO_Port, REMOTE_ON_Pin,
-                       enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    Debug_Printf("[LDO] Sense: %s (REMOTE_ON=%u)\r\n",
-                 enable ? "REMOTE" : "LOCAL",
-                 enable ? 1U : 0U);
+    /* The relay clicks only after the sense self-test passes. */
+    RemoteSense_Request(enable);
 }
 
 bool LdoLink_IsRemoteSenseEnabled(void)
 {
-    return s_remote_sense;
+    return RemoteSense_IsClosed();
 }
 
 void LdoLink_GetStatus(LdoLink_Status_t *out)

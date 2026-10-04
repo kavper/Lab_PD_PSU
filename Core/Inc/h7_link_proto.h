@@ -48,7 +48,7 @@
 #define H7_LINK_METER                0x10U
 #define H7_LINK_BMS_TLM              0x11U
 #define H7_LINK_PD_TLM               0x12U
-#define H7_LINK_AUX_TLM              0x13U /* G0 DAC, NTC, fan, PGOOD, bleed */
+#define H7_LINK_AUX_TLM              0x13U /* G0 DAC, NTC, fan, sense self-test */
 #define H7_LINK_TEXT                 0x20U
 #define H7_LINK_ACK                  0x81U /* u8 acknowledged type */
 #define H7_LINK_NACK                 0x82U /* u8 rejected type, u8 reason */
@@ -64,7 +64,7 @@
 #define H7_LINK_METER_BYTES          72U
 #define H7_LINK_BMS_BYTES            72U
 #define H7_LINK_PD_BYTES             64U
-#define H7_LINK_AUX_BYTES            24U
+#define H7_LINK_AUX_BYTES            32U
 
 /* BMS bytes 0..52 match the previous 56-byte payload (53..55 stay zero). */
 #define H7_BMS_PASSQ_MAH             56U /* i32, DASTATUS6 mAh, signed */
@@ -85,6 +85,12 @@
 #define H7_AUX_PGOOD                 17U /* u8 */
 #define H7_AUX_BLEED                 18U /* u8 */
 #define H7_AUX_VALID                 19U /* u8, 1 when the G0 telemetry is live */
+#define H7_AUX_LOCAL_MV              20U /* u16, ADC_LOCAL_VOUT after the 12:1 divider; 0xFFFF = no sample */
+#define H7_AUX_REMOTE_P_MV           22U /* u16, REMOTE_P, same scale */
+#define H7_AUX_REMOTE_N_MV           24U /* u16, REMOTE_N, same scale */
+#define H7_AUX_SENSE_CODE            26U /* u8, SENSE_* from sense_check.h */
+#define H7_AUX_SENSE_FLAGS           27U /* u8, bit0 relay closed, bit1 remote requested */
+/* Bytes 28..31 stay zero. */
 
 #define H7_METER_VIN_MV              0U
 #define H7_METER_VOUT_MV             4U

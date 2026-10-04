@@ -97,10 +97,11 @@ bool LdoLink_TakeHostSetResult(uint8_t *seq, uint8_t *ack, uint8_t *reason);
 uint8_t LdoLink_HostSetPhase(void);
 
 /*
- * Remote sense path (PB6 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).
- * Host "REMOTE ON" asserts REMOTE_ON so ADC_REMOTE_P/N (PB0/PB1) sense path is
- * selected in hardware. CV regulation still uses ADC_VOUT (PB2) until remote
- * channels are added to ADC DMA ranks.
+ * Remote sense relay (PB6 REMOTE_ON, K1). Default OFF = local Kelvin.
+ * Host "REMOTE ON" only requests remote. The relay clicks after the
+ * PB14/PB0/PB1 self-test says the leads are on the right nodes.
+ * The DCDC loop still regulates from ADC_VOUT (PB2). K1 switches the LDO
+ * feedback sense, not the preregulator ADC.
  */
 void LdoLink_SetRemoteSense(bool enable);
 bool LdoLink_IsRemoteSenseEnabled(void);
