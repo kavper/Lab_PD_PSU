@@ -8,13 +8,15 @@
  * Session state of charge for a 4S1P pack. RAM only: nothing here is
  * written to flash, EEPROM, or BQ76922 OTP.
  *
- * Coulomb counting (CC2, mA) is the source of mAh. A qualified rest
- * calibrates from open-circuit voltage. While current is flowing, Li-ion
- * SOC is also seeded and gently pulled toward the curve at its steep ends.
- * The flat middle is not treated as a precise voltage reading. Nominal
- * capacity below is a tuning start, not a measured cell fact. Capacity is
- * learned between the upper and lower knees, without a discharge to empty.
- * The AFE accumulated-charge register is reported separately.
+ * The charge counter is the BQ76922 accumulated-charge register (DASTATUS6,
+ * passQ), not a CC2 integral kept on the G4. The first reading after boot
+ * is the baseline the AFE already holds. A qualified rest calibrates SOC
+ * from open-circuit voltage; after that, SOC moves by the passQ delta.
+ * While current is flowing, Li-ion SOC is also seeded and gently pulled
+ * toward the curve at its steep ends. The flat middle is not treated as a
+ * precise voltage reading. Nominal capacity below is a tuning start, not a
+ * measured cell fact. Capacity is learned between the upper and lower
+ * knees, from the passQ change, without a discharge to empty.
  */
 
 #define BMS_SOC_NOMINAL_CELL_MAH     2500
@@ -32,7 +34,7 @@ typedef enum {
 } BmsSoc_Chem_t;
 
 typedef struct {
-    int32_t session_mah;
+    int32_t session_mah; /* always 0; the G4 does not keep its own integral */
     int32_t passq_mah;
     uint16_t soc_permille;
     uint8_t flags;

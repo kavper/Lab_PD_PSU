@@ -67,9 +67,9 @@
 #define H7_LINK_AUX_BYTES            24U
 
 /* BMS bytes 0..52 match the previous 56-byte payload (53..55 stay zero). */
-#define H7_BMS_PASSQ_MAH             56U /* i32, AFE userAh rounded to mAh */
-#define H7_BMS_SESSION_MAH           60U /* i32, G4 CC2 integral since boot */
-#define H7_BMS_SOC_PERMILLE          64U /* u16, 0xFFFF until a qualified rest */
+#define H7_BMS_PASSQ_MAH             56U /* i32, DASTATUS6 mAh, signed */
+#define H7_BMS_SESSION_MAH           60U /* i32, zero; not a G4 coulomb counter */
+#define H7_BMS_SOC_PERMILLE          64U /* u16, from passQ after a voltage seed; 0xFFFF unknown */
 #define H7_BMS_CC1_MA                66U /* i16 */
 #define H7_BMS_INT_TEMP_DK           68U /* i16, 0.1 K; 0 = unread */
 #define H7_BMS_BALANCE               70U /* u8, bit0 = cell 1 */

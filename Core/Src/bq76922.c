@@ -177,8 +177,8 @@ static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
 
 /* Session guard — OTP burn is never automatic; UART may do it once per boot. */
 static bool s_otp_burned_this_boot = false;
-/* SHUTDOWN clears the AFE coulomb counter. RESET_PASSQ only after that,
- * never on a G4 boot that left the AFE in NORMAL. */
+/* SHUTDOWN clears the AFE coulomb counter. RESET_PASSQ only after that
+ * command, never on a normal boot and never when only the FETs turn off. */
 static bool s_passq_reset_pending = false;
 
 static void BQ76922_UpdateBusHold(BQ76922_Device_t *dev, uint32_t now_ms)
@@ -1186,8 +1186,8 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
     if (status != BQ76922_OK) {
         return status;
     }
-    /* The AFE drops accumulated charge in SHUTDOWN. Ask for RESET_PASSQ
-     * once on the next init; the G4 session integral stays in RAM. */
+    /* SHUTDOWN clears accumulated charge. RESET_PASSQ runs once on the
+     * next init for that reason only. FET-off and a normal boot do not. */
     s_passq_reset_pending = true;
     HAL_Delay(2U);
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);

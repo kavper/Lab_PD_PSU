@@ -75,7 +75,7 @@ typedef struct {
     uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
-    /* Session SOC. passq is the AFE register; session_mah is the G4 integral. */
+    /* passq_mah is DASTATUS6. session_mah stays 0; SOC uses the passQ delta. */
     int32_t passq_mah;
     int32_t session_mah;
     uint16_t soc_permille;

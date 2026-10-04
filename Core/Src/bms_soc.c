@@ -73,12 +73,13 @@ typedef struct {
     bool resting;
     uint32_t last_ms;
     uint32_t rest_since_ms;
-    int64_t session_mA_ms;
+    bool have_passq;
+    int32_t passq_mah;
     int64_t soc_mA_ms;
     bool anchor_valid;
     bool anchor_high;
     uint16_t anchor_permille;
-    int64_t anchor_mA_ms;
+    int32_t anchor_passq_mah;
     uint8_t balance_mask;
     bool balance_sent;
     uint16_t balance_sent_mask;
@@ -90,19 +91,6 @@ static BmsSoc_State_t s;
 static int64_t BmsSoc_Abs64(int64_t value)
 {
     return (value < 0) ? -value : value;
-}
-
-static int32_t BmsSoc_SessionMah(void)
-{
-    int64_t mah = s.session_mA_ms / BMS_SOC_MAH_SCALE;
-
-    if (mah > 2147483647LL) {
-        return 2147483647;
-    }
-    if (mah < (-2147483647LL - 1)) {
-        return (int32_t)(-2147483647 - 1);
-    }
-    return (int32_t)mah;
 }
 
 static void BmsSoc_ClampSoc(void)
@@ -190,14 +178,14 @@ static void BmsSoc_Learn(uint16_t permille, bool high)
     int32_t dperm;
     int64_t cap;
 
-    if (!s.anchor_valid || (high == s.anchor_high)) {
+    if (!s.anchor_valid || !s.have_passq || (high == s.anchor_high)) {
         return;
     }
     dperm = (int32_t)permille - (int32_t)s.anchor_permille;
     if (dperm < 0) {
         dperm = -dperm;
     }
-    dmah = BmsSoc_Abs64(s.session_mA_ms - s.anchor_mA_ms) / BMS_SOC_MAH_SCALE;
+    dmah = BmsSoc_Abs64((int64_t)s.passq_mah - (int64_t)s.anchor_passq_mah);
     if ((dperm < BMS_SOC_LEARN_MIN_PERMILLE) || (dmah <= BMS_SOC_LEARN_MIN_MAH)) {
         return;
     }
@@ -266,11 +254,11 @@ static void BmsSoc_QualifyRest(int16_t ocv_mv)
     }
     s.valid = true;
     s.soc_mA_ms = (int64_t)permille * (int64_t)s.capacity_mah * 3600LL;
-    if (high || low) {
+    if ((high || low) && s.have_passq) {
         s.anchor_valid = true;
         s.anchor_high = high;
         s.anchor_permille = permille;
-        s.anchor_mA_ms = s.session_mA_ms;
+        s.anchor_passq_mah = s.passq_mah;
     }
 }
 
@@ -339,7 +327,7 @@ static void BmsSoc_Fill(bool passq_valid, int32_t passq_mah, BmsSoc_Result_t *ou
     if (s.balance_mask != 0U) {
         flags |= BMS_SOC_FLAG_BALANCE;
     }
-    out->session_mah = BmsSoc_SessionMah();
+    out->session_mah = 0;
     out->passq_mah = passq_valid ? passq_mah : 0;
     out->soc_permille = BmsSoc_Permille();
     out->flags = flags;
@@ -368,12 +356,13 @@ void BmsSoc_Reset(void)
     s.resting = false;
     s.last_ms = 0U;
     s.rest_since_ms = 0U;
-    s.session_mA_ms = 0;
+    s.have_passq = false;
+    s.passq_mah = 0;
     s.soc_mA_ms = 0;
     s.anchor_valid = false;
     s.anchor_high = false;
     s.anchor_permille = 0U;
-    s.anchor_mA_ms = 0;
+    s.anchor_passq_mah = 0;
     s.balance_mask = 0U;
     s.balance_sent = false;
     s.balance_sent_mask = 0U;
@@ -440,12 +429,16 @@ bool BmsSoc_OnSample(uint32_t now_ms,
     s.last_ms = now_ms;
     s.have_time = true;
 
-    if (dt != 0U) {
-        s.session_mA_ms += (int64_t)cc2_ma * (int64_t)dt;
-        if (s.valid) {
-            s.soc_mA_ms += (int64_t)cc2_ma * (int64_t)dt;
+    /* Charge comes from the AFE register. The first sample is the baseline
+     * already stored in the chip; later samples move SOC by the delta. */
+    if (passq_valid) {
+        if (s.have_passq && s.valid && (passq_mah != s.passq_mah)) {
+            s.soc_mA_ms += ((int64_t)passq_mah - (int64_t)s.passq_mah) *
+                           BMS_SOC_MAH_SCALE;
             BmsSoc_ClampSoc();
         }
+        s.passq_mah = passq_mah;
+        s.have_passq = true;
     }
 
     iabs = (int32_t)cc2_ma;

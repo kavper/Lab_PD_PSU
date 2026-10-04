@@ -32,14 +32,35 @@ static void ExpectEqU(unsigned got, unsigned want, const char *msg)
     }
 }
 
+static int64_t g_afe_mA_ms;
+
+static int32_t AfeMah(void)
+{
+    return (int32_t)(g_afe_mA_ms / 3600000LL);
+}
+
+static void Boot(void)
+{
+    BmsSoc_Reset();
+    g_afe_mA_ms = 0;
+}
+
 static void Sample(uint32_t now, int16_t ma, const int16_t *cells,
                    BmsSoc_Result_t *out)
 {
-    ExpectTrue(BmsSoc_OnSample(now, ma, cells, 5U, 0x17U, false, 0, out),
+    ExpectTrue(BmsSoc_OnSample(now, ma, cells, 5U, 0x17U, true, AfeMah(), out),
                "sample accepted");
 }
 
-/* Step in 5 s so the rest timer accumulates and the integral is not skipped. */
+/* The simulated AFE keeps integrating across a G4 time gap. */
+static void Elapse(uint32_t *now, uint32_t dt_ms, int16_t ma,
+                   const int16_t *cells, BmsSoc_Result_t *out)
+{
+    g_afe_mA_ms += (int64_t)ma * (int64_t)dt_ms;
+    *now += dt_ms;
+    Sample(*now, ma, cells, out);
+}
+
 static void Pump(uint32_t *now, uint32_t total_ms, int16_t ma,
                  const int16_t *cells, BmsSoc_Result_t *out)
 {
@@ -48,9 +69,8 @@ static void Pump(uint32_t *now, uint32_t total_ms, int16_t ma,
     while (left > 0U) {
         uint32_t step = (left > 5000U) ? 5000U : left;
 
-        *now += step;
         left -= step;
-        Sample(*now, ma, cells, out);
+        Elapse(now, step, ma, cells, out);
     }
 }
 
@@ -88,28 +108,27 @@ int main(void)
     ExpectTrue((H7_LINK_AUX_BYTES + 7U) <= H7_LINK_MAX_FRAME,
                "AUX frame fits in 120 bytes");
 
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3700);
     now = 0U;
     Sample(now, 3600, cells, &out);
     ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
               "SOC stays invalid before a qualified rest");
-    ExpectEqI(out.session_mah, 0, "first sample has no dt");
+    ExpectEqI(out.passq_mah, 0, "the first passQ sample is the baseline");
+    ExpectEqI(out.session_mah, 0, "G4 does not keep a session integral");
     for (i = 0U; i < 10U; i++) {
-        now += 1000U;
-        Sample(now, 3600, cells, &out);
+        Elapse(&now, 1000U, 3600, cells, &out);
     }
-    ExpectEqI(out.session_mah, 10, "10 s at 3.6 A is 10 mAh");
+    ExpectEqI(out.passq_mah, 10, "10 s at 3.6 A is 10 mAh on passQ");
+    ExpectEqI(out.session_mah, 0, "CC2 does not build a second counter");
     ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
               "live voltage does not seed SOC");
-    now += 5001U;
-    Sample(now, 3600, cells, &out);
-    ExpectEqI(out.session_mah, 10, "a gap above 5 s is not integrated");
-    now += 1000U;
-    Sample(now, -3600, cells, &out);
-    ExpectEqI(out.session_mah, 9, "discharge counts against the session");
+    Elapse(&now, 5001U, 3600, cells, &out);
+    ExpectEqI(out.passq_mah, 15, "a G4 time gap does not drop AFE charge");
+    Elapse(&now, 1000U, -3600, cells, &out);
+    ExpectEqI(out.passq_mah, 14, "discharge counts on passQ");
 
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3500);
     now = 0U;
     Sample(now, 0, cells, &out);
@@ -120,14 +139,14 @@ int main(void)
     ExpectTrue((out.flags & BMS_SOC_FLAG_LEARNED) == 0U,
                "one rest does not learn capacity");
 
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3300);
     now = 0U;
     Sample(now, 0, cells, &out);
     Pump(&now, 30U * 60U * 1000U, 0, cells, &out);
     ExpectEqU(out.soc_permille, 50U, "default chemistry is Li-ion");
 
-    BmsSoc_Reset();
+    Boot();
     BmsSoc_SetChemistry(BMS_SOC_CHEM_LFP);
     FillMv(cells, 3300);
     now = 0U;
@@ -136,14 +155,15 @@ int main(void)
     ExpectEqU(out.soc_permille, 500U, "LFP table is used only when selected");
 
     /* Low anchor, 277 mAh of charge, high anchor → capacity 325 mAh. */
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3400);
     now = 0U;
     Sample(now, 0, cells, &out);
     Pump(&now, 30U * 60U * 1000U, 0, cells, &out);
     ExpectEqU(out.soc_permille, 100U, "3400 mV is the low Li-ion anchor");
     Pump(&now, 200U * 5000U, 1000, cells, &out);
-    ExpectEqI(out.session_mah, 277, "session counts the transfer");
+    ExpectEqI(out.passq_mah, 277, "passQ counts the transfer");
+    ExpectEqI(out.session_mah, 0, "the transfer is not a G4 integral");
     ExpectTrue((out.flags & BMS_SOC_FLAG_LEARNED) == 0U,
                "capacity waits for the opposite anchor");
     FillMv(cells, 4100);
@@ -155,12 +175,11 @@ int main(void)
     /* Leave the steep end. Live tracking must not fight this coulomb step. */
     FillMv(cells, 3700);
     for (i = 0U; i < 32U; i++) {
-        now += 1000U;
-        Sample(now, -3600, cells, &out);
+        Elapse(&now, 1000U, -3600, cells, &out);
     }
     ExpectEqU(out.soc_permille, 851U, "learned 325 mAh moves SOC by 32 mAh");
 
-    BmsSoc_Reset();
+    Boot();
     cells[0] = 4000;
     cells[1] = 4010;
     cells[2] = 4020;
@@ -191,18 +210,49 @@ int main(void)
     Sample(now, 0, cells, &out);
     ExpectTrue(!out.balance_write, "a zero mask is not repeated");
 
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 4100);
     Sample(0U, 50, cells, &out);
     ExpectEqU(out.balance_mask, 0U, "balance waits for charge above 100 mA");
     ExpectTrue(BmsSoc_OnSample(0U, 0, cells, 5U, 0x17U, true, -4, &out),
                "passQ sample accepted");
     ExpectTrue((out.flags & BMS_SOC_FLAG_PASSQ_VALID) != 0U, "passQ flag");
-    ExpectEqI(out.passq_mah, -4, "passQ is reported and is not the session");
-    ExpectEqI(out.session_mah, 0, "passQ does not move the session integral");
+    ExpectEqI(out.passq_mah, -4, "passQ is the DASTATUS6 reading");
+    ExpectEqI(out.session_mah, 0, "passQ does not start a G4 integral");
+
+    /* A G4 reboot keeps the AFE count and does not turn it into SOC. */
+    Boot();
+    g_afe_mA_ms = -40LL * 3600000LL;
+    FillMv(cells, 3700);
+    now = 0U;
+    Sample(now, 0, cells, &out);
+    ExpectEqI(out.passq_mah, -40, "boot reports the passQ the AFE kept");
+    ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
+              "a survived passQ is not a percentage by itself");
+    for (i = 0U; i < 10U; i++) {
+        now += 1000U;
+        Sample(now, 3600, cells, &out);
+    }
+    ExpectEqI(out.passq_mah, -40, "CC2 alone does not move the counter");
+    g_afe_mA_ms += 10LL * 3600000LL;
+    now += 1000U;
+    Sample(now, 0, cells, &out);
+    ExpectEqI(out.passq_mah, -30, "the next DASTATUS6 reading is the counter");
+    FillMv(cells, 4100);
+    now += 1000U;
+    Sample(now, 200, cells, &out);
+    ExpectEqU(out.soc_permille, 950U, "the high end seeds SOC on the survived counter");
+    FillMv(cells, 3700);
+    g_afe_mA_ms += 25LL * 3600000LL;
+    now += 1000U;
+    Sample(now, 0, cells, &out);
+    ExpectEqU(out.soc_permille, 960U, "25 mAh of passQ is 10 permille at 2500 mAh");
+    now += 1000U;
+    Sample(now, 3600, cells, &out);
+    ExpectEqU(out.soc_permille, 960U, "CC2 does not move SOC while passQ holds");
 
     /* Steep ends estimate SOC under current. The flat middle does not. */
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3700);
     Sample(0U, 500, cells, &out);
     ExpectEqU(out.soc_permille, BMS_SOC_INVALID_PERMILLE,
@@ -221,14 +271,15 @@ int main(void)
               "the low end corrects gently instead of snapping");
 
     /* 3.6 V to 4.0 V is enough to learn. Empty (3.0 V) is not required. */
-    BmsSoc_Reset();
+    Boot();
     FillMv(cells, 3600);
     now = 0U;
     Sample(now, 0, cells, &out);
     Pump(&now, 30U * 60U * 1000U, 0, cells, &out);
     ExpectEqU(out.soc_permille, 300U, "3600 mV rest is the low knee");
     Pump(&now, 108U * 5000U, 1000, cells, &out);
-    ExpectEqI(out.session_mah, 150, "partial transfer is 150 mAh");
+    ExpectEqI(out.passq_mah, 150, "partial transfer is 150 mAh on passQ");
+    ExpectEqI(out.session_mah, 0, "partial transfer is not a G4 integral");
     FillMv(cells, 4000);
     Pump(&now, (30U * 60U * 1000U) + 5000U, 0, cells, &out);
     ExpectEqU(out.soc_permille, 820U, "4000 mV rest is the high knee");
@@ -236,12 +287,11 @@ int main(void)
                "capacity learns without a discharge to empty");
     FillMv(cells, 3700);
     for (i = 0U; i < 28U; i++) {
-        now += 1000U;
-        Sample(now, -3600, cells, &out);
+        Elapse(&now, 1000U, -3600, cells, &out);
     }
     ExpectEqU(out.soc_permille, 722U, "learned 288 mAh moves SOC by 28 mAh");
 
-    BmsSoc_Reset();
+    Boot();
     BmsSoc_SetChemistry(BMS_SOC_CHEM_LFP);
     FillMv(cells, 3450);
     Sample(0U, 500, cells, &out);
