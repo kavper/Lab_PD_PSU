@@ -37,6 +37,12 @@ int main(void)
              "positive open, negative on neither rail");
     ExpectEq(Sense_Classify(1000U, 1000U, 0U), SENSE_NOT_READY,
              "below 2 V the test does not judge the leads");
+    ExpectEq(Sense_Classify(2000U, 1000U, 0U), SENSE_NOT_READY,
+             "2 V local, remote +1 V and 0 V overlap and must not pass");
+    ExpectEq(Sense_Classify(3000U, 1500U, 0U), SENSE_NOT_READY,
+             "at 3 V the 1.5 V window still touches both bands");
+    ExpectEq(Sense_Classify(3001U, 3001U, 0U), SENSE_OK,
+             "just above 3 V the bands separate and a matched pair passes");
     ExpectEq(Sense_Classify(24000U, 20000U, 1500U), SENSE_OK,
              "a few volts of cable drop still passes");
 

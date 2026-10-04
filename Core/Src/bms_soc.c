@@ -76,6 +76,7 @@ typedef struct {
     bool have_passq;
     int32_t passq_mah;
     int64_t soc_mA_ms;
+    int64_t track_resid;
     bool anchor_valid;
     bool anchor_high;
     uint16_t anchor_permille;
@@ -204,7 +205,11 @@ static void BmsSoc_TrackEnds(int16_t min_mv, uint32_t dt, bool snapped)
 {
     uint16_t target;
     int32_t err;
-    int32_t step;
+    int64_t scale;
+    int64_t num;
+    int64_t den;
+    int64_t delta;
+    int64_t limit;
 
     if ((s.chem != BMS_SOC_CHEM_LIION) || snapped) {
         return;
@@ -217,22 +222,30 @@ static void BmsSoc_TrackEnds(int16_t min_mv, uint32_t dt, bool snapped)
     if (!s.valid) {
         s.valid = true;
         s.soc_mA_ms = (int64_t)target * (int64_t)s.capacity_mah * 3600LL;
+        s.track_resid = 0;
         return;
     }
     if ((dt == 0U) || (s.capacity_mah <= 0)) {
         return;
     }
     err = (int32_t)target - (int32_t)BmsSoc_Permille();
-    step = (int32_t)(((int64_t)err * (int64_t)dt) / (int64_t)BMS_SOC_END_TAU_MS);
-    if ((step == 0) && (err != 0)) {
-        step = (err > 0) ? 1 : -1;
+    if (err == 0) {
+        s.track_resid = 0;
+        return;
     }
-    if ((err > 0) && (step > err)) {
-        step = err;
-    } else if ((err < 0) && (step < err)) {
-        step = err;
+    /* Keep the division remainder. A truncated permille step used to be
+     * forced to ±1 on every sample, so a 50 ms poll ignored the 180 s tau. */
+    scale = (int64_t)s.capacity_mah * 3600LL;
+    den = (int64_t)BMS_SOC_END_TAU_MS;
+    num = (int64_t)err * scale * (int64_t)dt + s.track_resid;
+    delta = num / den;
+    s.track_resid = num - (delta * den);
+    limit = (int64_t)err * scale;
+    if (((err > 0) && (delta > limit)) || ((err < 0) && (delta < limit))) {
+        delta = limit;
+        s.track_resid = 0;
     }
-    s.soc_mA_ms += (int64_t)step * (int64_t)s.capacity_mah * 3600LL;
+    s.soc_mA_ms += delta;
     BmsSoc_ClampSoc();
 }
 
@@ -254,6 +267,7 @@ static void BmsSoc_QualifyRest(int16_t ocv_mv)
     }
     s.valid = true;
     s.soc_mA_ms = (int64_t)permille * (int64_t)s.capacity_mah * 3600LL;
+    s.track_resid = 0;
     if ((high || low) && s.have_passq) {
         s.anchor_valid = true;
         s.anchor_high = high;
@@ -359,6 +373,7 @@ void BmsSoc_Reset(void)
     s.have_passq = false;
     s.passq_mah = 0;
     s.soc_mA_ms = 0;
+    s.track_resid = 0;
     s.anchor_valid = false;
     s.anchor_high = false;
     s.anchor_permille = 0U;

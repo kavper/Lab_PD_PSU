@@ -243,7 +243,7 @@ Napięcia sense są po dzielniku 220 kΩ / 20 kΩ (×12) i referencji 3,0 V. `0x
 | Kod | Nazwa | Co pokazać |
 |---:|---|---|
 | 0 | OK | przewody wyglądają dobrze; po trzech próbkach wolno kliknąć przekaźnik |
-| 1 | NOT_READY | Vout poniżej 2 V, za mało żeby ocenić przewody |
+| 1 | NOT_READY | Vout jest za niskie, żeby pasmo przy masie i pasmo przy wyjściu były rozłączne. Przy minimalnym oknie 1,5 V test odmawia remote do 3 V włącznie; poniżej 2 V też nie ocenia przewodów |
 | 2 | OPEN | oba przewody przy masie: odpięte albo brak plusa |
 | 3 | OPEN_P | plus odpięty, minus nie jest ani przy masie, ani przy Vout |
 | 4 | REVERSED | przewody zamienione (minus widzi Vout) |

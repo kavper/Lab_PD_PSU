@@ -273,6 +273,27 @@ int main(void)
     ExpectEqU(out.soc_permille, 945U,
               "the low end corrects gently instead of snapping");
 
+    /* 50 ms samples must keep the fraction. tau is 180 s, so a 50 permille
+     * error moves one permille in 3.6 s (72 samples), not one per sample. */
+    Boot();
+    FillMv(cells, 4100);
+    now = 0U;
+    Sample(now, 500, cells, &out);
+    ExpectEqU(out.soc_permille, 950U, "high end seeds 950 before the fast poll");
+    FillMv(cells, 4200);
+    for (i = 0U; i < 20U; i++) {
+        now += 50U;
+        Sample(now, 500, cells, &out);
+    }
+    ExpectEqU(out.soc_permille, 950U,
+              "twenty 50 ms samples do not force a permille");
+    for (; i < 72U; i++) {
+        now += 50U;
+        Sample(now, 500, cells, &out);
+    }
+    ExpectEqU(out.soc_permille, 951U,
+              "72 samples of 50 ms, 3.6 s, move one permille at tau 180 s");
+
     /* 3.6 V to 4.0 V is enough to learn. Empty (3.0 V) is not required. */
     Boot();
     FillMv(cells, 3600);

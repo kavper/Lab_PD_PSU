@@ -33,7 +33,7 @@
 
 enum {
     SENSE_OK = 0,          /* positive matches Vout, negative is near ground */
-    SENSE_NOT_READY = 1,   /* local Vout too low to tell an open lead from a real low output */
+    SENSE_NOT_READY = 1,   /* bands overlap, or Vout is below 2 V, so an open lead is not separable */
     SENSE_OPEN = 2,        /* both leads near ground: unplugged, or the positive lead is open */
     SENSE_OPEN_P = 3,      /* positive lead open, negative is neither ground nor Vout */
     SENSE_REVERSED = 4,    /* leads swapped: negative sees Vout, positive does not */
@@ -94,6 +94,14 @@ static inline uint8_t Sense_Classify(uint32_t local_mv, uint32_t remote_p_mv,
     }
 
     window = Sense_WindowMv(local_mv);
+    /*
+     * Near-Vout and near-ground share one window. When Vout is at most
+     * twice that window the bands meet, and a lead between them
+     * (2 V local, remote +1 V, remote 0 V) would pass as OK.
+     */
+    if (local_mv <= (window * 2U)) {
+        return SENSE_NOT_READY;
+    }
     p_near = Sense_Near(remote_p_mv, local_mv, window);
     n_near = Sense_Near(remote_n_mv, local_mv, window);
     p_low = (remote_p_mv <= window);

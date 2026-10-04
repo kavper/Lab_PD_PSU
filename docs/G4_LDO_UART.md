@@ -53,7 +53,7 @@ Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Co
 
 - **Default at boot:** local only (`REMOTE_ON` = LOW). The DCDC still regulates from `ADC_VOUT` (PB2). K1 switches the LDO Kelvin sense, not that ADC.
 - Host `REMOTE ON` / `REMOTE 1` requests remote sense. The relay stays off until three self-test samples, 100 ms apart, read OK.
-- The self-test compares PB14 (local Vout), PB0 (REMOTE_P) and PB1 (REMOTE_N) through the 12:1 dividers. Tolerance is loose: 25% of Vout, at least 1.5 V. Below 2 V the test does not judge.
+- The self-test compares PB14 (local Vout), PB0 (REMOTE_P) and PB1 (REMOTE_N) through the 12:1 dividers. Tolerance is loose: 25% of Vout, at least 1.5 V. The ground band and the Vout band share that window, so the test refuses remote while they meet. With the 1.5 V floor that is every local reading up to 3 V, including the old “below 2 V” case.
 - OK clicks the relay. Swapped leads, both leads on the positive output, an open positive lead, or a positive lead that matches neither Vout nor ground keep the relay in local and report a code on AUX.
 - Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately.
 - An open negative lead at no current reads the same as a lead on the load return, so that one case is not separable and is reported as OK.

@@ -110,11 +110,13 @@
 #define BOARD_VPRE_VIN_FLOOR_V               6.0f
 
 /*
- * Bring-up without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV.
- * Set to 0 when G0 LDO must control PERMIT exclusively.
+ * Bench image without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV
+ * even when the pre-regulator is not in regulation. Shipping G4+G0 leaves
+ * this at 0, so PERMIT waits for regulation_ok. A bench build overrides
+ * with -DBOARD_BRINGUP_LOCAL_CV=1.
  */
 #ifndef BOARD_BRINGUP_LOCAL_CV
-#define BOARD_BRINGUP_LOCAL_CV               1U
+#define BOARD_BRINGUP_LOCAL_CV               0U
 #endif
 
 /*
@@ -134,9 +136,13 @@
 #define BOARD_BRINGUP_LDO_VPRE_V             6.5f
 #endif
 
-/* Assert POWER_PERMIT from boot so G0 opto clears POWER_KILL early. */
+/*
+ * Bench only: assert POWER_PERMIT from boot, including during init, before
+ * regulation_ok. Shipping G4+G0 leaves this at 0. A bench build overrides
+ * with -DBOARD_BRINGUP_PERMIT_EARLY=1.
+ */
 #ifndef BOARD_BRINGUP_PERMIT_EARLY
-#define BOARD_BRINGUP_PERMIT_EARLY           1U
+#define BOARD_BRINGUP_PERMIT_EARLY           0U
 #endif
 
 /* Wait after POWER_PERMIT before enabling isolated GaN supplies (no G0). */
