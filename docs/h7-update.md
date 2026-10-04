@@ -137,7 +137,7 @@ Wiek `g0_age_ms` liczy się od ostatniej poprawnej ramki telemetrycznej G0, nie 
 | 67 | u8 | `flags1` |
 | 68 | u8 | `g0_ctrl` |
 | 69 | u8 | `g0_mode` — 0 OFF, 1 CV, 2 CC |
-| 70 | u8 | `set_phase` — 0 idle, 1 komenda u G0, 2 jeden SET czeka |
+| 70 | u8 | `set_phase` — 0 brak SET w locie i brak pending, 1 SET jest u G0 albo wynik czeka w hold, 2 nowsza para V+I czeka i jeszcze nie wyszła |
 | 71 | u8 | `g0_stale` — 1 gdy brak ważnej telemetrii G0 albo wiek > 500 ms |
 
 `flags0`: bit0 `g0_out`, 1 `g0_want`, 2 `g0_kill`, 3 `g0_outoff`, 4 `g0_cc`, 5 `permit`, 6 `run`, 7 `reg_ok`.
@@ -148,7 +148,7 @@ Wiek `g0_age_ms` liczy się od ostatniej poprawnej ramki telemetrycznej G0, nie 
 
 Bity `g0_fault`: 0 HW_INIT, 1 PGOOD_LOST, 2 POWER_KILL, 3 VIN_LOW, 4 VOUT_HARD, 5 VOUT_HIGH, 6 TEMP_HIGH, 7 IOUT_HARD, 8 MEAS_LOST.
 
-Bit 8 znaczy, że Vout, Iout, Vin albo któryś NTC jest starszy niż pełny cykl pomiaru (50 ms). Nowa ramka UART tego nie odświeża. Przy tym bicie `g0_vout_mv`, `g0_iout_ma` i `g0_vin_mv` są 0, a temperatury w AUX są `INT16_MIN`. To nie jest prawdziwe 0 V. G0 gasi wyjście lokalnie. G4 w RUNNING, gdy w `g0_fault` jest cokolwiek poza samym bitem VIN_LOW, zdejmuje permit.
+Bit 8 (`MEAS_LOST`) znaczy, że Vout, Iout, Vin albo któryś NTC przekroczył limit świeżości pomiarów, 50 ms. Nowa ramka UART tego nie odświeża. Przy tym bicie `g0_vout_mv`, `g0_iout_ma` i `g0_vin_mv` są 0, a temperatury w AUX są `INT16_MIN`. To nie jest prawdziwe 0 V. G0 gasi wyjście lokalnie. G4 w RUNNING, gdy w `g0_fault` jest cokolwiek poza samym bitem VIN_LOW, zdejmuje permit. Ten limit 50 ms jest licznikiem próbek ADC. Osobne 50 ms przy wieku ramki METER na łączu H7↔G4 jest czym innym.
 
 Przykład METER, SEQ 3, ramka 79 B. Szyna 6,5 V, cel 5,000 V / 1,000 A, `g0_age_ms = 4`, duty 41,0% i 12,0%, `flags0 = 0xE3` (out, want, permit, run, reg_ok), `flags1 = 0x43` (stage, ps_en, g0_valid), `g0_ctrl = 9` (RUNNING), `g0_mode = 1` (CV), faza 0, nie stale:
 
@@ -287,16 +287,33 @@ Odpięty minus przy braku prądu czyta się tak samo jak minus podłączony do m
 
 ## DMA i cache na H7
 
-Zostaw piny i AF. Zmień tylko baud i transport.
+Zostaw piny i AF. Zmień tylko baud i transport. Linia D-cache Cortex-M7 ma 32 B.
 
-1. Bufor RX: DMA kołowy, rozmiar wielokrotność 32 (np. 256 lub 512). Wyrównanie 32 B (`aligned(32)`). Adres i długość przekazane do czyszczenia cache też wyrównane do 32 w górę.
-2. Bufor TX: zwykły (nie kołowy) DMA, ten sam wymóg wyrównania. Jedna ramka ≤ 120 B, więc bufor 128 B jest wygodny.
-3. Start: `HAL_UARTEx_ReceiveToIdle_DMA`. Zostaw przerwania HT i TC (`DMA_IT_HT | DMA_IT_TC`) oraz IDLE w UART. W przerwaniu tylko ustaw flagę. Nie parsuj w ISR.
-4. W zadaniu, zanim odczytasz nowe bajty: `SCB_InvalidateDCache_by_Addr` na zakres obejmujący te bajty (wyrównany). Potem pozycja zapisu = `rozmiar - NDTR`. Parser jest poza ISR.
-5. Zanim wystartujesz TX DMA: zapisz ramkę do bufora, potem `SCB_CleanDCache_by_Addr`, potem `HAL_UART_Transmit_DMA`. Nie wołaj `HAL_UART_Transmit` (blokuje 5 ms).
-6. Nie przerywaj DMA, które już wystartowało (`HAL_UART_AbortTransmit` nie służy do wepchnięcia nowszego SET).
-7. Błąd UART: zlicz, wyczyść flagi, uruchom RX od nowa. Jeśli TX nadal jest `BUSY_TX`, nie zeruj mu stanu — dokończy się.
-8. AXI SRAM `0x24000000` w `MPU_Config` (region 5) jest cacheowalny. Bufory DMA leżące tam wymagają invalidate/clean. Nie wyłączaj D-cache globalnie.
+UART7 jest na APB1 (domena D2), więc obsługuje go DMA1 albo DMA2. Te kontrolery widzą AXI SRAM `0x24000000` oraz SRAM1, SRAM2 i SRAM3 pod `0x30000000`. Nie widzą DTCM `0x20000000` ani ITCM `0x00000000`. SRAM4 `0x38000000` zostaw dla BDMA. Bufor RX i TX trzymaj w SRAM1–3 albo w AXI SRAM.
+
+AXI SRAM w `MPU_Config` (region 5, `0x24000000`) jest cacheowalna. Najczyściej daj buforom własny region MPU w SRAM D2: Normal, non-cacheable, shareable, bez wykonywania kodu. Każdy bufor wyrównaj do 32 B (`aligned(32)`) i daj mu długość będącą wielokrotnością 32, z odstępem do sąsiedniej zmiennej. Invalidate na linii współdzielonej z innymi danymi kasuje ich świeży zapis CPU, a clean wypycha starą linię na sąsiadów.
+
+Gdy bufor zostaje w cacheowalnej AXI SRAM, utrzymuj cache tak:
+
+- adres do `SCB_InvalidateDCache_by_Addr` i `SCB_CleanDCache_by_Addr` wyrównaj w dół: `addr & ~31`
+- koniec zakresu wyrównaj w górę: `(addr + len + 31) & ~31`, a długość to różnica tych dwóch
+- na RX tylko invalidate. Clean na buforze RX zapisze starą linię cache na bajty, które DMA już położyło
+
+Przygotowanie RX, zanim DMA ruszy:
+
+1. Invalidate całego bufora RX (adres w dół, koniec w górę).
+2. Indeks odczytu `tail = 0`.
+3. Dopiero potem `HAL_UARTEx_ReceiveToIdle_DMA` na cały bufor. NDTR startuje od rozmiaru, więc pierwszy bajt ląduje pod indeksem 0.
+
+W przerwaniu HT, TC i IDLE tylko ustaw flagę. Parser jest w zadaniu.
+
+Odczyt kołowy: pozycja zapisu `w = rozmiar - NDTR`. Nowe bajty to przedział `[tail, w)`. Gdy `w < tail`, bufor się zawinął: najpierw `tail .. rozmiar-1`, potem `0 .. w-1`. Po skonsumowaniu bajtu `tail = (tail + 1) % rozmiar`.
+
+Przepełnienie: DMA jest kołowe i nadpisuje najstarsze bajty. Jeśli między dwoma odczytami przyjdzie TC, a `tail` nie zszedł z poprzedniego okrążenia, bajty sprzed `tail` już nie istnieją. Ustaw wtedy `tail = w`, wyrzuć niedokończoną ramkę i szukaj od nowa `A5 5A`. Nie parsuj nadpisanego obszaru drugi raz. Bufor 512 B mieści około sześciu ramek METER (79 B co 5 ms), czyli około 30 ms zwłoki zadania. Czytaj po każdej fladze HT, TC i IDLE.
+
+TX: bufor zwykły, nie kołowy, 128 B wystarcza na ramkę do 120 B. Zapisz ramkę, clean (adres w dół, koniec w górę), potem `HAL_UART_Transmit_DMA`. Rozpoczętego DMA nie przerywaj, żeby wepchnąć nowszy SET.
+
+Błąd UART: zlicz, wyczyść flagi. RX uruchom od nowa dopiero po `HAL_UART_AbortReceive`, ponownym invalidate całego bufora i `tail = 0`. Jeśli TX nadal jest `BUSY_TX`, zostaw go — dokończy się.
 
 G4 nie ma D-cache, więc po swojej stronie nie robi tych operacji. H7 musi.
 
@@ -309,7 +326,7 @@ Jedna transakcja SET w locie i jeden nadpisany oczekujący komplet V+I. Nie ma `
 3. ACK/NACK przychodzi z tym samym SEQ. ACK znaczy: G0 przyjął cel rampy. Nie znaczy, że napięcie na wyjściu już doszło. Rampy zostają 50 mV/ms i 10 mA/ms po stronie G0; H7 ich nie egzekwuje.
 4. G4 trzyma nieodebrany wynik SET i nie nadpisuje go drugim zakończeniem. Następny SET do G0 startuje dopiero, gdy HostLink zabierze poprzedni ACK/NACK do ramki dla H7 (w tej samej kolejce co METER, co 5 ms). Do tego czasu pending zostaje pending.
 5. Timeout 800 ms bez ACK/NACK tego SEQ to awaria (reason 6), nie przerwa między suwakami. Wolno retransmitować ten sam SEQ. G4 odda zapamiętany wynik i nie zastosuje setpointu drugi raz. Nie wolno w tym celu brać nowego SEQ — nowy SEQ to nowy efekt.
-6. G4 wysyła ACK do H7 dopiero po ACK z G0. Do tego czasu `set_phase` w METER jest 1 (w locie) albo 2 (pending czeka, a na drucie jest starszy SET).
+6. G4 wysyła ACK do H7 dopiero po ACK z G0. `set_phase` jest czytane przed zdjęciem tego wyniku do ramki ACK, więc w tym samym METER faza może być już 0, a ACK iść obok. Znaczenie fazy jest takie, jak `LdoLink_HostSetPhase`: 1, gdy SET jest w drodze do G0 albo zakończenie stoi w hold, bo slot wyniku jest jeszcze pełny; 2, gdy nowsza para V+I jest zapisana i G4 jej nie wysłał; 0, gdy nie ma ani lotu, ani pending.
 
 ON, OFF, CLEAR i bezpieczeństwo nie są latest-wins.
 
@@ -322,7 +339,7 @@ ON, OFF, CLEAR i bezpieczeństwo nie są latest-wins.
 
 - Rysuj UI co około 33 ms z ostatniego poprawnego snapshotu (`psu_snapshot` już jest). Nie czekaj na UART w wątku rysowania i nie parsuj `T` przy każdym odświeżeniu.
 - Wiek danych = czas od ostatniej ramki z dobrym CRC, nie od powtórki tego samego SEQ.
-- METER starszy niż 50 ms: łącz G4↔H7 jest stale (wygaszenie żywych mierników). BMS/PD/AUX starsze niż 1000 ms: wygaszenie tych paneli, METER może dalej być żywy.
+- METER starszy niż 50 ms: łącz H7↔G4 jest stale (wygaszenie żywych mierników). To jest wiek ramki u H7, nie limit świeżości pomiarów ADC (też 50 ms, bit 8 `g0_fault`). BMS/PD/AUX starsze niż 1000 ms: wygaszenie tych paneli, METER może dalej być żywy.
 - `g0_stale == 1` albo `g0_age_ms > 500`: ramka z G0 jest nieaktualna. To nie jest to samo co bit 8 `g0_fault`: świeży METER może nieść stare próbki ADC. G4 po 500 ms ważnej, a potem urwanej telemetrii G0 sam zdejmuje permit i nie włącza wyjścia ponownie.
 - Po powrocie ramek nie wysyłaj `ON`. Nie ustawiaj `output_requested` z powrotem na 1 tylko dlatego, że łącze wróciło. `flags0.g0_want` będzie 0, dopóki użytkownik nie wyda nowego ON.
 - Dzisiejsze `psu_app_tick` przy utracie G0 woła `psu_app_set_output(0, …)` (ok. linii 611). Zostaw to jako OFF. Usuń każdą ścieżkę, która po reconnect albo po nowej linii `T` sama woła `g4_on` / `psu_app_set_output(1)`. Jednorazowy `cold_output_off` przy starcie (OFF, nie ON) może zostać.
