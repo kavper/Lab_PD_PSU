@@ -12,6 +12,7 @@
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
+#include "fan_tach.h"
 #include "remote_sense.h"
 #include "host_link_policy.h"
 
@@ -796,6 +797,7 @@ static void HostLink_QueueSlow(void)
         aux_payload[H7_AUX_SENSE_FLAGS] =
             (uint8_t)((RemoteSense_IsClosed() ? 0x01U : 0U) |
                       (RemoteSense_IsWanted() ? 0x02U : 0U));
+        H7Link_PutU16(&aux_payload[H7_AUX_FAN_RPM], FanTach_Rpm());
         (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
                                   H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
     }

@@ -6,6 +6,7 @@
 #include "control_cv.h"
 #include "dcdc_hs_policy.h"
 #include "debug_uart.h"
+#include "fan_tach.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "host_link.h"
@@ -1841,6 +1842,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 void App_Run(void)
 {
     LdoLink_Task();
+    FanTach_Task();
     RemoteSense_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_PublishOcpEvent();
