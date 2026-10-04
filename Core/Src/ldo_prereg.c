@@ -2,6 +2,7 @@
 
 #include "app.h"
 #include "board_rev.h"
+#include "dcdc_permit.h"
 #include "debug_uart.h"
 #include "ldo_link.h"
 #include "prereg_request.h"
@@ -306,10 +307,10 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.regulation_ok =
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
 
-        want_permit = want_enable &&
-                      dcdc_enabled &&
-                      s_status.regulation_ok &&
-                      (!s_status.permit_override_off);
+        want_permit = Dcdc_PermitAllowed(want_enable,
+                                         dcdc_enabled,
+                                         s_status.regulation_ok,
+                                         s_status.permit_override_off);
 
 #if (BOARD_BRINGUP_LOCAL_CV != 0U)
         if ((!want_permit) &&
@@ -343,10 +344,10 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.vpre_command_v = s_command_v;
         s_status.regulation_ok =
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
-        want_permit = want_enable &&
-                      dcdc_enabled &&
-                      s_status.regulation_ok &&
-                      (!s_status.permit_override_off);
+        want_permit = Dcdc_PermitAllowed(want_enable,
+                                         dcdc_enabled,
+                                         s_status.regulation_ok,
+                                         s_status.permit_override_off);
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
         if ((!want_permit) && (!s_status.permit_override_off)) {
             want_permit = true;

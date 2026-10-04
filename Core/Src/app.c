@@ -5,6 +5,7 @@
 #include "bq76922.h"
 #include "control_cv.h"
 #include "dcdc_hs_policy.h"
+#include "dcdc_permit.h"
 #include "debug_uart.h"
 #include "fan_tach.h"
 #include "ldo_link.h"
@@ -1400,7 +1401,14 @@ static void App_ControlSlowTask(void)
                 permit_ok = false;
             }
 #endif
-            if (permit_ok && (!app.stage_enabled)) {
+            /* Shipping path starts the stage on CV request. Permit is
+             * granted afterwards, once regulation has held. Waiting for
+             * permit here deadlocks: regulation is false while the stage
+             * is off, so permit never comes. */
+            if (Dcdc_StageStartAllowed(true, true,
+                                       (BOARD_BRINGUP_LOCAL_CV != 0U),
+                                       permit_ok) &&
+                (!app.stage_enabled)) {
                 (void)App_EnableStageSlow();
             }
         }

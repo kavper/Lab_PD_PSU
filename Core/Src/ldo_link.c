@@ -631,22 +631,20 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         if (!s_output_wanted) {
             break;
         }
-        /* Ensure opto permit while waiting for kill=0. */
-        LdoPrereg_SetPermitOverrideOff(false);
-        s_dcdc_permit_request = true;
-        if (!s_applied_permit) {
-            LdoLink_SetPermitPin(true);
-        }
-
+        /* PB7 is driven only from the preregulator grant, after the
+         * DCDC has held regulation. Forcing it here cleared POWER_KILL
+         * while the pre-regulator was still off. */
         if (LdoLink_TlmFresh(now_ms) &&
             (s_status.kill_reported == 0U) &&
+            LdoPrereg_IsPermitGranted() &&
             LdoLink_IsPowerPermitted()) {
             s_retry_count = 0U;
             LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, now_ms);
         } else if ((uint32_t)(now_ms - s_state_since_ms) > 2000U) {
-            Debug_Printf("[LDO] wait permit: kill=%u pb6=%u pgood=%u\r\n",
+            Debug_Printf("[LDO] wait permit: kill=%u pin=%u granted=%u pgood=%u\r\n",
                          (unsigned int)s_status.kill_reported,
                          LdoLink_IsPowerPermitted() ? 1U : 0U,
+                         LdoPrereg_IsPermitGranted() ? 1U : 0U,
                          (unsigned int)s_status.pgood);
             s_state_since_ms = now_ms;
         }
