@@ -44,7 +44,7 @@ typedef struct {
     uint32_t vpre_mv;
     uint32_t dac_cv_mv;
     uint32_t dac_cc_mv;
-    int16_t temp_centi_c[4]; /* T1 MOSFET, T2 ambient, T3 bleeder, T4 LDO */
+    int16_t temp_centi_c[4]; /* T1..T4, °C×10 from G0; INT16_MIN = missing */
     uint32_t fault_flags;
     bool vpre_present;
     uint32_t last_tlm_ms;

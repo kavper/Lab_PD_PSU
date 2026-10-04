@@ -777,11 +777,12 @@ static void HostLink_QueueSlow(void)
         H7Link_PutU32(&aux_payload[H7_AUX_DAC_CV_MV], ldo.dac_cv_mv);
         H7Link_PutU32(&aux_payload[H7_AUX_DAC_CC_MV], ldo.dac_cc_mv);
         for (i = 0U; i < 4U; i++) {
-            int16_t centi = ldo.telemetry_valid ? ldo.temp_centi_c[i]
-                                                : (int16_t)INT16_MIN;
+            int16_t deci_c = ldo.telemetry_valid ? ldo.temp_centi_c[i]
+                                                 : (int16_t)INT16_MIN;
 
+            /* G0 already scaled to °C×10. Copy the int16; do not rescale. */
             H7Link_PutU16(&aux_payload[H7_AUX_T1_CC + (uint8_t)(2U * i)],
-                          (uint16_t)centi);
+                          (uint16_t)deci_c);
         }
         aux_payload[H7_AUX_FAN] = ldo.fan_percent;
         aux_payload[H7_AUX_PGOOD] = ldo.pgood;

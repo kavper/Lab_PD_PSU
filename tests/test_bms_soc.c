@@ -256,22 +256,22 @@ int main(void)
         frame[LDO_TLM_TEMP_RAW + 1U] = 0x07; /* raw ADC 2000 */
         frame[LDO_TLM_TEMP_FILTERED] = 0x08;
         frame[LDO_TLM_TEMP_FILTERED + 1U] = 0x07; /* filtered ADC 1800 */
-        frame[LDO_TLM_TEMP_CENTI] = 0xE2;
-        frame[LDO_TLM_TEMP_CENTI + 1U] = 0x09; /* 2530 = 25.30 °C */
-        frame[LDO_TLM_TEMP_CENTI + 2U] = 0x6B;
-        frame[LDO_TLM_TEMP_CENTI + 3U] = 0x09; /* 2411 */
-        frame[LDO_TLM_TEMP_CENTI + 4U] = 0x1E;
-        frame[LDO_TLM_TEMP_CENTI + 5U] = 0x0C; /* 3102 */
-        frame[LDO_TLM_TEMP_CENTI + 6U] = 0xF3;
-        frame[LDO_TLM_TEMP_CENTI + 7U] = 0x0A; /* 2803 */
-        ExpectEqI(LdoTlm_TempCenti(frame, 0U), 2530,
-                  "AUX temperature is centi-°C, not the raw ADC block");
-        ExpectEqI(LdoTlm_TempCenti(frame, 1U), 2411, "T2 centi-°C");
-        ExpectEqI(LdoTlm_TempCenti(frame, 2U), 3102, "T3 centi-°C");
-        ExpectEqI(LdoTlm_TempCenti(frame, 3U), 2803, "T4 centi-°C");
+        frame[LDO_TLM_TEMP_CENTI] = 0xFD;
+        frame[LDO_TLM_TEMP_CENTI + 1U] = 0x00; /* 253 = 25.3 °C */
+        frame[LDO_TLM_TEMP_CENTI + 2U] = 0xF1;
+        frame[LDO_TLM_TEMP_CENTI + 3U] = 0x00; /* 241 = 24.1 °C */
+        frame[LDO_TLM_TEMP_CENTI + 4U] = 0x36;
+        frame[LDO_TLM_TEMP_CENTI + 5U] = 0x01; /* 310 = 31.0 °C */
+        frame[LDO_TLM_TEMP_CENTI + 6U] = 0x18;
+        frame[LDO_TLM_TEMP_CENTI + 7U] = 0x01; /* 280 = 28.0 °C */
+        ExpectEqI(LdoTlm_TempCenti(frame, 0U), 253,
+                  "AUX temperature is °C×10, not the raw ADC block");
+        ExpectEqI(LdoTlm_TempCenti(frame, 1U), 241, "T2 is °C×10");
+        ExpectEqI(LdoTlm_TempCenti(frame, 2U), 310, "T3 is °C×10");
+        ExpectEqI(LdoTlm_TempCenti(frame, 3U), 280, "T4 is °C×10");
         ExpectTrue(LDO_TLM_TEMP_RAW == 40U, "raw ADC stays at G0 offset 40");
         ExpectTrue(LDO_TLM_TEMP_FILTERED == 48U, "filtered ADC stays at G0 offset 48");
-        ExpectTrue(LDO_TLM_TEMP_CENTI == 56U, "centi-°C starts at G0 offset 56");
+        ExpectTrue(LDO_TLM_TEMP_CENTI == 56U, "°C×10 starts at G0 offset 56");
         ExpectTrue(LDO_TLM_FAN == 64U, "fan stays at G0 offset 64");
         ExpectTrue(H7_AUX_T1_CC == 8U, "H7 AUX T1 is offset 8");
         ExpectTrue(H7_AUX_T2_CC == 10U, "H7 AUX T2 is offset 10");

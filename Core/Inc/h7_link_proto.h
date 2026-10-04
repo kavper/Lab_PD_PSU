@@ -77,10 +77,10 @@
 
 #define H7_AUX_DAC_CV_MV             0U  /* u32, G0 CV DAC readback */
 #define H7_AUX_DAC_CC_MV             4U  /* u32, G0 CC DAC readback */
-#define H7_AUX_T1_CC                 8U  /* i16 centi-°C, MOSFET; INT16_MIN invalid */
-#define H7_AUX_T2_CC                 10U /* i16, ambient */
-#define H7_AUX_T3_CC                 12U /* i16, bleeder */
-#define H7_AUX_T4_CC                 14U /* i16, 3.3 V LDO / 15→5 V area */
+#define H7_AUX_T1_CC                 8U  /* i16 °C×10, MOSFET; 253 = 25.3 °C; INT16_MIN invalid */
+#define H7_AUX_T2_CC                 10U /* i16 °C×10, ambient */
+#define H7_AUX_T3_CC                 12U /* i16 °C×10, bleeder */
+#define H7_AUX_T4_CC                 14U /* i16 °C×10, 3.3 V LDO / 15→5 V area */
 #define H7_AUX_FAN                   16U /* u8 percent */
 #define H7_AUX_PGOOD                 17U /* u8 */
 #define H7_AUX_BLEED                 18U /* u8 */

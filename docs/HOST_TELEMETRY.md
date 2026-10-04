@@ -1,6 +1,6 @@
 # Host telemetry (USART1 → H7 / PC parser)
 
-**Production traffic is binary at 460800 8N1.** ASCII `T` / `TB` / `TC` and `TEL` are retired and are not the 5 ms path. The byte layout is `Core/Inc/h7_link_proto.h`. METER is type `0x10` every 5 ms (G4 timer, not an H7 request). BMS, PD, and AUX are types `0x11`, `0x12`, and `0x13` every 200 ms. BMS is 72 bytes: the original prefix, then session mAh, AFE passQ, SOC permille, CC1, die temperature, and the balance mask. AUX is 24 bytes: G0 CV/CC DAC readback, four NTC temperatures in centi-°C, fan, PGOOD, and bleed. Diagnostic text, if any, is type `0x20` at the lowest TX priority. `VERBOSE` is ignored on this link.
+**Production traffic is binary at 460800 8N1.** ASCII `T` / `TB` / `TC` and `TEL` are retired and are not the 5 ms path. The byte layout is `Core/Inc/h7_link_proto.h`. METER is type `0x10` every 5 ms (G4 timer, not an H7 request). BMS, PD, and AUX are types `0x11`, `0x12`, and `0x13` every 200 ms. BMS is 72 bytes: the original prefix, then session mAh, AFE passQ, SOC permille, CC1, die temperature, and the balance mask. AUX is 24 bytes: G0 CV/CC DAC readback, four NTC temperatures in tenths of a degree Celsius (°C×10, 253 = 25.3 °C), fan, PGOOD, and bleed. Diagnostic text, if any, is type `0x20` at the lowest TX priority. `VERBOSE` is ignored on this link.
 
 The rest of this file describes the old ASCII contract. Do not implement H7 from it.
 

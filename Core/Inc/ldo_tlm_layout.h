@@ -6,8 +6,8 @@
 /*
  * G0 telemetry 0x80, 68 bytes. Same order as
  * ldo_controller docs/G4_G0_UART_PROTOCOL_V2.md.
- * Temperatures forwarded to H7 are the int16 centi-°C block, not the
- * ADC counts that sit in front of it.
+ * Temperatures forwarded to H7 are the int16 °C×10 block, not the
+ * ADC counts that sit in front of it. 253 = 25.3 °C.
  */
 
 #define LDO_TLM_BYTES                68U
@@ -17,7 +17,7 @@
 #define LDO_TLM_PGOOD                35U
 #define LDO_TLM_TEMP_RAW             40U /* 4 x u16 ADC counts */
 #define LDO_TLM_TEMP_FILTERED        48U /* 4 x u16 ADC counts */
-#define LDO_TLM_TEMP_CENTI           56U /* 4 x i16, °C x 100; INT16_MIN invalid */
+#define LDO_TLM_TEMP_CENTI           56U /* 4 x i16, °C x 10; INT16_MIN invalid */
 #define LDO_TLM_FAN                  64U
 
 static inline int16_t LdoTlm_TempCenti(const uint8_t *payload, uint8_t index)
