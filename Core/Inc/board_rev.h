@@ -108,12 +108,18 @@
  * used to starve VIN and latch VIN_LOW.
  */
 #define BOARD_VPRE_VIN_FLOOR_V               6.0f
+/*
+ * POWER_PERMIT releases once measured Vout reaches the floor above.
+ * It then stays released down to this voltage, which is G0 VIN_LOW
+ * (CONSOLE_MINIMUM_VIN_MV, 4.5 V). Below that the LDO must stay killed.
+ */
+#define BOARD_VPRE_PERMIT_HOLD_V             4.5f
 
 /*
  * Bench image without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV
  * even when the pre-regulator is not in regulation. Shipping G4+G0 leaves
- * this at 0, so PERMIT waits for regulation_ok. A bench build overrides
- * with -DBOARD_BRINGUP_LOCAL_CV=1.
+ * this at 0, so PERMIT waits for the rail at the 6 V floor. A bench build
+ * overrides with -DBOARD_BRINGUP_LOCAL_CV=1.
  */
 #ifndef BOARD_BRINGUP_LOCAL_CV
 #define BOARD_BRINGUP_LOCAL_CV               0U
@@ -138,7 +144,7 @@
 
 /*
  * Bench only: assert POWER_PERMIT from boot, including during init, before
- * regulation_ok. Shipping G4+G0 leaves this at 0. A bench build overrides
+ * the rail is up. Shipping G4+G0 leaves this at 0. A bench build overrides
  * with -DBOARD_BRINGUP_PERMIT_EARLY=1.
  */
 #ifndef BOARD_BRINGUP_PERMIT_EARLY

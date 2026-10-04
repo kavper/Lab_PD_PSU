@@ -29,7 +29,7 @@ Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse 
 
 Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 1.5 V, **VIN floor 6 V**.
 
-Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Confirmed CC folds down at 5 V/s and still never commands below 6 V while output is wanted or on. Host ON starts the DCDC with the LDO output still off. **POWER_PERMIT_G4** asserts only after that stage is already running and has stayed within 0.5 V of command for 150 ms. The WAIT_PERMIT state waits for that grant; it does not drive PB7 itself.
+Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Confirmed CC folds down at 5 V/s and still never commands below 6 V while output is wanted or on. Host ON starts the DCDC with the LDO output still off. **POWER_PERMIT_G4** asserts once that stage is running and measured Vout has been at or above 6 V for 40 ms. It then stays asserted while Vout remains at or above 4.5 V. Leaving the ±0.5 V command band does not drop the pin. The WAIT_PERMIT state waits for that grant; it does not drive PB7 itself. `reg_ok` is still the ±0.5 V flag and is not the permit pin.
 
 ## Pin / module map (schematic U7)
 
@@ -96,7 +96,7 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 
 1. Flash G0 + G4 together. Isolator UART is 460800 8N1, DMA, telemetry every 5 ms.
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
-3. G4 starts the DCDC with the LDO output off. After the rail stays within 0.5 V of command for 150 ms, G4 asserts `POWER_PERMIT` (**PB7** HIGH), then waits for `kill=0` / `pgood=1` / `vin≥4500` before binary SETPOINT and SET_OUTPUT=1.
+3. G4 starts the DCDC with the LDO output off. Once measured pre-reg Vout has been at or above 6 V for 40 ms, G4 asserts `POWER_PERMIT` (**PB7** HIGH), then waits for `kill=0` / `pgood=1` / `vin≥4500` before binary SETPOINT and SET_OUTPUT=1. The pin stays high while that rail remains at or above 4.5 V.
 4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
 
 Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`** / **`PERMIT 0`** sends binary output-off, forces **PB7** low, and stops DCDC.
