@@ -146,7 +146,9 @@ Wiek `g0_age_ms` liczy się od ostatniej poprawnej ramki telemetrycznej G0, nie 
 
 `g0_ctrl`: 0 IDLE, 1 WAIT_LINK, 2 WAIT_PERMIT, 3 WAIT_VIN, 4 SEND_SET, 5 WAIT_SET_ACK, 6 WAIT_VOUT_ZERO, 7 SEND_OUT_ON, 8 WAIT_OUT_ON_ACK, 9 RUNNING, 10 SEND_OUT_OFF, 11 WAIT_OUT_OFF_ACK, 12 FAULT.
 
-Bity `g0_fault`: 0 HW_INIT, 1 PGOOD_LOST, 2 POWER_KILL, 3 VIN_LOW, 4 VOUT_HARD, 5 VOUT_HIGH, 6 TEMP_HIGH, 7 IOUT_HARD.
+Bity `g0_fault`: 0 HW_INIT, 1 PGOOD_LOST, 2 POWER_KILL, 3 VIN_LOW, 4 VOUT_HARD, 5 VOUT_HIGH, 6 TEMP_HIGH, 7 IOUT_HARD, 8 MEAS_LOST.
+
+Bit 8 znaczy, że Vout, Iout, Vin albo któryś NTC jest starszy niż pełny cykl pomiaru (50 ms). Nowa ramka UART tego nie odświeża. Przy tym bicie `g0_vout_mv`, `g0_iout_ma` i `g0_vin_mv` są 0, a temperatury w AUX są `INT16_MIN`. To nie jest prawdziwe 0 V. G0 gasi wyjście lokalnie. G4 w RUNNING, gdy w `g0_fault` jest cokolwiek poza samym bitem VIN_LOW, zdejmuje permit.
 
 Przykład METER, SEQ 3, ramka 79 B. Szyna 6,5 V, cel 5,000 V / 1,000 A, `g0_age_ms = 4`, duty 41,0% i 12,0%, `flags0 = 0xE3` (out, want, permit, run, reg_ok), `flags1 = 0x43` (stage, ps_en, g0_valid), `g0_ctrl = 9` (RUNNING), `g0_mode = 1` (CV), faza 0, nie stale:
 
@@ -305,14 +307,14 @@ Jedna transakcja SET w locie i jeden nadpisany oczekujący komplet V+I. Nie ma `
 1. Użytkownik zmienia napięcie i prąd. Złóż jedno 8-bajtowe V+I. Jeśli nic nie leci, nadaj `SET` z nowym SEQ i zapamiętaj go jako in-flight.
 2. Jeśli SET już leci, zapisz nową parę V+I w jednym slocie pending razem z jego SEQ. Kolejny ruch suwaka nadpisuje ten slot. Nie dokładaj kolejki.
 3. ACK/NACK przychodzi z tym samym SEQ. ACK znaczy: G0 przyjął cel rampy. Nie znaczy, że napięcie na wyjściu już doszło. Rampy zostają 50 mV/ms i 10 mA/ms po stronie G0; H7 ich nie egzekwuje.
-4. Po ACK/NACK, jeśli pending jest niepusty, wyślij go (to już inny SEQ).
+4. G4 trzyma nieodebrany wynik SET i nie nadpisuje go drugim zakończeniem. Następny SET do G0 startuje dopiero, gdy HostLink zabierze poprzedni ACK/NACK do ramki dla H7 (w tej samej kolejce co METER, co 5 ms). Do tego czasu pending zostaje pending.
 5. Timeout 800 ms bez ACK/NACK tego SEQ to awaria (reason 6), nie przerwa między suwakami. Wolno retransmitować ten sam SEQ. G4 odda zapamiętany wynik i nie zastosuje setpointu drugi raz. Nie wolno w tym celu brać nowego SEQ — nowy SEQ to nowy efekt.
 6. G4 wysyła ACK do H7 dopiero po ACK z G0. Do tego czasu `set_phase` w METER jest 1 (w locie) albo 2 (pending czeka, a na drucie jest starszy SET).
 
 ON, OFF, CLEAR i bezpieczeństwo nie są latest-wins.
 
 - OFF: wyślij od razu, także gdy SET leci. G4 zdejmuje permit lokalnie natychmiast i ACK OFF oznacza przyjęcie wyłączenia, nie `vout == 0`.
-- ON: jeden w locie. ACK, gdy `g0_ctrl == 9` (RUNNING); jeśli już RUNNING, ACK wraca od razu. G4 czeka na to do 8 s, potem NACK TIMEOUT i sam gasi wyjście. Nie kolejkuj kilku ON. Retry = ten sam SEQ.
+- ON: jeden w locie. ACK, gdy `g0_ctrl == 9` (RUNNING); jeśli już RUNNING, ACK wraca od razu. G4 czeka na to do 8 s, potem NACK TIMEOUT i sam gasi wyjście. Nie kolejkuj kilku ON. Retry = ten sam SEQ. Kolejność na G4: start DCDC przy wyłączonym LDO, po regulacji ±0,5 V przez 150 ms PERMIT, potem ON do G0. Nie parsuj nazw `POWER_KILL` / `VIN_LOW` / `VOUT_NOT_ZERO` — binarny NACK ma tylko kod powodu. G4 czyta kod i świeżą telemetrię: kill wraca do czekania na permit, VIN_LOW albo vin poniżej 4,5 V czeka na szynę, vout powyżej 250 mV czeka na zero. Po zejściu przyczyny G4 samo wznawia ON. Bit MEAS_LOST albo nieświeża telemetria nie jest niskim VIN. H7 tylko czeka na `g0_ctrl == 9`.
 - PERMIT 0 działa jak lokalne wyłączenie i dostaje ACK od razu.
 - Ten sam SEQ zakończonej komendy (ON, OFF, CLEAR, PING, PERMIT, REMOTE, BMS, USB, SET) wraca jako zapamiętany ACK/NACK bez powtórzenia efektu.
 
@@ -321,7 +323,7 @@ ON, OFF, CLEAR i bezpieczeństwo nie są latest-wins.
 - Rysuj UI co około 33 ms z ostatniego poprawnego snapshotu (`psu_snapshot` już jest). Nie czekaj na UART w wątku rysowania i nie parsuj `T` przy każdym odświeżeniu.
 - Wiek danych = czas od ostatniej ramki z dobrym CRC, nie od powtórki tego samego SEQ.
 - METER starszy niż 50 ms: łącz G4↔H7 jest stale (wygaszenie żywych mierników). BMS/PD/AUX starsze niż 1000 ms: wygaszenie tych paneli, METER może dalej być żywy.
-- `g0_stale == 1` albo `g0_age_ms > 500`: dane LDO nieaktualne. G4 po 500 ms ważnej, a potem urwanej telemetrii G0 sam zdejmuje permit i nie włącza wyjścia ponownie.
+- `g0_stale == 1` albo `g0_age_ms > 500`: ramka z G0 jest nieaktualna. To nie jest to samo co bit 8 `g0_fault`: świeży METER może nieść stare próbki ADC. G4 po 500 ms ważnej, a potem urwanej telemetrii G0 sam zdejmuje permit i nie włącza wyjścia ponownie.
 - Po powrocie ramek nie wysyłaj `ON`. Nie ustawiaj `output_requested` z powrotem na 1 tylko dlatego, że łącze wróciło. `flags0.g0_want` będzie 0, dopóki użytkownik nie wyda nowego ON.
 - Dzisiejsze `psu_app_tick` przy utracie G0 woła `psu_app_set_output(0, …)` (ok. linii 611). Zostaw to jako OFF. Usuń każdą ścieżkę, która po reconnect albo po nowej linii `T` sama woła `g4_on` / `psu_app_set_output(1)`. Jednorazowy `cold_output_off` przy starcie (OFF, nie ON) może zostać.
 - Suwak nie jest „zrobiony”, gdy `g0_vout_mv` zrówna się z celem. Zrobiony jest, gdy przyszedł ACK SET.

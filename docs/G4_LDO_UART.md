@@ -105,6 +105,17 @@ Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`**
 
 `g0_want=0` means the host has not started the G0 sequencer — send **`ON`** after permit is on the correct pad.
 
+## Fan pins and HRTIM FLT3
+
+`FanPwm_Init` and `FanTach_Init` program the timers. Cube must not also emit `MX_TIM17_Init` or `MX_TIM2_Init`.
+
+| Pin | Code | `.ioc` |
+|---|---|---|
+| PA7 `FAN_PWM` | TIM17_CH1, AF1, 25 kHz, inverted by Q9 | `TIM17_CH1`, `GPIO_AF1_TIM17` |
+| PA5 `FAN_TACH` | TIM2_CH1, AF1, falling edges, pull-up | `TIM2_CH1`, `GPIO_AF1_TIM2`, pull-up |
+
+PB10 stays `HRTIM1_FLT3` in the `.ioc` (digital input, pull-up, polarity active-low, fault armed on timers A and C). `BoardMx_ApplyHrtimFault()` then disables fault mode and clears `FLT3EN` on timers A and C. The pin is the ACS37100 series-inductor FAULT. The net and the active level were not measured on this board, so FLT3 stays off. High-side INA296 OCP remains the current protection. Do not enable FLT3 until that source and polarity are checked.
+
 ## G0 link triage (`g0_*` on host `T` line)
 
 | Symptom | Meaning |

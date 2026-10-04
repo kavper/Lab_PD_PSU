@@ -92,6 +92,7 @@ static bool s_ack_set_ok;
 static bool s_ack_out_on_ok;
 static bool s_ack_out_off_ok;
 static bool s_nack_seen;
+static uint8_t s_nack_reason;
 static char s_nack_line[48];
 static LinkUart s_link;
 static bool s_link_drop_latched;
@@ -106,6 +107,11 @@ static bool s_host_replay_valid;
 static uint8_t s_host_replay_seq;
 static uint8_t s_host_replay_ack;
 static uint8_t s_host_replay_reason;
+/* One extra completion if the METER slot is still unread. */
+static bool s_host_hold_valid;
+static uint8_t s_host_hold_seq;
+static uint8_t s_host_hold_ack;
+static uint8_t s_host_hold_reason;
 
 static float LdoLink_Clampf(float value, float min_v, float max_v)
 {
@@ -268,16 +274,53 @@ static bool LdoLink_TxFrame(uint8_t type, uint8_t sequence,
     return true;
 }
 
-static void LdoLink_PostHostResult(uint8_t seq, bool ack, uint8_t reason)
+static void LdoLink_RememberHostReplay(uint8_t seq, uint8_t ack, uint8_t reason)
 {
-    s_host_result_ready = true;
-    s_host_result_seq = seq;
-    s_host_result_ack = ack ? 1U : 0U;
-    s_host_result_reason = reason;
     s_host_replay_valid = true;
     s_host_replay_seq = seq;
-    s_host_replay_ack = s_host_result_ack;
+    s_host_replay_ack = ack;
     s_host_replay_reason = reason;
+}
+
+static bool LdoLink_HostResultWaiting(void)
+{
+    return s_host_result_ready || s_host_hold_valid;
+}
+
+static void LdoLink_FlushHeldHostResult(void)
+{
+    if (!s_host_hold_valid) {
+        return;
+    }
+    if (!Ldo_TryPostHostResult(&s_host_result_ready, &s_host_result_seq,
+                               &s_host_result_ack, &s_host_result_reason,
+                               s_host_hold_seq, s_host_hold_ack != 0U,
+                               s_host_hold_reason)) {
+        return;
+    }
+    LdoLink_RememberHostReplay(s_host_hold_seq, s_host_hold_ack,
+                               s_host_hold_reason);
+    s_host_hold_valid = false;
+}
+
+static void LdoLink_PostHostResult(uint8_t seq, bool ack, uint8_t reason)
+{
+    uint8_t ack_byte = ack ? 1U : 0U;
+
+    if (!Ldo_TryPostHostResult(&s_host_result_ready, &s_host_result_seq,
+                               &s_host_result_ack, &s_host_result_reason,
+                               seq, ack, reason)) {
+        /* The unread slot stays. This completion waits for the next take. */
+        if (!s_host_hold_valid) {
+            s_host_hold_valid = true;
+            s_host_hold_seq = seq;
+            s_host_hold_ack = ack_byte;
+            s_host_hold_reason = reason;
+        }
+        s_host_inflight = false;
+        return;
+    }
+    LdoLink_RememberHostReplay(seq, ack_byte, reason);
     s_host_inflight = false;
 }
 
@@ -287,6 +330,7 @@ static void LdoLink_ClearPendingAcks(void)
     s_ack_out_on_ok = false;
     s_ack_out_off_ok = false;
     s_nack_seen = false;
+    s_nack_reason = 0U;
     s_nack_line[0] = '\0';
     s_pending = LDO_PENDING_NONE;
 }
@@ -407,6 +451,7 @@ static void LdoLink_HandleNack(uint8_t sequence, const uint8_t *payload,
 
     s_status.nack_count++;
     s_nack_seen = true;
+    s_nack_reason = payload[1];
     (void)snprintf(s_nack_line, sizeof(s_nack_line),
                    "NACK type=%02X reason=%02X",
                    (unsigned int)payload[0], (unsigned int)payload[1]);
@@ -573,6 +618,7 @@ static bool LdoLink_PendingTimedOut(uint32_t now_ms)
 
 static void LdoLink_CtrlTask(uint32_t now_ms)
 {
+    LdoLink_FlushHeldHostResult();
     s_status.output_wanted = s_output_wanted;
     s_status.ctrl_state = s_ctrl;
 
@@ -763,16 +809,25 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
                          (unsigned long)((s_g0_volts * 1000.0f) + 0.5f),
                          (unsigned long)((s_g0_amps * 1000.0f) + 0.5f));
         } else if (s_nack_seen) {
+            LdoOnReject_t reject;
+
             s_nack_seen = false;
-            if (strstr(s_nack_line, "POWER_KILL") != NULL) {
+            reject = Ldo_RejectOutOn(s_nack_reason, LdoLink_TlmFresh(now_ms),
+                                     s_status.fault_flags,
+                                     s_status.kill_reported, s_status.vin_mv,
+                                     s_status.vout_mv, LDO_VIN_MIN_MV,
+                                     LDO_VOUT_ZERO_MV, s_retry_count,
+                                     LDO_CMD_RETRY_MAX);
+            if (reject == LDO_ON_WAIT_PERMIT) {
                 LdoLink_EnterState(LDO_G0_CTRL_WAIT_PERMIT, now_ms);
-            } else if (strstr(s_nack_line, "VIN_LOW") != NULL) {
+            } else if (reject == LDO_ON_WAIT_VIN) {
                 LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, now_ms);
-            } else if (strstr(s_nack_line, "VOUT_NOT_ZERO") != NULL) {
+            } else if (reject == LDO_ON_WAIT_ZERO) {
                 LdoLink_EnterState(LDO_G0_CTRL_WAIT_VOUT_ZERO, now_ms);
-            } else if (++s_retry_count >= LDO_CMD_RETRY_MAX) {
+            } else if (reject == LDO_ON_FAIL) {
                 LdoLink_EnterState(LDO_G0_CTRL_FAULT, now_ms);
             } else {
+                s_retry_count++;
                 LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_ON, now_ms);
             }
         } else if (LdoLink_PendingTimedOut(now_ms)) {
@@ -824,7 +879,8 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
             break;
         }
         if (s_pending == LDO_PENDING_NONE) {
-            if (s_host_pending.valid) {
+            if (s_host_pending.valid &&
+                Ldo_MayDispatchHostSet(LdoLink_HostResultWaiting())) {
                 s_g0_volts = (float)s_host_pending.mv / 1000.0f;
                 s_g0_amps = (float)s_host_pending.ma / 1000.0f;
                 s_host_inflight = true;
@@ -873,6 +929,7 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
     }
 
     if ((s_pending == LDO_PENDING_NONE) && s_host_pending.valid &&
+        Ldo_MayDispatchHostSet(LdoLink_HostResultWaiting()) &&
         (s_ctrl != LDO_G0_CTRL_SEND_OUT_OFF) &&
         (s_ctrl != LDO_G0_CTRL_WAIT_OUT_OFF_ACK)) {
         s_g0_volts = (float)s_host_pending.mv / 1000.0f;
@@ -906,6 +963,7 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_host_pending.valid = false;
     s_host_inflight = false;
     s_host_result_ready = false;
+    s_host_hold_valid = false;
     s_host_replay_valid = false;
     s_link_drop_latched = false;
     s_ctrl = LDO_G0_CTRL_IDLE;
@@ -1206,7 +1264,7 @@ bool LdoLink_TakeHostSetResult(uint8_t *seq, uint8_t *ack, uint8_t *reason)
 
 uint8_t LdoLink_HostSetPhase(void)
 {
-    if (s_host_inflight) {
+    if (s_host_inflight || s_host_hold_valid) {
         return H7_SET_PHASE_INFLIGHT;
     }
     if (s_host_pending.valid) {
