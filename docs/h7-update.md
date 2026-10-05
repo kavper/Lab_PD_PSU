@@ -299,6 +299,12 @@ Przed załączeniem zły przewód zostawia cewkę w local i nie rusza PERMIT. OF
 
 ## DMA i cache na H7
 
+**Uwaga o platformie:** bieżący GUI_Lab_PD_PSU jest na STM32H7S78-DK
+(H7S7), a nie H743. Używa HPDMA1 i kołowej listy węzłów; poniższy opis
+DMA1/DMA2 i adresów SRAM dotyczy starszego H743 i nie jest instrukcją
+konfiguracji H7S7. Dla H7S7 zachowaj implementację `g4_uart.c` i linker
+tej platformy. Nie przenoś konfiguracji DMA między tymi rodzinami.
+
 Zostaw piny i AF. Zmień tylko baud i transport. Linia D-cache Cortex-M7 ma 32 B.
 
 UART7 jest na APB1 (domena D2), więc obsługuje go DMA1 albo DMA2. Te kontrolery widzą AXI SRAM `0x24000000` oraz SRAM1, SRAM2 i SRAM3 pod `0x30000000`. Nie widzą DTCM `0x20000000` ani ITCM `0x00000000`. SRAM4 `0x38000000` zostaw dla BDMA. Bufor RX i TX trzymaj w SRAM1–3 albo w AXI SRAM.
@@ -374,3 +380,29 @@ ON, OFF, CLEAR i bezpieczeństwo nie są latest-wins.
 | `G4_CMD_TIMEOUT_MS` 2000 i `G4_SETPOINT_GAP_MS` 120 | 800 ms na SET, bez szczeliny; ON do 8 s |
 
 Sekwencer i ładowarka dalej wołają `psu_app_set_limits` / `psu_app_set_output`. Wystarczy, że te dwie funkcje mówią już binarnie — nie dubluj w nich starego `g4_set_limits`.
+
+## Wspólne odzyskanie gotowości i nadzór H7
+
+H7 wysyła PING co 100 ms, gdy odbiera aktualny METER. G4 podczas żądania
+wyjścia (także rozruchu) wymaga poprawnej ramki H7 przynajmniej raz na
+1000 ms. Utrata H7 powoduje lokalne zdjęcie PERMIT, zatrzymanie DCDC i
+stan FAULT. Powrót komunikacji nie włącza wyjścia. Starszy H7 bez PING
+nie jest zgodny z tą wersją G4.
+
+CLEAR wymusza OFF, kasuje błędy DCDC i kieruje maszynę G0 do SEND_OUT_OFF,
+zamiast pozostawiać ją w FAULT. G0 OFF wyłącza wyjście i kasuje jego
+zapamiętany błąd konsoli. ACK CLEAR potwierdza przyjęcie, a nie gotowość:
+H7 czeka na kolejną świeżą ramkę z wyłączonym wyjściem, zdrowymi pomiarami
+oraz zakończonym zatrzymaniem. Buforowana ramka ctrl=FAULT sprzed CLEAR
+nie unieważnia samej próby odzyskania gotowości. Aktywne błędy nadal
+blokują ON. Po CLEAR zawsze potrzebna jest nowa decyzja użytkownika ON.
+
+G4 ogranicza start do 8 s; H7 czeka 10 s na wynik tej transakcji, aby
+nie anulować próby dokładnie w chwili odpowiedzi G4. Surowy kill z METER
+jest stanem wykonawczym; interpretuje go G4, nie osobny zatrzask H7.
+Nadnapięcie końcowego wyjścia jest chronione przez G0. Zachowana w H7
+wartość `ovp_mv` ogranicza zadawane napięcie, nie tworzy niezależnego
+zatrzasku na podstawie pojedynczego, zaszumionego METER.
+
+Shutdown BMS: TEXT_CMD 0x21, ASCII `BMS SHUTDOWN`. Przygotowanie i zapis
+ustawień muszą zakończyć się po stronie H7 przed tą końcową komendą.

@@ -1036,6 +1036,27 @@ void LdoLink_RequestOutput(bool on)
     }
 }
 
+void LdoLink_HostLinkLost(void)
+{
+    LdoLink_HardKillFromFault("H7 heartbeat lost");
+    PSU_Stop();
+}
+
+/* CLEAR is an explicit stop/recovery, never an automatic ON. G0 OFF
+ * clears its console fault after it has disabled the output locally. */
+void LdoLink_ClearFaults(void)
+{
+    LdoLink_RequestOutput(false);
+    LdoLink_ClearPendingAcks();
+    if (s_host_inflight) {
+        LdoLink_PostHostResult(s_host_inflight_seq, false, H7_LINK_NACK_UNSAFE);
+    }
+    s_host_pending.valid = false;
+    s_retry_count = 0U;
+    s_link_drop_latched = false;
+    LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_OFF, HAL_GetTick());
+}
+
 bool LdoLink_IsOutputWanted(void)
 {
     return s_output_wanted;

@@ -79,6 +79,8 @@ bool LdoLink_IsPowerPermitted(void);
 
 /* G0 final-output control (binary atomic SETPOINT / SET_OUTPUT). */
 void LdoLink_RequestOutput(bool on);
+void LdoLink_ClearFaults(void);
+void LdoLink_HostLinkLost(void);
 bool LdoLink_IsOutputWanted(void);
 void LdoLink_SetG0Setpoint(float volts, float amps);
 void LdoLink_SetG0Voltage(float volts);

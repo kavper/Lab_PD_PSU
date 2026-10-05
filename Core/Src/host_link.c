@@ -1,3 +1,4 @@
+#include "host_heartbeat.h"
 #include "host_link.h"
 
 #include "app.h"
@@ -31,6 +32,8 @@ static uint8_t s_host_tx_seq;
 static bool s_on_wait;
 static uint8_t s_on_seq;
 static uint32_t s_on_since_ms;
+static uint32_t s_last_host_ms;
+
 static uint8_t s_on_q[4];
 static uint8_t s_on_qn;
 static bool s_replay_valid[8];
@@ -839,10 +842,16 @@ static void HostLink_FinishOn(bool ack, uint8_t reason)
 static void HostLink_Command(uint8_t type, uint8_t seq, const uint8_t *payload,
                              uint8_t payload_len)
 {
+    /* Called only after the complete frame passes CRC. Retries and PING
+     * prove the host is alive even when an earlier command is replayed. */
+    s_last_host_ms = HAL_GetTick();
     int slot = HostLink_ReplayIndex(type);
     char text[97];
 
     if ((slot >= 0) && s_replay_valid[slot] && (s_replay_seq[slot] == seq)) {
+        /* OFF must still stop a live PSU after a host reboot reuses SEQ.
+         * Repeating a stop is safe; replaying an ON must never re-enable it. */
+        if ((type == H7_LINK_OFF) && (payload_len == 0U)) HostLink_ApplyOff();
         if (s_replay_ack[slot] != 0U) {
             HostLink_QueueAck(seq, type);
         } else {
@@ -902,7 +911,9 @@ static void HostLink_Command(uint8_t type, uint8_t seq, const uint8_t *payload,
         HostLink_Remember(type, seq, true, 0U);
         break;
     case H7_LINK_CLEAR:
+        HostLink_ApplyOff();
         App_ClearFaults();
+        LdoLink_ClearFaults();
         HostLink_QueueAck(seq, type);
         HostLink_Remember(type, seq, true, 0U);
         break;
@@ -1024,6 +1035,11 @@ void HostLink_Task(void)
     }
 
     LinkUart_Poll(&s_host_uart, HostLink_OnByte, NULL);
+
+    if (HostHeartbeat_Expired(LdoLink_IsOutputWanted(), HAL_GetTick(), s_last_host_ms)) {
+        LdoLink_HostLinkLost();
+        if (s_on_wait) HostLink_FinishOn(false, H7_LINK_NACK_LINK);
+    }
 
     if (s_on_wait) {
         ctrl = LdoLink_GetCtrlState();
