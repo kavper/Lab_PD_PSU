@@ -14,19 +14,14 @@ static void Expect(int cond, const char *msg)
 
 int main(void)
 {
-    /* ON, stage still off, regulation false: start the DCDC, keep permit off. */
+    /* Explicit ON starts the DCDC and clears G0's hardware kill. */
     Expect(Dcdc_StageStartAllowed(true, true, false, false),
            "shipping ON starts the pre-regulator without permit");
-    Expect(!Dcdc_PermitAllowed(true, false, false, false),
-           "permit stays off until the stage is on and in regulation");
-
-    Expect(Dcdc_PermitAllowed(true, true, true, false),
-           "permit follows a running, settled pre-regulator");
-    Expect(!Dcdc_PermitAllowed(true, true, false, false),
-           "a running stage out of regulation does not get permit");
-    Expect(!Dcdc_PermitAllowed(true, true, true, true),
+    Expect(Dcdc_PermitAllowed(true, false),
+           "ON clears POWER_KILL without waiting for measured voltage");
+    Expect(!Dcdc_PermitAllowed(true, true),
            "the off override holds permit down");
-    Expect(!Dcdc_PermitAllowed(false, true, true, false),
+    Expect(!Dcdc_PermitAllowed(false, false),
            "an idle request does not assert permit");
 
     Expect(!Dcdc_StageStartAllowed(true, true, true, false),

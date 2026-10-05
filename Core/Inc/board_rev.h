@@ -111,8 +111,9 @@
 
 /*
  * Bench image without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV
- * even when the pre-regulator is not in regulation. Shipping G4+G0 leaves
- * this at 0, so PERMIT waits for regulation_ok. A bench build overrides
+ * even when the pre-regulator is not running. Shipping G4+G0 leaves this at
+ * 0; an explicit host ON clears POWER_KILL while G0 keeps its output disabled
+ * until PGOOD, VIN, SETPOINT and SET_OUTPUT are valid. A bench build overrides
  * with -DBOARD_BRINGUP_LOCAL_CV=1.
  */
 #ifndef BOARD_BRINGUP_LOCAL_CV
@@ -138,7 +139,7 @@
 
 /*
  * Bench only: assert POWER_PERMIT from boot, including during init, before
- * regulation_ok. Shipping G4+G0 leaves this at 0. A bench build overrides
+ * the rail is up. Shipping G4+G0 leaves this at 0. A bench build overrides
  * with -DBOARD_BRINGUP_PERMIT_EARLY=1.
  */
 #ifndef BOARD_BRINGUP_PERMIT_EARLY

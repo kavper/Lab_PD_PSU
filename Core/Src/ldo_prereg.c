@@ -16,8 +16,8 @@
 /* CC fold stays at or above the VIN floor, so it may come down faster. */
 #define PREREG_SLEW_DOWN_CC_V_PER_S          5.0f
 #define PREREG_REGULATION_BAND_V             0.50f
-#define PREREG_PERMIT_SETTLE_MS              150U
-#define PREREG_PERMIT_RELEASE_MS             50U
+#define PREREG_REG_SETTLE_MS                 150U
+#define PREREG_REG_RELEASE_MS                50U
 
 static LdoPrereg_Status_t s_status;
 static float s_command_v;
@@ -177,7 +177,7 @@ static bool Prereg_UpdateRegulation(float measured_v, bool dcdc_enabled, uint32_
         if (s_regulation_since_ms == 0U) {
             s_regulation_since_ms = now_ms;
         }
-        return ((uint32_t)(now_ms - s_regulation_since_ms) >= PREREG_PERMIT_SETTLE_MS);
+        return ((uint32_t)(now_ms - s_regulation_since_ms) >= PREREG_REG_SETTLE_MS);
     }
 
     s_regulation_since_ms = 0U;
@@ -185,7 +185,7 @@ static bool Prereg_UpdateRegulation(float measured_v, bool dcdc_enabled, uint32_
         s_out_of_reg_since_ms = now_ms;
     }
 
-    if ((uint32_t)(now_ms - s_out_of_reg_since_ms) >= PREREG_PERMIT_RELEASE_MS) {
+    if ((uint32_t)(now_ms - s_out_of_reg_since_ms) >= PREREG_REG_RELEASE_MS) {
         return false;
     }
 
@@ -308,8 +308,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
 
         want_permit = Dcdc_PermitAllowed(want_enable,
-                                         dcdc_enabled,
-                                         s_status.regulation_ok,
                                          s_status.permit_override_off);
 
 #if (BOARD_BRINGUP_LOCAL_CV != 0U)
@@ -345,8 +343,6 @@ void LdoPrereg_Task(float dcdc_measured_v, bool dcdc_enabled)
         s_status.regulation_ok =
             Prereg_UpdateRegulation(dcdc_measured_v, dcdc_enabled, now_ms);
         want_permit = Dcdc_PermitAllowed(want_enable,
-                                         dcdc_enabled,
-                                         s_status.regulation_ok,
                                          s_status.permit_override_off);
 #if (BOARD_BRINGUP_PERMIT_EARLY != 0U)
         if ((!want_permit) && (!s_status.permit_override_off)) {

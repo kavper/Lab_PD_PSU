@@ -5,9 +5,9 @@
 
 /*
  * Host ON starts the pre-regulator with the LDO output still off.
- * POWER_PERMIT is the LDO interlock and is asserted only after that
- * stage is already switching and has held regulation. Gating the stage
- * on permit, while permit requires the stage, never leaves the idle state.
+ * POWER_PERMIT clears G0's hardware POWER_KILL as part of that explicit
+ * request. It does not turn the LDO output on: G0 still requires fresh
+ * measurements, PGOOD, VIN >= 4.5 V, SETPOINT and SET_OUTPUT=1.
  *
  * A bench image (BOARD_BRINGUP_LOCAL_CV) still waits for permit, because
  * that build forces the permit itself.
@@ -28,12 +28,9 @@ static inline bool Dcdc_StageStartAllowed(bool cv_requested,
 }
 
 static inline bool Dcdc_PermitAllowed(bool enable_requested,
-                                     bool dcdc_enabled,
-                                     bool regulation_ok,
                                      bool permit_override_off)
 {
-    return enable_requested && dcdc_enabled && regulation_ok &&
-           !permit_override_off;
+    return enable_requested && !permit_override_off;
 }
 
 #endif /* DCDC_PERMIT_H */
