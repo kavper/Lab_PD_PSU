@@ -1,4 +1,5 @@
 #include "dcdc_hs_policy.h"
+#include "h7_link_proto.h"
 #include "host_link_policy.h"
 #include "ldo_ctrl_policy.h"
 #include "ldo_tlm_parse.h"
@@ -113,23 +114,30 @@ int main(void)
                "SET at start of line is a command");
     ExpectTrue(!HostLink_LooksLikeHostCommand("7.300"),
                "shredded SET fragment is not a command");
-    ExpectTrue(HostLink_BmsPeriodMs(500U) == 500U,
-               "slow TEL keeps TB/TC in lockstep");
-    ExpectTrue(HostLink_BmsPeriodMs(100U) == 200U,
-               "fast TEL still sends cells at 200 ms");
-    ExpectTrue(HostLink_BmsPeriodMs(0U) == 0U,
-               "TEL 0 stops BMS frames too");
+    ExpectTrue(HostLink_MeterPeriodMs() == 5U,
+               "METER period is fixed at 5 ms");
+    ExpectTrue(HostLink_BmsPeriodMs() == 200U,
+               "BMS/PD stay on a 200 ms timer");
 
     ExpectTrue(Ldo_SetAckRequiresVoutZero(false),
                "first-start SET may wait for Vout≈0");
     ExpectTrue(!Ldo_SetAckRequiresVoutZero(true),
                "live SET while RUNNING must not drop the rail");
-    ExpectTrue(Ldo_LiveSetIntervalElapsed(80U, 0U, 80U),
-               "first live SET is immediate");
-    ExpectTrue(!Ldo_LiveSetIntervalElapsed(79U, 1U, 80U),
-               "slider SET is coalesced inside 80 ms");
-    ExpectTrue(Ldo_LiveSetIntervalElapsed(81U, 1U, 80U),
-               "live SET goes out after the coalesce window");
+    {
+        LdoPendingSet pending = {0};
+
+        ExpectTrue(Ldo_SameSeqReplay(false, 1U, 1U) == false,
+                   "first SEQ is not a replay");
+        Ldo_PendingSetStore(&pending, 5000U, 100U, 3U);
+        Ldo_PendingSetStore(&pending, 12000U, 400U, 4U);
+        ExpectTrue(pending.valid && (pending.mv == 12000U) &&
+                   (pending.ma == 400U) && (pending.seq == 4U),
+                   "pending SET keeps only the latest complete V+I");
+        ExpectTrue(Ldo_SameSeqReplay(true, 4U, 4U),
+                   "same SEQ replays the stored result");
+        ExpectTrue(!Ldo_SameSeqReplay(true, 4U, 5U),
+                   "a new SEQ is applied");
+    }
 
     {
         static const char *host_second[] = {
@@ -160,6 +168,49 @@ int main(void)
                    "one TLM-heavy second should lose more than half the bytes");
         (void)printf("host UART sample: raw %u B -> forwarded %u B\n",
                      (unsigned)raw, (unsigned)fwd);
+    }
+
+    {
+        uint8_t payload[8];
+        uint8_t frame[32];
+        uint16_t n;
+        H7LinkParser parser;
+        uint8_t i;
+
+        H7Link_PutU32(&payload[0], 5000U);
+        H7Link_PutU32(&payload[4], 100U);
+        n = H7Link_Build(frame, sizeof(frame), H7_LINK_SET, 7U, payload, 8U);
+        ExpectTrue(n == 15U, "SET frame is SOF+LEN+TYPE+SEQ+8+CRC");
+        H7Link_ParserInit(&parser);
+        for (i = 0U; i < n; ++i) {
+            int done = H7Link_ParserByte(&parser, frame[i]);
+            if (i + 1U < n) {
+                ExpectTrue(!done, "SET frame is not complete early");
+            } else {
+                ExpectTrue(done && (parser.type == H7_LINK_SET) &&
+                           (parser.seq == 7U) && (parser.payload_len == 8U) &&
+                           (H7Link_GetU32(&parser.body[2]) == 5000U) &&
+                           (H7Link_GetU32(&parser.body[6]) == 100U),
+                           "SET frame round-trips");
+            }
+        }
+        frame[n - 1U] ^= 0xFFU;
+        H7Link_ParserInit(&parser);
+        for (i = 0U; i < n; ++i) {
+            ExpectTrue(!H7Link_ParserByte(&parser, frame[i]),
+                       "bad CRC has no effect");
+        }
+        ExpectTrue(H7_LINK_METER_BYTES == 72U, "METER payload is 72 bytes");
+        ExpectTrue(H7_LINK_BMS_BYTES == 72U, "BMS payload is 72 bytes");
+        ExpectTrue(H7_LINK_AUX_BYTES == 32U, "AUX payload is 32 bytes");
+        ExpectTrue((H7_LINK_METER_BYTES + 7U) <= H7_LINK_MAX_FRAME,
+                   "METER frame fits in 120 bytes");
+        ExpectTrue((H7_LINK_BMS_BYTES + 7U) <= H7_LINK_MAX_FRAME,
+                   "BMS frame fits in 120 bytes");
+        ExpectTrue((H7_LINK_AUX_BYTES + 7U) <= H7_LINK_MAX_FRAME,
+                   "AUX frame fits in 120 bytes");
+        ExpectTrue((H7_LINK_PD_BYTES + 7U) <= H7_LINK_MAX_FRAME,
+                   "PD frame fits in 120 bytes");
     }
 
     if (g_failures != 0) {

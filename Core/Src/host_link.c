@@ -1,3 +1,4 @@
+#include "host_heartbeat.h"
 #include "host_link.h"
 
 #include "app.h"
@@ -5,95 +6,117 @@
 #include "bms_board.h"
 #include "bq76922.h"
 #include "debug_uart.h"
+#include "h7_link_proto.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
+#include "link_uart.h"
 #include "power_manager.h"
 #include "power_stage.h"
 #include "psu_gui_api.h"
+#include "fan_tach.h"
+#include "remote_sense.h"
+#include "sense_check.h"
 #include "host_link_policy.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
-#define HOST_LINK_RX_LINE_MAX        96U
-#define HOST_LINK_RX_Q               4U
-#define HOST_LINK_TX_MAX             768U
-#define HOST_LINK_TX_RING            2048U
-#define HOST_LINK_TEL_DEFAULT_MS     500U
-
 static UART_HandleTypeDef *s_huart = NULL;
 static uint32_t s_boot_reset_flags;
-static uint8_t s_rx_byte;
-static char s_rx_line[HOST_LINK_RX_LINE_MAX];
-static volatile uint8_t s_rx_len;
-static volatile bool s_rx_overflow;
-static char s_rx_q[HOST_LINK_RX_Q][HOST_LINK_RX_LINE_MAX];
-static volatile uint8_t s_rx_q_head;
-static volatile uint8_t s_rx_q_tail;
-static volatile uint8_t s_rx_q_count;
-static uint8_t s_tx_ring[HOST_LINK_TX_RING];
-static volatile uint16_t s_tx_head;
-static volatile uint16_t s_tx_tail;
-static volatile uint16_t s_tx_used;
-static uint32_t s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
-static uint32_t s_last_tel_ms;
-static uint32_t s_last_tb_ms;
+static LinkUart s_host_uart;
+static H7LinkParser s_host_parser;
+static uint32_t s_meter_ms;
+static uint32_t s_slow_ms;
+static uint8_t s_host_tx_seq;
+static bool s_on_wait;
+static uint8_t s_on_seq;
+static uint32_t s_on_since_ms;
+static uint32_t s_last_host_ms;
 
-static void HostLink_ArmRx(void)
+static uint8_t s_on_q[4];
+static uint8_t s_on_qn;
+static bool s_replay_valid[8];
+static uint8_t s_replay_seq[8];
+static uint8_t s_replay_ack[8];
+static uint8_t s_replay_reason[8];
+
+static int HostLink_ReplayIndex(uint8_t type)
 {
-    if (s_huart != NULL) {
-        (void)HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1U);
+    switch (type) {
+    case H7_LINK_ON: return 0;
+    case H7_LINK_OFF: return 1;
+    case H7_LINK_CLEAR: return 2;
+    case H7_LINK_PING: return 3;
+    case H7_LINK_PERMIT: return 4;
+    case H7_LINK_REMOTE: return 5;
+    case H7_LINK_BMS: return 6;
+    case H7_LINK_USB: return 7;
+    default: return -1;
     }
 }
 
-static void HostLink_TxPump(void)
+static bool HostLink_QueueFrame(uint8_t type, uint8_t seq, const uint8_t *payload,
+                                uint8_t payload_len, LinkUartPri pri,
+                                uint8_t slow_index)
 {
-    if (s_huart == NULL) {
+    uint8_t frame[H7_LINK_MAX_FRAME];
+    uint16_t length;
+
+    length = H7Link_Build(frame, sizeof(frame), type, seq, payload, payload_len);
+    if (length == 0U) {
+        return false;
+    }
+    return LinkUart_Submit(&s_host_uart, pri, slow_index, frame, length);
+}
+
+static void HostLink_QueueAck(uint8_t seq, uint8_t type)
+{
+    (void)HostLink_QueueFrame(H7_LINK_ACK, seq, &type, 1U, LINK_UART_PRI_ACK, 0U);
+}
+
+static void HostLink_QueueNack(uint8_t seq, uint8_t type, uint8_t reason)
+{
+    uint8_t payload[2];
+
+    payload[0] = type;
+    payload[1] = reason;
+    (void)HostLink_QueueFrame(H7_LINK_NACK, seq, payload, 2U, LINK_UART_PRI_ACK, 0U);
+}
+
+static void HostLink_Remember(uint8_t type, uint8_t seq, bool ack, uint8_t reason)
+{
+    int slot = HostLink_ReplayIndex(type);
+
+    if (slot < 0) {
         return;
     }
-
-    while (s_tx_used > 0U) {
-        if (__HAL_UART_GET_FLAG(s_huart, UART_FLAG_TXE) == RESET) {
-            break;
-        }
-        s_huart->Instance->TDR = s_tx_ring[s_tx_tail];
-        s_tx_tail = (uint16_t)((s_tx_tail + 1U) % HOST_LINK_TX_RING);
-        s_tx_used--;
-    }
+    s_replay_valid[slot] = true;
+    s_replay_seq[slot] = seq;
+    s_replay_ack[slot] = ack ? 1U : 0U;
+    s_replay_reason[slot] = reason;
 }
 
 static void HostLink_Tx(const char *text)
 {
-    size_t len;
-    size_t i;
-    uint32_t primask;
+    size_t length;
+    size_t offset;
 
     if ((s_huart == NULL) || (text == NULL)) {
         return;
     }
-    len = strlen(text);
-    if (len == 0U) {
-        return;
-    }
+    length = strlen(text);
+    for (offset = 0U; offset < length;) {
+        size_t chunk = length - offset;
 
-    primask = __get_PRIMASK();
-    __disable_irq();
-    if (((uint32_t)s_tx_used + (uint32_t)len) >= HOST_LINK_TX_RING) {
-        if (primask == 0U) {
-            __enable_irq();
+        if (chunk > 96U) {
+            chunk = 96U;
         }
-        return;
+        (void)HostLink_QueueFrame(H7_LINK_TEXT, s_host_tx_seq++,
+                                  (const uint8_t *)(text + offset),
+                                  (uint8_t)chunk, LINK_UART_PRI_TEXT, 0U);
+        offset += chunk;
     }
-    for (i = 0U; i < len; i++) {
-        s_tx_ring[s_tx_head] = (uint8_t)text[i];
-        s_tx_head = (uint16_t)((s_tx_head + 1U) % HOST_LINK_TX_RING);
-        s_tx_used++;
-    }
-    if (primask == 0U) {
-        __enable_irq();
-    }
-    HostLink_TxPump();
 }
 
 static int32_t HostLink_Mv(float volts)
@@ -116,218 +139,10 @@ static int32_t HostLink_DutyX10(uint32_t duty_10k)
     return (int32_t)((duty_10k + 5U) / 10U);
 }
 
-static const char *HostLink_ModeName(void)
-{
-    switch (App_GetRequestedMode()) {
-        case MODE_CC:
-            return "CC";
-        case MODE_CV:
-            return "CV";
-        default:
-            return "IDLE";
-    }
-}
-
-static void HostLink_SendMachineTelemetry(bool with_bms)
-{
-    char line[HOST_LINK_TX_MAX];
-    BQ76922_Snapshot_t bms;
-    LdoPrereg_Status_t prereg;
-    LdoLink_Status_t ldo;
-    PowerManager_Status_t pm;
-    float pd_v = 0.0f;
-    float pd_a = 0.0f;
-    float pd_w = 0.0f;
-    uint8_t pd_ok;
-    uint32_t now_ms = HAL_GetTick();
-    uint32_t g0_age_ms = 0U;
-    int n;
-    int16_t dV;
-
-    /* Leave room for SET/ON while a previous T/TB/TC is still shifting out. */
-    if (s_tx_used > (HOST_LINK_TX_RING / 2U)) {
-        return;
-    }
-
-    pd_ok = PSU_GuiGetPdContract(&pd_v, &pd_a, &pd_w, NULL);
-    LdoPrereg_GetStatus(&prereg);
-    LdoLink_GetStatus(&ldo);
-    PowerManager_GetStatus(&pm);
-
-    if (ldo.last_rx_ms != 0U) {
-        g0_age_ms = now_ms - ldo.last_rx_ms;
-    } else {
-        g0_age_ms = 0xFFFFFFFFu;
-    }
-
-    /* T — PSU / G0 / PD core (stable keys for H7 parser) */
-    n = snprintf(line, sizeof(line),
-                 "T vin_mv=%ld vout_mv=%ld iout_ma=%ld i_buck_ma=%ld i_boost_ma=%ld "
-                 "set_mv=%ld ilim_ma=%ld "
-                 "duty_a_x10=%ld duty_c_x10=%ld ucc_a=%u ucc_c=%u run=%u mode=%s fault=%lu "
-                 "pd=%u pd_mv=%ld pd_ma=%ld pd_mw=%ld "
-                 "permit=%u rem_sense=%u "
-                 "g0=%u g0_out=%u g0_want=%u g0_ctrl=%u g0_kill=%u g0_outoff=%u "
-                 "g0_fault=0x%lX g0_vout_mv=%lu g0_iout_ma=%lu "
-                 "vpre_req_mv=%ld vpre_cmd_mv=%ld reg_ok=%u "
-                 "stage_en=%u ps_en=%u flt=%u hold_ms=%lu ps_err=%u "
-                 "g0_rx=%lu g0_tlm=%lu g0_age_ms=%lu g0_err=%lu g0_uart=0x%lX "
-                 "pm_st=%u fmt=0\r\n",
-                 (long)HostLink_Mv(App_GetInputVoltage()),
-                 (long)HostLink_Mv(App_GetOutputVoltage()),
-                 (long)HostLink_Ma(App_GetOutputCurrent()),
-                 (long)HostLink_Ma(App_GetHsBuckCurrent()),
-                 (long)HostLink_Ma(App_GetHsBoostCurrent()),
-                 (long)HostLink_Mv(LdoLink_IsOutputWanted() || LdoPrereg_IsG0Active()
-                                   ? LdoLink_GetG0Voltage()
-                                   : App_GetCvSetpoint()),
-                 (long)HostLink_Ma(LdoLink_GetG0Current()),
-                 (long)HostLink_DutyX10(PowerStage_GetDutyA10k()),
-                 (long)HostLink_DutyX10(PowerStage_GetDutyCPhys10k()),
-                 (unsigned int)(PowerStage_IsBuckTrEnActive() ? 1U : 0U),
-                 (unsigned int)(PowerStage_IsBoostTrEnActive() ? 1U : 0U),
-                 (unsigned int)PSU_IsRunning(),
-                 HostLink_ModeName(),
-                 (unsigned long)App_GetFaultFlags(),
-                 (unsigned int)pd_ok,
-                 (long)HostLink_Mv(pd_v),
-                 (long)HostLink_Ma(pd_a),
-                 (long)HostLink_Ma(pd_w),
-                 (unsigned int)LdoPrereg_IsPermitGranted(),
-                 (unsigned int)(LdoLink_IsRemoteSenseEnabled() ? 1U : 0U),
-                 (unsigned int)(prereg.g0_active ? 1U : 0U),
-                 (unsigned int)(ldo.output_on ? 1U : 0U),
-                 (unsigned int)(LdoLink_IsOutputWanted() ? 1U : 0U),
-                 (unsigned int)LdoLink_GetCtrlState(),
-                 (unsigned int)ldo.kill_reported,
-                 (unsigned int)ldo.outoff_reported,
-                 (unsigned long)ldo.fault_flags,
-                 (unsigned long)ldo.vout_mv,
-                 (unsigned long)ldo.iout_ma,
-                 (long)(prereg.vpre_request_v * 1000.0f),
-                 (long)(prereg.vpre_command_v * 1000.0f),
-                 (unsigned int)(prereg.regulation_ok ? 1U : 0U),
-                 (unsigned int)App_IsStageEnabled(),
-                 (unsigned int)PowerStage_IsEnabled(),
-                 (unsigned int)PowerStage_IsFaultActive(),
-                 (unsigned long)App_GetStartupHoldRemainingMs(),
-                 (unsigned int)PowerStage_GetLastError(),
-                 (unsigned long)ldo.rx_bytes,
-                 (unsigned long)ldo.tlm_count,
-                 (unsigned long)g0_age_ms,
-                 (unsigned long)ldo.rx_errors,
-                 (unsigned long)ldo.last_error_code,
-                 (unsigned int)pm.state);
-    if (n > 0) {
-        HostLink_Tx(line);
-    }
-
-    if (!with_bms) {
-        return;
-    }
-
-    BQ76922_GetSnapshot(&g_bq76922, &bms);
-    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
-
-    /* TB — full BMS snapshot (cells, pack/stack V, pack I, FETs, safety) */
-    n = snprintf(line, sizeof(line),
-                 "TB bms=%u cfg=%u st=%u fault=0x%08lX alert=%u alarm=0x%04X "
-                 "sa=0x%02X sb=0x%02X sc=0x%02X fet=0x%02X manuf=0x%04X "
-                 "init_step=%u vcell_rb=0x%04X batt=0x%04X cfg_fail=%u "
-                 "chg=%u dsg=%u fets=%u series=%u "
-                 "c1_mv=%d c2_mv=%d c3_mv=%d c4_mv=%d c5_mv=%d "
-                 "min_mv=%d max_mv=%d dV_mv=%d sum_mv=%d "
-                 "pack_mv=%d stack_mv=%d i_pack_ma=%d i_cc2_ma=%d "
-                 "sample=%u alerts=%lu i2c_err=%lu\r\n",
-                 (unsigned int)(BQ76922_IsEnabled() && bms.present ? 1U : 0U),
-                 (unsigned int)(BQ76922_IsEnabled() && bms.configured ? 1U : 0U),
-                 (unsigned int)(BQ76922_IsEnabled() ? bms.state : 0U),
-                 (unsigned long)(BQ76922_IsEnabled() ? bms.fault_flags : 0UL),
-                 (unsigned int)(BQ76922_IsEnabled() &&
-                                (bms.alert_latched || bms.alert_pin) ? 1U : 0U),
-                 (unsigned int)bms.alarm_status,
-                 (unsigned int)bms.safety_status_a,
-                 (unsigned int)bms.safety_status_b,
-                 (unsigned int)bms.safety_status_c,
-                 (unsigned int)bms.fet_status,
-                 (unsigned int)bms.manuf_status,
-                 (unsigned int)bms.init_step,
-                 (unsigned int)bms.vcell_mode_rb,
-                 (unsigned int)bms.battery_status,
-                 (unsigned int)bms.cfg_fail_count,
-                 (unsigned int)(bms.chg_fet_on ? 1U : 0U),
-                 (unsigned int)(bms.dsg_fet_on ? 1U : 0U),
-                 (unsigned int)(bms.fets_enabled ? 1U : 0U),
-                 (unsigned int)BMS_SERIES_COUNT,
-                 (int)bms.cell_mv[0],
-                 (int)bms.cell_mv[1],
-                 (int)bms.cell_mv[2],
-                 (int)bms.cell_mv[3],
-                 (int)bms.cell_mv[4],
-                 (int)bms.min_cell_mv,
-                 (int)bms.max_cell_mv,
-                 (int)dV,
-                 (int)bms.cell_sum_mv,
-                 (int)bms.pack_mv,
-                 (int)bms.stack_mv,
-                 (int)bms.cc2_ma,
-                 (int)bms.cc2_ma,
-                 (unsigned int)(bms.sample_valid ? 1U : 0U),
-                 (unsigned long)bms.alert_count,
-                 (unsigned long)bms.i2c_error_count);
-    if (n > 0) {
-        HostLink_Tx(line);
-    }
-
-    /* TC — BQ25731 charger + TPS path (everything already decoded) */
-    n = snprintf(line, sizeof(line),
-                 "TC bq_ok=%u bq_vbat_mv=%lu bq_vsys_mv=%lu bq_ibat_ma=%ld "
-                 "bq_ichg_ma=%lu bq_idchg_ma=%lu bq_vbus_mv=%lu bq_iin_ma=%lu "
-                 "bq_vreg_mv=%lu bq_ichg_set_ma=%lu bq_iin_set_ma=%lu "
-                 "bq_st=0x%04X bq_fault=0x%02X "
-                 "bq_in=%u bq_pre=%u bq_fast=%u bq_otg=%u bq_iindpm=%u bq_vindpm=%u "
-                 "tps_vbus_mv=%lu cc1=%u cc2=%u role=%u conn=%u "
-                 "plug=%u typec=0x%02X rst=%lu rst_busy=%u "
-                 "pd_role=%u pd_mv=%lu pd_ma=%lu\r\n",
-                 (unsigned int)(pm.bq.online && pm.bq.adc_sample_valid ? 1U : 0U),
-                 (unsigned long)pm.bq.adc_vbat_mv,
-                 (unsigned long)pm.bq.adc_vsys_mv,
-                 (long)pm.bq.battery_current_ma,
-                 (unsigned long)pm.bq.adc_ichg_ma,
-                 (unsigned long)pm.bq.adc_idchg_ma,
-                 (unsigned long)pm.bq.adc_vbus_mv,
-                 (unsigned long)pm.bq.adc_iin_ma,
-                 (unsigned long)pm.bq.charge_voltage_mv,
-                 (unsigned long)pm.bq.charge_current_ma,
-                 (unsigned long)pm.bq.input_current_ma,
-                 (unsigned int)pm.bq.charger_status,
-                 (unsigned int)pm.bq.fault_flags,
-                 (unsigned int)(pm.bq.input_present ? 1U : 0U),
-                 (unsigned int)(pm.bq.in_precharge ? 1U : 0U),
-                 (unsigned int)(pm.bq.in_fast_charge ? 1U : 0U),
-                 (unsigned int)(pm.bq.in_otg ? 1U : 0U),
-                 (unsigned int)(pm.bq.in_iin_dpm ? 1U : 0U),
-                 (unsigned int)(pm.bq.in_vindpm ? 1U : 0U),
-                 (unsigned long)pm.tps.vbus_mv,
-                 (unsigned int)pm.tps.cc1_state,
-                 (unsigned int)pm.tps.cc2_state,
-                 (unsigned int)pm.tps.role,
-                 (unsigned int)pm.tps.connection_state,
-                 (unsigned int)(pm.tps.attached ? 1U : 0U),
-                 (unsigned int)pm.tps.typec_port_state,
-                 (unsigned long)pm.pd_reset_seq,
-                 (unsigned int)(pm.pd_reset_busy ? 1U : 0U),
-                 (unsigned int)pm.pd_snapshot.power_role,
-                 (unsigned long)pm.pd_snapshot.contract_voltage_mv,
-                 (unsigned long)pm.pd_snapshot.contract_current_ma);
-    if (n > 0) {
-        HostLink_Tx(line);
-    }
-}
 
 static void HostLink_SendTelemetry(void)
 {
-    HostLink_SendMachineTelemetry(true);
+    HostLink_Tx("OK STATUS binary METER 5 ms, BMS/PD 200 ms. TEL is ignored.\r\n");
 }
 
 static bool HostLink_EqToken(const char *s, const char *token)
@@ -421,31 +236,40 @@ static bool HostLink_ParseU32(const char *s, uint32_t *out)
     return true;
 }
 
+static void HostLink_FinishOn(bool ack, uint8_t reason);
+
 static void HostLink_SendHelp(void)
 {
     HostLink_Tx(
-        "HELP G4 USART1 115200 — machine T/TB/TC for H7/parser\r\n"
-        "  ON / OFF        start/stop DCDC + G0 LDO\r\n"
-        "  SET V=<V> I=<A> atomic GUI setpoint (0.001 units)\r\n"
-        "  SET <V> / ILIM <A> legacy manual forms\r\n"
-        "  PERMIT 0|1      PB7 kill / allow\r\n"
-        "  REMOTE ON|OFF   sense path\r\n"
-        "  TEL [ms]        T period (0=off, default 500; TB/TC >=200 ms)\r\n"
-        "  ? / STATUS      one T/TB/TC frame now\r\n"
-        "  BMS             soft: skip CFGUPDATE if already healthy\r\n"
-        "  BMS FORCE       full BQ76922 CFGUPDATE + ALL_FETS_ON (may reboot)\r\n"
-        "  BMS SHUTDOWN    enter AFE SHUTDOWN; wake = TS2 button only (auto FETs)\r\n"
-        "  BMS OTP STATUS  read-only OTP/RAM snapshot (safe, no CFGUPDATE)\r\n"
-        "  BMS OTP CHECK   OTP_WR_CHECK (BAT 10-12V; briefly drops FETs + reinit)\r\n"
-        "  BMS OTP BURN I-UNDERSTAND-OTP   one-shot OTP program (lab only)\r\n"
-        "  VERBOSE 0|1     debug spam on USART1 (default 0 — keep clean)\r\n"
-        "  G0DIAG / G0SWAP / CLR\r\n"
-        "Parse: T/TB/TC only. G0 TLM is not forwarded. See docs/HOST_TELEMETRY.md\r\n");
+        "HELP G4 USART1 460800 binary. METER 5 ms, BMS/PD 200 ms.\r\n"
+        "  TEXT_CMD 0x21 carries these lines. TEL is ignored.\r\n"
+        "  ON / OFF / SET V= I= / PERMIT / REMOTE / BMS / USB\r\n"
+        "  VERBOSE       ignored on the production link\r\n"
+        "  G0DIAG / G0SWAP / CLR / STATUS\r\n");
+}
+
+static void HostLink_ApplyOff(void)
+{
+    if (s_on_wait) {
+        HostLink_FinishOn(false, H7_LINK_NACK_UNSAFE);
+    }
+    LdoLink_RequestOutput(false);
+    LdoPrereg_SetForceDisable(true);
+    LdoPrereg_SetPermitOverrideOff(true);
+    PSU_Stop();
+}
+
+static void HostLink_ApplyOn(void)
+{
+    LdoPrereg_SetForceDisable(false);
+    LdoPrereg_SetPermitOverrideOff(false);
+    PSU_Start();
+    LdoLink_RequestOutput(true);
 }
 
 static void HostLink_SendStatus(void)
 {
-    HostLink_SendTelemetry();
+    HostLink_Tx("OK STATUS binary METER 5 ms, BMS/PD 200 ms. TEL is ignored.\r\n");
 }
 
 static void HostLink_HandleLine(char *line)
@@ -493,27 +317,13 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "ON")) {
-        LdoPrereg_SetForceDisable(false);
-        LdoPrereg_SetPermitOverrideOff(false);
-        PSU_Start();
-        LdoLink_RequestOutput(true);
-        v_mv = (uint32_t)((LdoLink_GetG0Voltage() * 1000.0f) + 0.5f);
-        i_ma = (uint32_t)((LdoLink_GetG0Current() * 1000.0f) + 0.5f);
-        (void)snprintf(reply, sizeof(reply),
-                       "OK ON set=%lu mV ilim=%lu mA (wait g0_out=1)\r\n",
-                       (unsigned long)v_mv, (unsigned long)i_ma);
-        HostLink_Tx(reply);
-        if (!LdoPrereg_IsG0Active()) {
-            HostLink_Tx("WARN g0_rx=0 — DCDC may start; LDO needs G0 TLM\r\n");
-        }
+        HostLink_ApplyOn();
+        HostLink_Tx("OK ON accepted (binary ACK is the production reply)\r\n");
         return;
     }
     if (HostLink_EqToken(line, "OFF")) {
-        LdoLink_RequestOutput(false);
-        LdoPrereg_SetForceDisable(true);
-        LdoPrereg_SetPermitOverrideOff(true);
-        PSU_Stop();
-        HostLink_Tx("OK OFF\r\n");
+        HostLink_ApplyOff();
+        HostLink_Tx("OK OFF accepted\r\n");
         return;
     }
     if (HostLink_EqToken(line, "CLR") || HostLink_EqToken(line, "CLEAR")) {
@@ -537,19 +347,18 @@ static void HostLink_HandleLine(char *line)
                 HostLink_Tx("ERR SET use: SET V=0.000..27.000 I=0.000..5.000\r\n");
                 return;
             }
-            LdoLink_SetG0Setpoint(value, current_value);
+            v_mv = (uint32_t)((value * 1000.0f) + 0.5f);
+            i_ma = (uint32_t)((current_value * 1000.0f) + 0.5f);
+            if (LdoLink_SubmitHostSet(s_host_tx_seq, v_mv, i_ma, NULL) ==
+                LDO_HOST_SET_REPLAY_NACK) {
+                HostLink_Tx("ERR SET range\r\n");
+                return;
+            }
+            s_host_tx_seq++;
             if (!LdoPrereg_IsG0Active() && !LdoLink_IsOutputWanted()) {
                 PSU_GuiSetTargetVoltage(value + BOARD_VPRE_MARGIN_V);
             }
-            v_mv = (uint32_t)((value * 1000.0f) + 0.5f);
-            i_ma = (uint32_t)((current_value * 1000.0f) + 0.5f);
-            (void)snprintf(reply, sizeof(reply),
-                           "OK SET V=%lu.%03lu I=%lu.%03lu\r\n",
-                           (unsigned long)(v_mv / 1000U),
-                           (unsigned long)(v_mv % 1000U),
-                           (unsigned long)(i_ma / 1000U),
-                           (unsigned long)(i_ma % 1000U));
-            HostLink_Tx(reply);
+            HostLink_Tx("OK SET queued until G0 ACK\r\n");
             return;
         }
         if (!HostLink_ParseFloat(arg, &value) || (value < 0.0f) ||
@@ -625,17 +434,8 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "VERBOSE")) {
-        if ((*arg == '\0') || HostLink_EqToken(arg, "1") || HostLink_EqToken(arg, "ON")) {
-            Debug_SetEnabled(true);
-            HostLink_Tx("OK VERBOSE 1 (debug logs on USART1 — may break parsers)\r\n");
-            return;
-        }
-        if (HostLink_EqToken(arg, "0") || HostLink_EqToken(arg, "OFF")) {
-            Debug_SetEnabled(false);
-            HostLink_Tx("OK VERBOSE 0\r\n");
-            return;
-        }
-        HostLink_Tx("ERR VERBOSE use: VERBOSE 0|1\r\n");
+        (void)arg;
+        HostLink_Tx("OK VERBOSE ignored (production link, TEXT only)\r\n");
         return;
     }
     if (HostLink_EqToken(line, "BMS") || HostLink_EqToken(line, "BMSREINIT")) {
@@ -786,15 +586,8 @@ static void HostLink_HandleLine(char *line)
         return;
     }
     if (HostLink_EqToken(line, "TEL")) {
-        if (*arg == '\0') {
-            s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
-        } else if (!HostLink_ParseU32(arg, &s_tel_period_ms)) {
-            HostLink_Tx("ERR TEL\r\n");
-            return;
-        }
-        (void)snprintf(reply, sizeof(reply), "OK TEL %lu ms\r\n",
-                       (unsigned long)s_tel_period_ms);
-        HostLink_Tx(reply);
+        (void)arg;
+        HostLink_Tx("ERR TEL ignored; METER is fixed at 5 ms\r\n");
         return;
     }
     if (HostLink_EqToken(line, "?")) {
@@ -810,85 +603,469 @@ void HostLink_SetBootResetFlags(uint32_t rcc_csr)
     s_boot_reset_flags = rcc_csr;
 }
 
+static void HostLink_QueueMeter(void)
+{
+    uint8_t payload[H7_LINK_METER_BYTES];
+    LdoPrereg_Status_t prereg;
+    LdoLink_Status_t ldo;
+    uint32_t now_ms = HAL_GetTick();
+    uint32_t age = 0xFFFFU;
+    uint8_t flags0 = 0U;
+    uint8_t flags1 = 0U;
+    uint8_t result_seq = 0U;
+    uint8_t result_ack = 0U;
+    uint8_t result_reason = 0U;
+
+    memset(payload, 0, sizeof(payload));
+    LdoPrereg_GetStatus(&prereg);
+    LdoLink_GetStatus(&ldo);
+    if (ldo.telemetry_valid && (ldo.last_tlm_ms != 0U)) {
+        uint32_t raw_age = now_ms - ldo.last_tlm_ms;
+        age = (raw_age > 0xFFFEU) ? 0xFFFEU : raw_age;
+    }
+    H7Link_PutU32(&payload[H7_METER_VIN_MV], (uint32_t)HostLink_Mv(App_GetInputVoltage()));
+    H7Link_PutU32(&payload[H7_METER_VOUT_MV], (uint32_t)HostLink_Mv(App_GetOutputVoltage()));
+    H7Link_PutI32(&payload[H7_METER_I_BUCK_MA], HostLink_Ma(App_GetHsBuckCurrent()));
+    H7Link_PutI32(&payload[H7_METER_I_BOOST_MA], HostLink_Ma(App_GetHsBoostCurrent()));
+    H7Link_PutU32(&payload[H7_METER_SET_MV],
+                  (uint32_t)HostLink_Mv(LdoLink_GetG0Voltage()));
+    H7Link_PutU32(&payload[H7_METER_ILIM_MA],
+                  (uint32_t)HostLink_Ma(LdoLink_GetG0Current()));
+    H7Link_PutU32(&payload[H7_METER_G0_VOUT_MV], ldo.vout_mv);
+    H7Link_PutU32(&payload[H7_METER_G0_IOUT_MA], ldo.iout_ma);
+    H7Link_PutU32(&payload[H7_METER_G0_VIN_MV], ldo.vin_mv);
+    H7Link_PutU32(&payload[H7_METER_G0_VSET_MV], ldo.vset_mv);
+    H7Link_PutU32(&payload[H7_METER_G0_ISET_MA], ldo.iset_ma);
+    H7Link_PutU32(&payload[H7_METER_VPRE_REQ_MV],
+                  (uint32_t)((prereg.vpre_request_v * 1000.0f) + 0.5f));
+    H7Link_PutU32(&payload[H7_METER_VPRE_CMD_MV],
+                  (uint32_t)((prereg.vpre_command_v * 1000.0f) + 0.5f));
+    H7Link_PutU16(&payload[H7_METER_G0_AGE_MS], (uint16_t)age);
+    H7Link_PutU16(&payload[H7_METER_DUTY_A_X10],
+                  (uint16_t)HostLink_DutyX10(PowerStage_GetDutyA10k()));
+    H7Link_PutU16(&payload[H7_METER_DUTY_C_X10],
+                  (uint16_t)HostLink_DutyX10(PowerStage_GetDutyCPhys10k()));
+    H7Link_PutU32(&payload[H7_METER_G0_FAULT], ldo.fault_flags);
+    H7Link_PutU32(&payload[H7_METER_PSU_FAULT], App_GetFaultFlags());
+    if (ldo.output_on) flags0 |= H7_F0_G0_OUT;
+    if (LdoLink_IsOutputWanted()) flags0 |= H7_F0_G0_WANT;
+    if (ldo.kill_reported) flags0 |= H7_F0_G0_KILL;
+    if (ldo.outoff_reported) flags0 |= H7_F0_G0_OUTOFF;
+    if (ldo.cc_cv) flags0 |= H7_F0_G0_CC;
+    if (LdoPrereg_IsPermitGranted()) flags0 |= H7_F0_PERMIT;
+    if (PSU_IsRunning()) flags0 |= H7_F0_RUN;
+    if (prereg.regulation_ok) flags0 |= H7_F0_REG_OK;
+    if (App_IsStageEnabled()) flags1 |= H7_F1_STAGE_EN;
+    if (PowerStage_IsEnabled()) flags1 |= H7_F1_PS_EN;
+    if (PowerStage_IsFaultActive()) flags1 |= H7_F1_PS_FAULT;
+    if (LdoLink_IsRemoteSenseEnabled()) flags1 |= H7_F1_REM_SENSE;
+    if (PowerStage_IsBuckTrEnActive()) flags1 |= H7_F1_UCC_A;
+    if (PowerStage_IsBoostTrEnActive()) flags1 |= H7_F1_UCC_C;
+    if (ldo.telemetry_valid) flags1 |= H7_F1_G0_VALID;
+    if (LdoLink_GetCtrlState() == LDO_G0_CTRL_FAULT) flags1 |= H7_F1_FAULT_LATCH;
+    payload[H7_METER_FLAGS0] = flags0;
+    payload[H7_METER_FLAGS1] = flags1;
+    payload[H7_METER_G0_CTRL] = (uint8_t)LdoLink_GetCtrlState();
+    payload[H7_METER_G0_MODE] = ldo.mode;
+    payload[H7_METER_SET_PHASE] = LdoLink_HostSetPhase();
+    payload[H7_METER_G0_STALE] =
+        (!ldo.telemetry_valid || (age > H7_LINK_G0_STALE_MS)) ? 1U : 0U;
+    (void)HostLink_QueueFrame(H7_LINK_METER, s_host_tx_seq++, payload,
+                              H7_LINK_METER_BYTES, LINK_UART_PRI_FAST, 0U);
+    if (LdoLink_TakeHostSetResult(&result_seq, &result_ack, &result_reason)) {
+        if (result_ack != 0U) {
+            HostLink_QueueAck(result_seq, H7_LINK_SET);
+        } else {
+            HostLink_QueueNack(result_seq, H7_LINK_SET, result_reason);
+        }
+    }
+}
+
+static void HostLink_QueueSlow(void)
+{
+    uint8_t bms_payload[H7_LINK_BMS_BYTES];
+    uint8_t pd_payload[H7_LINK_PD_BYTES];
+    BQ76922_Snapshot_t bms;
+    PowerManager_Status_t pm;
+    int16_t dV;
+    uint8_t flags = 0U;
+    float pd_v = 0.0f;
+    float pd_a = 0.0f;
+
+    memset(bms_payload, 0, sizeof(bms_payload));
+    memset(pd_payload, 0, sizeof(pd_payload));
+    BQ76922_GetSnapshot(&g_bq76922, &bms);
+    PowerManager_GetStatus(&pm);
+    (void)PSU_GuiGetPdContract(&pd_v, &pd_a, NULL, NULL);
+    dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
+    bms_payload[0] = (BQ76922_IsEnabled() && bms.present) ? 1U : 0U;
+    bms_payload[1] = (BQ76922_IsEnabled() && bms.configured) ? 1U : 0U;
+    bms_payload[2] = BQ76922_IsEnabled() ? (uint8_t)bms.state : 0U;
+    bms_payload[3] = (bms.alert_latched || bms.alert_pin) ? 1U : 0U;
+    H7Link_PutU32(&bms_payload[4], bms.fault_flags);
+    H7Link_PutU16(&bms_payload[8], bms.alarm_status);
+    bms_payload[10] = bms.safety_status_a;
+    bms_payload[11] = bms.safety_status_b;
+    bms_payload[12] = bms.safety_status_c;
+    bms_payload[13] = bms.fet_status;
+    H7Link_PutU16(&bms_payload[14], bms.manuf_status);
+    bms_payload[16] = bms.init_step;
+    bms_payload[17] = bms.cfg_fail_count;
+    H7Link_PutU16(&bms_payload[18], bms.vcell_mode_rb);
+    H7Link_PutU16(&bms_payload[20], bms.battery_status);
+    bms_payload[22] = bms.chg_fet_on ? 1U : 0U;
+    bms_payload[23] = bms.dsg_fet_on ? 1U : 0U;
+    bms_payload[24] = bms.fets_enabled ? 1U : 0U;
+    bms_payload[25] = (uint8_t)BMS_SERIES_COUNT;
+    H7Link_PutU16(&bms_payload[26], (uint16_t)bms.cell_mv[0]);
+    H7Link_PutU16(&bms_payload[28], (uint16_t)bms.cell_mv[1]);
+    H7Link_PutU16(&bms_payload[30], (uint16_t)bms.cell_mv[2]);
+    H7Link_PutU16(&bms_payload[32], (uint16_t)bms.cell_mv[3]);
+    H7Link_PutU16(&bms_payload[34], (uint16_t)bms.cell_mv[4]);
+    H7Link_PutU16(&bms_payload[36], (uint16_t)bms.min_cell_mv);
+    H7Link_PutU16(&bms_payload[38], (uint16_t)bms.max_cell_mv);
+    H7Link_PutU16(&bms_payload[40], (uint16_t)dV);
+    H7Link_PutU16(&bms_payload[42], (uint16_t)bms.cell_sum_mv);
+    H7Link_PutU16(&bms_payload[44], (uint16_t)bms.pack_mv);
+    H7Link_PutU16(&bms_payload[46], (uint16_t)bms.stack_mv);
+    H7Link_PutI32(&bms_payload[48], bms.cc2_ma);
+    bms_payload[52] = bms.sample_valid ? 1U : 0U;
+    H7Link_PutI32(&bms_payload[H7_BMS_PASSQ_MAH], bms.passq_mah);
+    H7Link_PutI32(&bms_payload[H7_BMS_SESSION_MAH], bms.session_mah);
+    H7Link_PutU16(&bms_payload[H7_BMS_SOC_PERMILLE], bms.soc_permille);
+    H7Link_PutU16(&bms_payload[H7_BMS_CC1_MA], (uint16_t)bms.cc1_ma);
+    H7Link_PutU16(&bms_payload[H7_BMS_INT_TEMP_DK], (uint16_t)bms.int_temp_dk);
+    bms_payload[H7_BMS_BALANCE] = bms.balance_mask;
+    bms_payload[H7_BMS_SOC_FLAGS] = bms.soc_flags;
+
+    if (pm.bq.input_present) flags |= 0x01U;
+    if (pm.bq.in_precharge) flags |= 0x02U;
+    if (pm.bq.in_fast_charge) flags |= 0x04U;
+    if (pm.bq.in_otg) flags |= 0x08U;
+    if (pm.bq.in_iin_dpm) flags |= 0x10U;
+    if (pm.bq.in_vindpm) flags |= 0x20U;
+    if (pm.pd_reset_busy) flags |= 0x40U;
+    if (pm.tps.attached) flags |= 0x80U;
+    pd_payload[0] = (pm.bq.online && pm.bq.adc_sample_valid) ? 1U : 0U;
+    pd_payload[1] = flags;
+    H7Link_PutU16(&pd_payload[2], pm.bq.charger_status);
+    pd_payload[4] = pm.bq.fault_flags;
+    pd_payload[5] = pm.tps.cc1_state;
+    pd_payload[6] = pm.tps.cc2_state;
+    pd_payload[7] = pm.tps.role;
+    pd_payload[8] = pm.tps.connection_state;
+    pd_payload[9] = pm.tps.typec_port_state;
+    pd_payload[10] = pm.pd_snapshot.power_role;
+    H7Link_PutU32(&pd_payload[12], pm.bq.adc_vbat_mv);
+    H7Link_PutU32(&pd_payload[16], pm.bq.adc_vsys_mv);
+    H7Link_PutI32(&pd_payload[20], pm.bq.battery_current_ma);
+    H7Link_PutU32(&pd_payload[24], pm.bq.adc_ichg_ma);
+    H7Link_PutU32(&pd_payload[28], pm.bq.adc_idchg_ma);
+    H7Link_PutU32(&pd_payload[32], pm.bq.adc_vbus_mv);
+    H7Link_PutU32(&pd_payload[36], pm.bq.adc_iin_ma);
+    H7Link_PutU32(&pd_payload[40], pm.bq.charge_voltage_mv);
+    H7Link_PutU32(&pd_payload[44], pm.bq.charge_current_ma);
+    H7Link_PutU32(&pd_payload[48], pm.bq.input_current_ma);
+    H7Link_PutU32(&pd_payload[52], pm.tps.vbus_mv);
+    H7Link_PutU32(&pd_payload[56], (uint32_t)HostLink_Mv(pd_v));
+    H7Link_PutU32(&pd_payload[60], (uint32_t)HostLink_Ma(pd_a));
+    (void)HostLink_QueueFrame(H7_LINK_BMS_TLM, s_host_tx_seq++, bms_payload,
+                              H7_LINK_BMS_BYTES, LINK_UART_PRI_SLOW, 0U);
+    (void)HostLink_QueueFrame(H7_LINK_PD_TLM, s_host_tx_seq++, pd_payload,
+                              H7_LINK_PD_BYTES, LINK_UART_PRI_SLOW, 1U);
+    {
+        uint8_t aux_payload[H7_LINK_AUX_BYTES];
+        LdoLink_Status_t ldo;
+        uint8_t i;
+
+        memset(aux_payload, 0, sizeof(aux_payload));
+        LdoLink_GetStatus(&ldo);
+        {
+            uint32_t now_ms = HAL_GetTick();
+            bool g0_fresh = ldo.telemetry_valid && (ldo.last_tlm_ms != 0U) &&
+                            ((uint32_t)(now_ms - ldo.last_tlm_ms) <= H7_LINK_G0_STALE_MS);
+
+            H7Link_PutU32(&aux_payload[H7_AUX_DAC_CV_MV], ldo.dac_cv_mv);
+            H7Link_PutU32(&aux_payload[H7_AUX_DAC_CC_MV], ldo.dac_cc_mv);
+            for (i = 0U; i < 4U; i++) {
+                int16_t deci_c = g0_fresh ? ldo.temp_centi_c[i] : (int16_t)INT16_MIN;
+
+                /* G0 already scaled to °C×10. Copy the int16; do not rescale. */
+                H7Link_PutU16(&aux_payload[H7_AUX_T1_CC + (uint8_t)(2U * i)],
+                              (uint16_t)deci_c);
+            }
+            /* Applied duty, including the 40 % failsafe after the link goes quiet. */
+            aux_payload[H7_AUX_FAN] = ldo.fan_applied;
+            aux_payload[H7_AUX_PGOOD] = ldo.pgood;
+            aux_payload[H7_AUX_BLEED] = ldo.bleed_request;
+            aux_payload[H7_AUX_VALID] = g0_fresh ? 1U : 0U;
+        }
+        H7Link_PutU16(&aux_payload[H7_AUX_LOCAL_MV], RemoteSense_LocalMv());
+        H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_P_MV], RemoteSense_RemotePMv());
+        H7Link_PutU16(&aux_payload[H7_AUX_REMOTE_N_MV], RemoteSense_RemoteNMv());
+        aux_payload[H7_AUX_SENSE_CODE] = RemoteSense_Code();
+        aux_payload[H7_AUX_SENSE_FLAGS] =
+            (uint8_t)((RemoteSense_IsClosed() ? SENSE_FLAG_CLOSED : 0U) |
+                      (RemoteSense_IsWanted() ? SENSE_FLAG_WANTED : 0U) |
+                      (RemoteSense_IsLatched() ? SENSE_FLAG_LATCH : 0U));
+        H7Link_PutU16(&aux_payload[H7_AUX_FAN_RPM], FanTach_Rpm());
+        aux_payload[H7_AUX_STOP_REASON] = LdoLink_GetStopReason();
+        (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
+                                  H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
+    }
+}
+
+static void HostLink_FinishOn(bool ack, uint8_t reason)
+{
+    uint8_t i;
+
+    if (!s_on_wait) {
+        return;
+    }
+    if (ack) {
+        HostLink_QueueAck(s_on_seq, H7_LINK_ON);
+    } else {
+        HostLink_QueueNack(s_on_seq, H7_LINK_ON, reason);
+    }
+    HostLink_Remember(H7_LINK_ON, s_on_seq, ack, reason);
+    for (i = 0U; i < s_on_qn; i++) {
+        if (ack) {
+            HostLink_QueueAck(s_on_q[i], H7_LINK_ON);
+        } else {
+            HostLink_QueueNack(s_on_q[i], H7_LINK_ON, reason);
+        }
+        HostLink_Remember(H7_LINK_ON, s_on_q[i], ack, reason);
+    }
+    s_on_qn = 0U;
+    s_on_wait = false;
+}
+
+static void HostLink_Command(uint8_t type, uint8_t seq, const uint8_t *payload,
+                             uint8_t payload_len)
+{
+    /* Called only after the complete frame passes CRC. Retries and PING
+     * prove the host is alive even when an earlier command is replayed. */
+    s_last_host_ms = HAL_GetTick();
+    int slot = HostLink_ReplayIndex(type);
+    char text[97];
+
+    if ((slot >= 0) && s_replay_valid[slot] && (s_replay_seq[slot] == seq)) {
+        /* OFF must still stop a live PSU after a host reboot reuses SEQ.
+         * Repeating a stop is safe; replaying an ON must never re-enable it. */
+        if ((type == H7_LINK_OFF) && (payload_len == 0U)) HostLink_ApplyOff();
+        if (s_replay_ack[slot] != 0U) {
+            HostLink_QueueAck(seq, type);
+        } else {
+            HostLink_QueueNack(seq, type, s_replay_reason[slot]);
+        }
+        return;
+    }
+
+    switch (type) {
+    case H7_LINK_SET: {
+        uint8_t reason = 0U;
+        int result;
+
+        if (payload_len != 8U) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        result = LdoLink_SubmitHostSet(seq, H7Link_GetU32(&payload[0]),
+                                       H7Link_GetU32(&payload[4]), &reason);
+        if (result == LDO_HOST_SET_REPLAY_ACK) {
+            HostLink_QueueAck(seq, type);
+        } else if (result == LDO_HOST_SET_REPLAY_NACK) {
+            HostLink_QueueNack(seq, type, reason);
+        }
+        break;
+    }
+    case H7_LINK_ON:
+        if (payload_len != 0U) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        if ((LdoLink_GetCtrlState() == LDO_G0_CTRL_RUNNING) && !s_on_wait) {
+            HostLink_QueueAck(seq, type);
+            HostLink_Remember(type, seq, true, 0U);
+            return;
+        }
+        if (s_on_wait) {
+            if (s_on_qn < 4U) {
+                s_on_q[s_on_qn++] = seq;
+            } else {
+                HostLink_QueueNack(seq, type, H7_LINK_NACK_BUSY);
+            }
+            return;
+        }
+        HostLink_ApplyOn();
+        s_on_wait = true;
+        s_on_seq = seq;
+        s_on_since_ms = HAL_GetTick();
+        break;
+    case H7_LINK_OFF:
+        if (payload_len != 0U) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        HostLink_ApplyOff();
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_CLEAR:
+        HostLink_ApplyOff();
+        App_ClearFaults();
+        LdoLink_ClearFaults();
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_PING:
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_DIAG:
+        HostLink_Tx("DIAG METER=5ms BMS=200ms baud=460800\r\n");
+        break;
+    case H7_LINK_PERMIT:
+        if (payload_len != 1U) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        if (payload[0] == 0U) {
+            HostLink_ApplyOff();
+        } else {
+            LdoPrereg_SetPermitOverrideOff(false);
+            LdoPrereg_SetForceDisable(false);
+        }
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_REMOTE:
+        if ((payload_len != 1U) || (payload[0] > 1U)) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        LdoLink_SetRemoteSense(payload[0] != 0U);
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_BMS:
+        if (payload_len != 1U) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        if ((payload[0] == 0U) && BQ76922_IsConfiguredHealthy(&g_bq76922)) {
+            BQ76922_ClearShutdownRequest(&g_bq76922);
+            App_ClearFaults();
+        } else {
+            BQ76922_RequestReinit(&g_bq76922);
+            BQ76922_ClearShutdownRequest(&g_bq76922);
+            App_ClearFaults();
+        }
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_USB:
+        if ((payload_len != 1U) || (payload[0] > 2U)) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        if (payload[0] == 1U) {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SINK_ONLY);
+        } else if (payload[0] == 2U) {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_SOURCE_ONLY);
+        } else {
+            (void)PSU_GuiSetUsbMode(PSU_GUI_USB_MODE_AUTO);
+        }
+        HostLink_QueueAck(seq, type);
+        HostLink_Remember(type, seq, true, 0U);
+        break;
+    case H7_LINK_TEXT_CMD:
+        if ((payload_len == 0U) || (payload_len > 96U)) {
+            HostLink_QueueNack(seq, type, H7_LINK_NACK_BAD_PAYLOAD);
+            return;
+        }
+        memcpy(text, payload, payload_len);
+        text[payload_len] = '\0';
+        HostLink_HandleLine(text);
+        HostLink_QueueAck(seq, type);
+        break;
+    default:
+        HostLink_QueueNack(seq, type, H7_LINK_NACK_UNKNOWN);
+        break;
+    }
+}
+
+static void HostLink_OnByte(uint8_t byte, void *ctx)
+{
+    (void)ctx;
+    if (H7Link_ParserByte(&s_host_parser, byte) != 0) {
+        HostLink_Command(s_host_parser.type, s_host_parser.seq,
+                         &s_host_parser.body[2], s_host_parser.payload_len);
+    }
+}
+
 void HostLink_Init(UART_HandleTypeDef *huart)
 {
     char line[96];
     int n;
 
     s_huart = huart;
-    s_rx_len = 0U;
-    s_rx_overflow = false;
-    s_rx_q_head = 0U;
-    s_rx_q_tail = 0U;
-    s_rx_q_count = 0U;
-    s_tx_head = 0U;
-    s_tx_tail = 0U;
-    s_tx_used = 0U;
-    s_tel_period_ms = HOST_LINK_TEL_DEFAULT_MS;
-    s_last_tel_ms = HAL_GetTick();
-    s_last_tb_ms = s_last_tel_ms;
-    HostLink_ArmRx();
-    HostLink_Tx("\r\n=== Lab_PD_PSU G4 host ready (USART1 115200) ===\r\n");
+    s_on_wait = false;
+    s_on_qn = 0U;
+    memset(s_replay_valid, 0, sizeof(s_replay_valid));
+    H7Link_ParserInit(&s_host_parser);
+    s_meter_ms = HAL_GetTick();
+    s_slow_ms = s_meter_ms;
+    LinkUart_Init(&s_host_uart, huart);
+    HostLink_Tx("G4 host binary 460800. METER 5 ms. TEL ignored.\r\n");
     n = snprintf(line, sizeof(line),
-                 "boot rcc_csr=0x%08lX (PIN=%u POR=%u SFT=%u IWDG=%u WWDG=%u LPWR=%u)\r\n",
-                 (unsigned long)s_boot_reset_flags,
-                 (s_boot_reset_flags & RCC_CSR_PINRSTF) ? 1U : 0U,
-                 (s_boot_reset_flags & RCC_CSR_BORRSTF) ? 1U : 0U,
-                 (s_boot_reset_flags & RCC_CSR_SFTRSTF) ? 1U : 0U,
-                 (s_boot_reset_flags & RCC_CSR_IWDGRSTF) ? 1U : 0U,
-                 (s_boot_reset_flags & RCC_CSR_WWDGRSTF) ? 1U : 0U,
-                 (s_boot_reset_flags & RCC_CSR_LPWRRSTF) ? 1U : 0U);
+                 "boot rcc_csr=0x%08lX\r\n",
+                 (unsigned long)s_boot_reset_flags);
     if (n > 0) {
         HostLink_Tx(line);
     }
-    HostLink_Tx("USART1 = T/TB/TC only; G0 TLM not forwarded (VERBOSE 0). Send HELP.\r\n");
-    HostLink_SendHelp();
 }
 
 void HostLink_Task(void)
 {
     uint32_t now_ms;
-    char line[HOST_LINK_RX_LINE_MAX];
-    uint32_t bms_ms;
-    bool with_bms;
+    LdoLink_CtrlState_t ctrl;
 
     if (s_huart == NULL) {
         return;
     }
 
-    HostLink_TxPump();
+    LinkUart_Poll(&s_host_uart, HostLink_OnByte, NULL);
 
-    while (s_rx_q_count > 0U) {
-        uint32_t primask = __get_PRIMASK();
-        __disable_irq();
-        memcpy(line, s_rx_q[s_rx_q_tail], sizeof(line));
-        s_rx_q_tail = (uint8_t)((s_rx_q_tail + 1U) % HOST_LINK_RX_Q);
-        s_rx_q_count--;
-        if (primask == 0U) {
-            __enable_irq();
-        }
-        HostLink_HandleLine(line);
-        HostLink_TxPump();
+    if (HostHeartbeat_Expired(LdoLink_IsOutputWanted(), HAL_GetTick(), s_last_host_ms)) {
+        LdoLink_HostLinkLost();
+        if (s_on_wait) HostLink_FinishOn(false, H7_LINK_NACK_LINK);
     }
 
-    if (s_rx_overflow) {
-        s_rx_overflow = false;
-        HostLink_Tx("ERR LINE\r\n");
+    if (s_on_wait) {
+        ctrl = LdoLink_GetCtrlState();
+        if (ctrl == LDO_G0_CTRL_RUNNING) {
+            HostLink_FinishOn(true, 0U);
+        } else if (ctrl == LDO_G0_CTRL_FAULT) {
+            HostLink_FinishOn(false, H7_LINK_NACK_UNSAFE);
+        } else if ((uint32_t)(HAL_GetTick() - s_on_since_ms) >= H7_LINK_ON_TIMEOUT_MS) {
+            HostLink_FinishOn(false, H7_LINK_NACK_TIMEOUT);
+            LdoLink_RequestOutput(false);
+            LdoPrereg_SetForceDisable(true);
+            LdoPrereg_SetPermitOverrideOff(true);
+            PSU_Stop();
+        }
     }
 
     now_ms = HAL_GetTick();
-    if ((s_tel_period_ms > 0U) &&
-        ((uint32_t)(now_ms - s_last_tel_ms) >= s_tel_period_ms)) {
-        s_last_tel_ms = now_ms;
-        bms_ms = HostLink_BmsPeriodMs(s_tel_period_ms);
-        with_bms = ((uint32_t)(now_ms - s_last_tb_ms) >= bms_ms);
-        HostLink_SendMachineTelemetry(with_bms);
-        if (with_bms) {
-            s_last_tb_ms = now_ms;
-        }
+    if ((uint32_t)(now_ms - s_meter_ms) >= H7_LINK_METER_PERIOD_MS) {
+        s_meter_ms = now_ms;
+        HostLink_QueueMeter();
     }
-
-    HostLink_TxPump();
+    if ((uint32_t)(now_ms - s_slow_ms) >= H7_LINK_SLOW_PERIOD_MS) {
+        s_slow_ms = now_ms;
+        HostLink_QueueSlow();
+    }
 }
 
 void HostLink_ForwardLine(const char *line)
@@ -911,43 +1088,11 @@ void HostLink_ForwardG0Line(const char *line)
 void HostLink_OnUartError(UART_HandleTypeDef *huart)
 {
     if ((huart != NULL) && (huart == s_huart)) {
-        HostLink_ArmRx();
+        LinkUart_OnError(huart);
     }
 }
 
 void HostLink_RxCplt(UART_HandleTypeDef *huart)
 {
-    uint8_t ch;
-
-    if ((huart == NULL) || (huart != s_huart)) {
-        return;
-    }
-
-    ch = s_rx_byte;
-    if ((ch == (uint8_t)'\n') || (ch == (uint8_t)'\r')) {
-        if (s_rx_len > 0U) {
-            s_rx_line[s_rx_len] = '\0';
-            if (s_rx_q_count < HOST_LINK_RX_Q) {
-                memcpy(s_rx_q[s_rx_q_head], s_rx_line, sizeof(s_rx_line));
-                s_rx_q_head = (uint8_t)((s_rx_q_head + 1U) % HOST_LINK_RX_Q);
-                s_rx_q_count++;
-            } else {
-                s_rx_overflow = true;
-            }
-            s_rx_len = 0U;
-        }
-    } else if (s_rx_len < (HOST_LINK_RX_LINE_MAX - 1U)) {
-        s_rx_line[s_rx_len++] = (char)ch;
-    } else {
-        s_rx_overflow = true;
-        s_rx_len = 0U;
-    }
-
-    HostLink_ArmRx();
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    HostLink_RxCplt(huart);
-    LdoLink_RxCplt(huart);
+    (void)huart;
 }

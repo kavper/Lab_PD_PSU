@@ -5,12 +5,15 @@
 #include "bq76922.h"
 #include "control_cv.h"
 #include "dcdc_hs_policy.h"
+#include "dcdc_permit.h"
 #include "debug_uart.h"
+#include "fan_tach.h"
 #include "ldo_link.h"
 #include "ldo_prereg.h"
 #include "host_link.h"
 #include "measurements.h"
 #include "power_manager.h"
+#include "remote_sense.h"
 #include "power_stage.h"
 #include "status_led.h"
 
@@ -1398,7 +1401,14 @@ static void App_ControlSlowTask(void)
                 permit_ok = false;
             }
 #endif
-            if (permit_ok && (!app.stage_enabled)) {
+            /* Shipping path starts the stage on CV request. Permit is
+             * granted afterwards, once regulation has held. Waiting for
+             * permit here deadlocks: regulation is false while the stage
+             * is off, so permit never comes. */
+            if (Dcdc_StageStartAllowed(true, true,
+                                       (BOARD_BRINGUP_LOCAL_CV != 0U),
+                                       permit_ok) &&
+                (!app.stage_enabled)) {
                 (void)App_EnableStageSlow();
             }
         }
@@ -1704,6 +1714,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
     App_TimebaseInit();
 
     PowerStage_Init(hhrtim);
+    /* Injected sense channels before the regular HRTIM DMA starts. */
+    RemoteSense_Init(hadc1);
     Measurements_Init(hadc1, hadc2);
 
     ControlCv_Init(&app.cv,
@@ -1784,7 +1796,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  App_FracPart(buck_exit_margin_x100, 100),
                  (unsigned long)APP_DEBUG_PERIOD_MS,
                  (unsigned int)APP_DEBUG_VERBOSE);
-    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV floor=%ld mV slew +10/-0.3 V/s permit_settle=150ms",
+    Debug_Printf("[APP] G0 pre-reg: margin=%ld mV floor=%ld mV slew +10/-0.3 V/s CC fold -5 V/s permit_settle=150ms",
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
                  (long)(BOARD_VPRE_VIN_FLOOR_V * 1000.0f));
 #if (BMS_ENABLE != 0U)
@@ -1838,6 +1850,8 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 void App_Run(void)
 {
     LdoLink_Task();
+    FanTach_Task();
+    RemoteSense_Task();
     LdoPrereg_Task(app.meas.vout, app.stage_enabled);
     App_PublishOcpEvent();
     App_ControlSlowTask();

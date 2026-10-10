@@ -52,11 +52,12 @@ void FanPwm_Init(void)
     }
 
     oc.OCMode = TIM_OCMODE_PWM1;
-    oc.Pulse = 0U;
+    /* Stopped until the first request: MCU high, Q9 on, fan PWM pin low. */
+    oc.Pulse = FanPwm_CompareTicks(period, 0U);
     oc.OCPolarity = TIM_OCPOLARITY_HIGH;
     oc.OCNPolarity = TIM_OCNPOLARITY_HIGH;
     oc.OCFastMode = TIM_OCFAST_DISABLE;
-    oc.OCIdleState = TIM_OCIDLESTATE_RESET;
+    oc.OCIdleState = TIM_OCIDLESTATE_SET;
     oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
     if (HAL_TIM_PWM_ConfigChannel(&s_htim17, &oc, TIM_CHANNEL_1) != HAL_OK) {
         return;
@@ -80,14 +81,14 @@ void FanPwm_SetPercent(uint8_t percent)
     }
 
     if ((s_ready == 0U) || (s_htim17.Instance == NULL)) {
+        /* No PWM hardware: high stops the fan, low lets it run on its pull-up. */
         HAL_GPIO_WritePin(FAN_PWM_GPIO_Port, FAN_PWM_Pin,
-                          percent ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                          (percent == 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
         return;
     }
 
     period = (uint32_t)__HAL_TIM_GET_AUTORELOAD(&s_htim17) + 1U;
-    pulse = ((period * (uint32_t)percent) + (FAN_PWM_PERCENT_MAX / 2U)) /
-            FAN_PWM_PERCENT_MAX;
+    pulse = FanPwm_CompareTicks(period, percent);
     __HAL_TIM_SET_COMPARE(&s_htim17, TIM_CHANNEL_1, pulse);
 }
 

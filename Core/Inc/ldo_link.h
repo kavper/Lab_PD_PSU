@@ -6,8 +6,8 @@
 #include <stdint.h>
 
 /*
- * G0 LDO link on USART2 PB3 TX / PB4 RX (115200 8N1).
- * Protocol: docs/G4_LDO_UART.md + LDO_controller docs/G4_G0_UART_PROTOCOL.md
+ * G0 LDO link on USART2 PB3 TX / PB4 RX (460800 8N1, DMA).
+ * Protocol v2: docs/G4_LDO_UART.md and LDO_controller docs/G4_G0_UART_PROTOCOL_V2.md.
  */
 
 typedef enum {
@@ -31,7 +31,8 @@ typedef struct {
     bool output_on;
     uint8_t mode;
     uint8_t bleed_request;
-    uint8_t fan_percent;
+    uint8_t fan_percent; /* last request from G0 */
+    uint8_t fan_applied; /* duty actually written to FAN_PWM */
     uint8_t pgood;
     uint8_t kill_reported;
     uint8_t outoff_reported;
@@ -42,6 +43,9 @@ typedef struct {
     uint32_t iset_ma;
     uint32_t iout_ma;
     uint32_t vpre_mv;
+    uint32_t dac_cv_mv;
+    uint32_t dac_cc_mv;
+    int16_t temp_centi_c[4]; /* T1..T4, °C×10 from G0; INT16_MIN = missing */
     uint32_t fault_flags;
     bool vpre_present;
     uint32_t last_tlm_ms;
@@ -75,6 +79,12 @@ bool LdoLink_IsPowerPermitted(void);
 
 /* G0 final-output control (binary atomic SETPOINT / SET_OUTPUT). */
 void LdoLink_RequestOutput(bool on);
+void LdoLink_ClearFaults(void);
+void LdoLink_HostLinkLost(void);
+/* Durable supervisory cause, exported in AUX byte 30. Reset on CLEAR/new ON. */
+enum { LDO_STOP_NONE, LDO_STOP_HOST_LINK, LDO_STOP_G0_LINK,
+       LDO_STOP_G0_KILL, LDO_STOP_G0_FAULT, LDO_STOP_START_FAILURE };
+uint8_t LdoLink_GetStopReason(void);
 bool LdoLink_IsOutputWanted(void);
 void LdoLink_SetG0Setpoint(float volts, float amps);
 void LdoLink_SetG0Voltage(float volts);
@@ -83,11 +93,22 @@ float LdoLink_GetG0Voltage(void);
 float LdoLink_GetG0Current(void);
 LdoLink_CtrlState_t LdoLink_GetCtrlState(void);
 
+/* Host SET: one G0 transaction in flight, one overwritten pending V+I.
+ * Result is delivered only after the G0 ACK/NACK/timeout. Same SEQ replays. */
+#define LDO_HOST_SET_QUEUED          0
+#define LDO_HOST_SET_REPLAY_ACK      1
+#define LDO_HOST_SET_REPLAY_NACK     2
+int LdoLink_SubmitHostSet(uint8_t seq, uint32_t mv, uint32_t ma,
+                          uint8_t *nack_reason);
+bool LdoLink_TakeHostSetResult(uint8_t *seq, uint8_t *ack, uint8_t *reason);
+uint8_t LdoLink_HostSetPhase(void);
+
 /*
- * Remote sense path (PB6 REMOTE_ON). Default OFF = local Kelvin on ADC_VOUT (PB2).
- * Host "REMOTE ON" asserts REMOTE_ON so ADC_REMOTE_P/N (PB0/PB1) sense path is
- * selected in hardware. CV regulation still uses ADC_VOUT (PB2) until remote
- * channels are added to ADC DMA ranks.
+ * Remote sense relay (PB6 REMOTE_ON, K1). Default OFF = local Kelvin.
+ * Host "REMOTE ON" only requests remote. The relay clicks after the
+ * PB14/PB0/PB1 self-test says the leads are on the right nodes.
+ * The DCDC loop still regulates from ADC_VOUT (PB2). K1 switches the LDO
+ * feedback sense, not the preregulator ADC.
  */
 void LdoLink_SetRemoteSense(bool enable);
 bool LdoLink_IsRemoteSenseEnabled(void);

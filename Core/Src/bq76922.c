@@ -1,6 +1,7 @@
 #include "bq76922.h"
 
 #include "bms_board.h"
+#include "bms_soc.h"
 #include "board_mx.h"
 #include "power_manager.h"
 
@@ -17,6 +18,7 @@
 #define BQ76922_CMD_STACK_V              0x34U
 #define BQ76922_CMD_PACK_V               0x36U
 #define BQ76922_CMD_CC2                  0x3AU
+#define BQ76922_CMD_INT_TEMP             0x68U
 #define BQ76922_CMD_ALARM_STATUS         0x62U
 #define BQ76922_CMD_FET_STATUS           0x7FU
 
@@ -29,6 +31,10 @@
 #define BQ76922_SUBCMD_SLEEP_DISABLE     0x009AU
 #define BQ76922_SUBCMD_MANUF_STATUS      0x0057U
 #define BQ76922_SUBCMD_RESET             0x0012U
+#define BQ76922_SUBCMD_RESET_PASSQ       0x0082U
+#define BQ76922_SUBCMD_DASTATUS5         0x0075U
+#define BQ76922_SUBCMD_DASTATUS6         0x0076U
+#define BQ76922_SUBCMD_CB_ACTIVE_CELLS   0x0083U
 #define BQ76922_SUBCMD_OTP_WR_CHECK      0x00A0U
 #define BQ76922_SUBCMD_OTP_WRITE         0x00A1U
 
@@ -151,6 +157,7 @@ typedef enum {
     BQ76922_INIT_ALL_FETS_ON,
     BQ76922_INIT_FET_SETTLE,
     BQ76922_INIT_FET_VERIFY,
+    BQ76922_INIT_RESET_PASSQ,
     BQ76922_INIT_DONE,
 } BQ76922_InitStep_t;
 
@@ -170,6 +177,9 @@ static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
 
 /* Session guard — OTP burn is never automatic; UART may do it once per boot. */
 static bool s_otp_burned_this_boot = false;
+/* SHUTDOWN clears the AFE coulomb counter. RESET_PASSQ only after that
+ * command, never on a normal boot and never when only the FETs turn off. */
+static bool s_passq_reset_pending = false;
 
 static void BQ76922_UpdateBusHold(BQ76922_Device_t *dev, uint32_t now_ms)
 {
@@ -1030,6 +1040,18 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             }
             break;
 
+        case BQ76922_INIT_RESET_PASSQ:
+            /* Both the full CFGUPDATE path and the OTP fast path reach this
+             * step. A normal boot leaves the flag clear and does not touch
+             * a counter that survived in the AFE. */
+            if (s_passq_reset_pending) {
+                status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_RESET_PASSQ);
+                if (status == BQ76922_OK) {
+                    s_passq_reset_pending = false;
+                }
+            }
+            break;
+
         case BQ76922_INIT_DONE:
         default:
             dev->snapshot.configured = true;
@@ -1074,6 +1096,8 @@ void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c)
             }
         }
     }
+    dev->snapshot.soc_permille = BMS_SOC_INVALID_PERMILLE;
+    BmsSoc_Reset();
 }
 
 BQ76922_Status_t BQ76922_Probe(BQ76922_Device_t *dev)
@@ -1154,14 +1178,18 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
         return BQ76922_INVALID_ARG;
     }
 
-    /* Clean FET path first, then SHUTDOWN twice to bypass command delay
-     * (TI BQ769x2: single write is ignored as accidental-shutdown guard). */
-    (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_OFF);
-    HAL_Delay(2U);
+    /* Keep the pack path powered until the AFE accepts SHUTDOWN. Sending
+     * ALL_FETS_OFF first can brown out this MCU before either shutdown
+     * write, leaving an awake AFE with disabled FETs: TS2 cannot wake it.
+     * TI: sealed needs two writes within 4 s; unsealed accepts the first
+     * and the second skips the configured shutdown delays. */
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
     if (status != BQ76922_OK) {
         return status;
     }
+    /* SHUTDOWN clears accumulated charge. RESET_PASSQ runs once on the
+     * next init for that reason only. FET-off and a normal boot do not. */
+    s_passq_reset_pending = true;
     HAL_Delay(2U);
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
     /* Always invalidate session after the dual SHUTDOWN write. Leaving
@@ -1242,7 +1270,7 @@ static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
     uint8_t echo[2];
     BQ76922_Status_t status;
 
-    if ((data == NULL) || (length == 0U) || (length > 4U)) {
+    if ((data == NULL) || (length == 0U) || (length > 32U)) {
         return BQ76922_INVALID_ARG;
     }
     addr[0] = (uint8_t)(address & 0xFFU);
@@ -2002,6 +2030,31 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     BQ76922_UpdateBusHold(dev, HAL_GetTick());
 }
 
+static void BQ76922_PublishSoc(BQ76922_Device_t *dev, uint32_t now_ms,
+                               BmsSoc_Result_t *out)
+{
+    uint8_t used = 0U;
+    uint8_t i;
+
+    memset(out, 0, sizeof(*out));
+    out->soc_permille = BMS_SOC_INVALID_PERMILLE;
+    for (i = 0U; i < BQ76922_CELL_COUNT; i++) {
+        if (BMS_CELL_USED(i)) {
+            used = (uint8_t)(used | (uint8_t)(1U << i));
+        }
+    }
+    if (!BmsSoc_OnSample(now_ms, dev->snapshot.cc2_ma, dev->snapshot.cell_mv,
+                         (uint8_t)BQ76922_CELL_COUNT, used,
+                         dev->snapshot.passq_valid, dev->snapshot.passq_mah,
+                         out)) {
+        return;
+    }
+    dev->snapshot.session_mah = out->session_mah;
+    dev->snapshot.soc_permille = out->soc_permille;
+    dev->snapshot.soc_flags = out->flags;
+    dev->snapshot.balance_mask = out->balance_mask;
+}
+
 void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
 {
 #if (BMS_ENABLE == 0U)
@@ -2155,8 +2208,75 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         } else if (status == BQ76922_BUSY) {
             return;
         }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 5U)) {
+        uint8_t ram[12];
+        int32_t whole;
+        uint32_t frac;
+
+        status = BQ76922_ReadRamBlock(dev, BQ76922_SUBCMD_DASTATUS6, ram, 12U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
+        if (status == BQ76922_OK) {
+            /* userAh, integer then fraction. CC2 is mA, so the integer is mAh. */
+            whole = (int32_t)((uint32_t)ram[0] |
+                              ((uint32_t)ram[1] << 8) |
+                              ((uint32_t)ram[2] << 16) |
+                              ((uint32_t)ram[3] << 24));
+            frac = (uint32_t)ram[4] |
+                   ((uint32_t)ram[5] << 8) |
+                   ((uint32_t)ram[6] << 16) |
+                   ((uint32_t)ram[7] << 24);
+            dev->snapshot.passq_mah = BmsSoc_UserAhToMah(whole, frac);
+            dev->snapshot.passq_valid = true;
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 6U)) {
+        uint8_t ram[24];
+
+        status = BQ76922_ReadRamBlock(dev, BQ76922_SUBCMD_DASTATUS5, ram, 24U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
+        if (status == BQ76922_OK) {
+            dev->snapshot.cc1_ma =
+                (int16_t)((uint16_t)ram[22] | ((uint16_t)ram[23] << 8));
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 7U)) {
+        status = BQ76922_ReadDirect(dev, BQ76922_CMD_INT_TEMP, buf, 2U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
+        if (status == BQ76922_OK) {
+            dev->snapshot.int_temp_dk = BQ76922_Le16(buf);
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
     } else {
+        BmsSoc_Result_t soc;
         bool hard_uv_ov;
+
+        BQ76922_PublishSoc(dev, now_ms, &soc);
+        if (soc.balance_write) {
+            /* RAM subcommand. Does not touch Balancing Configuration or OTP. */
+            status = BQ76922_WriteRamU2(dev, BQ76922_SUBCMD_CB_ACTIVE_CELLS,
+                                        soc.balance_cells);
+            if (BQ76922_NoteCommsResult(dev, status)) {
+                return;
+            }
+            if (status == BQ76922_BUSY) {
+                return;
+            }
+            if (status == BQ76922_OK) {
+                BmsSoc_NoteBalanceSent(now_ms);
+            }
+        }
 
         dev->snapshot.sample_valid = true;
         dev->snapshot.sample_tick_ms = now_ms;

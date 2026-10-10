@@ -98,23 +98,21 @@
 #endif
 
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
-#define BOARD_VPRE_MIN_V                     3.0f
+#define BOARD_VPRE_MIN_V                     1.5f
 #define BOARD_VPRE_MAX_V                     36.0f
 #define BOARD_VPRE_MARGIN_V                  1.5f
-/*
- * G0 CONSOLE_MINIMUM_VIN_MV is 6.0 V. While OUT is on OR host still wants
- * output, never command the DCDC below this floor — even if G0 CC collapses
- * vout, OUT is forced off (VIN_LOW/CC), or TLM goes stale (which used to
- * slew toward VPRE_MIN and starve VIN → VIN_LOW kill).
- */
-#define BOARD_VPRE_VIN_FLOOR_V               6.0f
+/* At zero-output CC, retain only the specified 1.5 V LDO headroom. */
+#define BOARD_VPRE_VIN_FLOOR_V               1.5f
 
 /*
- * Bring-up without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV.
- * Set to 0 when G0 LDO must control PERMIT exclusively.
+ * Bench image without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV
+ * even when the pre-regulator is not running. Shipping G4+G0 leaves this at
+ * 0; an explicit host ON clears POWER_KILL while G0 keeps its output disabled
+ * until PGOOD, VIN, SETPOINT and SET_OUTPUT are valid. A bench build overrides
+ * with -DBOARD_BRINGUP_LOCAL_CV=1.
  */
 #ifndef BOARD_BRINGUP_LOCAL_CV
-#define BOARD_BRINGUP_LOCAL_CV               1U
+#define BOARD_BRINGUP_LOCAL_CV               0U
 #endif
 
 /*
@@ -134,9 +132,13 @@
 #define BOARD_BRINGUP_LDO_VPRE_V             6.5f
 #endif
 
-/* Assert POWER_PERMIT from boot so G0 opto clears POWER_KILL early. */
+/*
+ * Bench only: assert POWER_PERMIT from boot, including during init, before
+ * the rail is up. Shipping G4+G0 leaves this at 0. A bench build overrides
+ * with -DBOARD_BRINGUP_PERMIT_EARLY=1.
+ */
 #ifndef BOARD_BRINGUP_PERMIT_EARLY
-#define BOARD_BRINGUP_PERMIT_EARLY           1U
+#define BOARD_BRINGUP_PERMIT_EARLY           0U
 #endif
 
 /* Wait after POWER_PERMIT before enabling isolated GaN supplies (no G0). */

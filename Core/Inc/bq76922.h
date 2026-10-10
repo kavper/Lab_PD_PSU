@@ -75,6 +75,15 @@ typedef struct {
     uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
+    /* passq_mah is DASTATUS6. session_mah stays 0; SOC uses the passQ delta. */
+    int32_t passq_mah;
+    int32_t session_mah;
+    uint16_t soc_permille;
+    int16_t cc1_ma;
+    int16_t int_temp_dk;
+    uint8_t balance_mask;
+    uint8_t soc_flags;
+    bool passq_valid;
 } BQ76922_Snapshot_t;
 
 typedef struct {
@@ -114,7 +123,8 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev);
  * While FETs are already on this can drop PACK, hold I2C4 (starve BQ/TPS), and
  * ALL_FETS_ON inrush may brown-out the MCU (PIN/POR). Prefer host BMS soft path. */
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
-/* Enter BQ769x2 SHUTDOWN: ALL_FETS_OFF then SHUTDOWN() twice (TI).
+/* Enter BQ769x2 SHUTDOWN directly, without first cutting the host power path.
+ * Send SHUTDOWN() twice for sealed-mode acceptance / unsealed delay bypass.
  * Keep balance harness connected; do not hold the TS2 button (soft-SHUTDOWN).
  * Product wake is TS2 button only (or LD for charger) — no host command.
  * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */
