@@ -809,6 +809,7 @@ static void HostLink_QueueSlow(void)
                       (RemoteSense_IsWanted() ? SENSE_FLAG_WANTED : 0U) |
                       (RemoteSense_IsLatched() ? SENSE_FLAG_LATCH : 0U));
         H7Link_PutU16(&aux_payload[H7_AUX_FAN_RPM], FanTach_Rpm());
+        aux_payload[H7_AUX_STOP_REASON] = LdoLink_GetStopReason();
         (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
                                   H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
     }

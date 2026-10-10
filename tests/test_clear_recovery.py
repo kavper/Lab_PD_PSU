@@ -21,6 +21,9 @@ harness = r'''
 #define H7_LINK_NACK_UNSAFE 4
 #define LDO_G0_CTRL_SEND_OUT_OFF 10
 static bool wanted=true, permit=true, force_off=false;
+#define LDO_STOP_NONE 0
+static unsigned s_stop_reason=3;
+static struct { bool active; } s_kill_confirm={true};
 static bool s_host_inflight=true, s_link_drop_latched=true;
 static uint8_t s_host_inflight_seq=42, s_retry_count=3;
 static struct { bool valid; } s_host_pending={true};
@@ -38,7 +41,7 @@ static void LdoLink_EnterState(unsigned state,uint32_t now) {assert(now==123);ct
 harness += handler + r'''
 int main(void) {
     LdoLink_ClearFaults();
-    assert(!wanted && !permit && force_off);
+    assert(!wanted && !permit && force_off && s_stop_reason==0 && !s_kill_confirm.active);
     assert(ctrl==10 && cleared==1 && cancelled==1);
     assert(!s_host_pending.valid && !s_link_drop_latched && s_retry_count==0);
     LdoLink_ClearFaults();

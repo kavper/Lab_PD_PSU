@@ -81,6 +81,10 @@ bool LdoLink_IsPowerPermitted(void);
 void LdoLink_RequestOutput(bool on);
 void LdoLink_ClearFaults(void);
 void LdoLink_HostLinkLost(void);
+/* Durable supervisory cause, exported in AUX byte 30. Reset on CLEAR/new ON. */
+enum { LDO_STOP_NONE, LDO_STOP_HOST_LINK, LDO_STOP_G0_LINK,
+       LDO_STOP_G0_KILL, LDO_STOP_G0_FAULT, LDO_STOP_START_FAILURE };
+uint8_t LdoLink_GetStopReason(void);
 bool LdoLink_IsOutputWanted(void);
 void LdoLink_SetG0Setpoint(float volts, float amps);
 void LdoLink_SetG0Voltage(float volts);

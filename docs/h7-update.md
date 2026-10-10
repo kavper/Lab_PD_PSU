@@ -212,7 +212,7 @@ UI czterech cel: tak jak dziś, pomiń ogniwo ≤ 0 (fizyczne odczepy 1, 2, 3, 5
 
 ### AUX_TLM, payload 32 B
 
-Bajty 0…19 są takie jak przy payloadzie 24 B. Potem jest self-test pomiaru zdalnego, a na bajtach 28…29 obroty wentylatora. Bajty 30…31 zostają zerami. Ramka ma 39 B (`LEN` = 34).
+Bajty 0…19 są takie jak przy payloadzie 24 B. Potem jest self-test pomiaru zdalnego, a na bajtach 28…29 obroty wentylatora. Bajt 30 zawiera trwały kod zatrzymania G4 (opis poniżej); bajt 31 zostaje zerem. Ramka ma 39 B (`LEN` = 34).
 
 Temperatury to już przeliczone NTC z G0, int16 w dziesiątych stopnia Celsjusza (`253` = 25,3 °C). To nie są kody ADC. `INT16_MIN` (`0x8000`) = brak pomiaru albo telemetria G0 starsza niż 500 ms. Źródło na G0: payload telemetrii `0x80`, offsety 56, 58, 60, 62 (po surowym i filtrowanym ADC, których H7 nie dostaje).
 
@@ -240,7 +240,8 @@ Wejście ma około 18,3 kΩ (220 kΩ || 20 kΩ) i 10 nF, więc stała czasowa to
 | 26 | u8 | `sense_code` |
 | 27 | u8 | `sense_flags`: bit0 cewka K1 załączona, bit1 H7/host prosi o remote, bit2 zatrzask po błędzie krytycznym |
 | 28 | u16 | `fan_rpm`. Dwa zbocza opadające na obrót. `0` = stoi albo tachometr nie daje impulsów. `0xFFFF` = pierwsza sekunda pomiaru jeszcze nie minęła |
-| 30…31 | — | zera |
+| 30 | u8 | stop_reason: 0 brak/starszy firmware, 1 timeout H7, 2 utrata G0, 3 potwierdzony KILL, 4 fault G0, 5 nieudany start/komenda G0 |
+| 31 | — | zero |
 
 `fan_rpm` jest liczone na G4 z PA5, bramka 1 s, i wkładane w tę samą wolną ramkę AUX (200 ms) co przekaźnik. Między bramkami H7 dostaje ostatnią wartość. PWM na PA7 jest odwrócony tranzystorem Q9: 0 % zatrzymuje wentylator, 100 % puszcza go na pełne obroty.
 
@@ -406,3 +407,14 @@ zatrzasku na podstawie pojedynczego, zaszumionego METER.
 
 Shutdown BMS: TEXT_CMD 0x21, ASCII `BMS SHUTDOWN`. Przygotowanie i zapis
 ustawień muszą zakończyć się po stronie H7 przed tą końcową komendą.
+
+### Poprawka współpracy z 2026-10-10
+
+Heartbeat H7 jest niezależny od odbioru METER i ma osobną kolejkę (100 ms,
+jedna ramka oczekująca, OFF ma pierwszeństwo). H7 nie wyłącza wyjścia po
+przekroczeniu wieku METER; 200 ms służy do gotowości nowego ON i prezentacji.
+G4 utrzymuje timeout hosta 1000 ms oraz G0 500 ms. Surowy KILL w RUNNING
+wymaga 50 ms potwierdzenia, zgodnie z G0; zgłoszony fault G0 pozostaje aktywny.
+Błąd komendy/startu i utrata G0 przechodzą do zatrzymanego FAULT, bez
+samoczynnego ponawiania ON. CLEAR usuwa kod stop_reason, zatrzymuje tor i
+przygotowuje kolejną jawną próbę ON. Szczegóły: coordinated-link-audit.md.

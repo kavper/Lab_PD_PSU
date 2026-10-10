@@ -114,4 +114,15 @@ static inline LdoOnReject_t Ldo_RejectOutOn(uint8_t nack_reason, bool tlm_fresh,
     return give_up ? LDO_ON_FAIL : LDO_ON_RETRY;
 }
 
+/* Analogue KILL removes drive immediately. G4 confirms a raw telemetry
+ * indication for the same 50 ms as G0 before latching the whole PSU off. */
+#define LDO_KILL_CONFIRM_MS 50U
+typedef struct { bool active; uint32_t since_ms; } LdoKillConfirm;
+static inline bool Ldo_KillConfirmed(LdoKillConfirm *state, bool asserted,
+                                     uint32_t now_ms)
+{
+    if (!asserted) { state->active = false; return false; }
+    if (!state->active) { state->active = true; state->since_ms = now_ms; }
+    return (uint32_t)(now_ms - state->since_ms) >= LDO_KILL_CONFIRM_MS;
+}
 #endif /* LDO_CTRL_POLICY_H */

@@ -90,6 +90,7 @@
 #define H7_AUX_REMOTE_N_MV           24U /* u16, REMOTE_N, same scale */
 #define H7_AUX_SENSE_CODE            26U /* u8, SENSE_* from sense_check.h */
 #define H7_AUX_SENSE_FLAGS           27U /* u8, bit0 relay closed, bit1 remote requested, bit2 latched off */
+#define H7_AUX_STOP_REASON           30U /* u8 LDO_STOP_*, durable until CLEAR/new ON */
 #define H7_AUX_FAN_RPM               28U /* u16, 2 pulses/rev; 0 stopped; 0xFFFF no sample yet */
 /* Bytes 30..31 stay zero. */
 

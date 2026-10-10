@@ -77,6 +77,8 @@ static uint32_t s_last_health_ms;
 static uint32_t s_last_recover_ms;
 
 static bool s_output_wanted;
+static LdoKillConfirm s_kill_confirm;
+static uint8_t s_stop_reason;
 static float s_g0_volts = LDO_DEFAULT_V;
 static float s_g0_amps = LDO_DEFAULT_I;
 static bool s_setpoint_dirty;
@@ -335,9 +337,19 @@ static void LdoLink_ClearPendingAcks(void)
     s_pending = LDO_PENDING_NONE;
 }
 
+static void LdoLink_HardKillFromFault(const char *why, uint8_t reason);
+
 static void LdoLink_EnterState(LdoLink_CtrlState_t next, uint32_t now_ms)
 {
+    /* Failed SET/OUT retries must stop once, not restart from FAULT on
+     * the next task tick while the old ON request is still true. */
+    if (next == LDO_G0_CTRL_FAULT && s_output_wanted) {
+        LdoLink_HardKillFromFault("G0 startup/command failed", LDO_STOP_START_FAILURE);
+        return;
+    }
     if (s_ctrl != next) {
+        if (next == LDO_G0_CTRL_FAULT && s_stop_reason == LDO_STOP_NONE)
+            s_stop_reason = LDO_STOP_START_FAILURE;
         Debug_Printf("[LDO] ctrl %u -> %u\r\n",
                      (unsigned int)s_ctrl, (unsigned int)next);
         s_ctrl = next;
@@ -346,8 +358,10 @@ static void LdoLink_EnterState(LdoLink_CtrlState_t next, uint32_t now_ms)
     }
 }
 
-static void LdoLink_HardKillFromFault(const char *why)
+static void LdoLink_HardKillFromFault(const char *why, uint8_t reason)
 {
+    if (s_stop_reason == LDO_STOP_NONE) s_stop_reason = reason;
+    s_kill_confirm.active = false;
     Debug_Printf("[LDO] HARD KILL PB7 (%s)\r\n", (why != NULL) ? why : "?");
     LdoLink_SetPermitPin(false);
     s_dcdc_permit_request = false;
@@ -357,10 +371,13 @@ static void LdoLink_HardKillFromFault(const char *why)
     LdoPrereg_SetForceDisable(true);
     LdoLink_ClearPendingAcks();
     if (s_host_inflight) {
-        LdoLink_PostHostResult(s_host_inflight_seq, false, H7_LINK_NACK_UNSAFE);
+        LdoLink_PostHostResult(s_host_inflight_seq, false,
+                               (reason == LDO_STOP_G0_LINK || reason == LDO_STOP_HOST_LINK)
+                                   ? H7_LINK_NACK_LINK : H7_LINK_NACK_UNSAFE);
     }
     s_host_pending.valid = false;
     LdoLink_EnterState(LDO_G0_CTRL_FAULT, HAL_GetTick());
+    PSU_Stop();
 }
 
 static bool LdoLink_SendSet(uint32_t now_ms, bool reuse_seq)
@@ -621,23 +638,14 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
     LdoLink_FlushHeldHostResult();
     s_status.output_wanted = s_output_wanted;
     s_status.ctrl_state = s_ctrl;
+    if (s_ctrl != LDO_G0_CTRL_RUNNING || !s_output_wanted)
+        s_kill_confirm.active = false;
 
     if (s_output_wanted && s_status.telemetry_valid &&
         ((uint32_t)(now_ms - s_status.last_tlm_ms) > LDO_TLM_STALE_MS)) {
         if (!s_link_drop_latched) {
             s_link_drop_latched = true;
-            s_output_wanted = false;
-            s_status.output_wanted = false;
-            s_dcdc_permit_request = false;
-            LdoLink_SetPermitPin(false);
-            LdoPrereg_SetForceDisable(true);
-            LdoPrereg_SetPermitOverrideOff(true);
-            PSU_Stop();
-            if (s_host_inflight) {
-                LdoLink_PostHostResult(s_host_inflight_seq, false,
-                                       H7_LINK_NACK_LINK);
-            }
-            s_host_pending.valid = false;
+            LdoLink_HardKillFromFault("G0 telemetry lost", LDO_STOP_G0_LINK);
             Debug_Printf("[LDO] link lost — output stays off until a new ON\r\n");
         }
     } else if (LdoLink_TlmFresh(now_ms)) {
@@ -677,9 +685,8 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         if (!s_output_wanted) {
             break;
         }
-        /* PB7 is driven only from the preregulator grant, after the
-         * DCDC has held regulation. Forcing it here cleared POWER_KILL
-         * while the pre-regulator was still off. */
+        /* PB7 follows the explicit preregulator permit request. The
+         * next state independently waits for G0 VIN and PGOOD before OUT. */
         if (LdoLink_TlmFresh(now_ms) &&
             (s_status.kill_reported == 0U) &&
             LdoPrereg_IsPermitGranted() &&
@@ -844,9 +851,11 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         if (!s_output_wanted) {
             break;
         }
-        if (LdoLink_TlmFresh(now_ms) && (s_status.kill_reported != 0U)) {
+        if (Ldo_KillConfirmed(&s_kill_confirm,
+                              LdoLink_TlmFresh(now_ms) && (s_status.kill_reported != 0U),
+                              now_ms)) {
             Debug_Printf("[LDO] kill asserted while running — hard kill\r\n");
-            LdoLink_HardKillFromFault("TLM kill=1");
+            LdoLink_HardKillFromFault("confirmed TLM kill=1", LDO_STOP_G0_KILL);
             break;
         }
         if (LdoLink_TlmFresh(now_ms) && (s_status.fault_flags != 0U)) {
@@ -855,7 +864,7 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
                 LdoLink_ClearPendingAcks();
                 LdoLink_EnterState(LDO_G0_CTRL_WAIT_VIN, now_ms);
             } else {
-                LdoLink_HardKillFromFault("G0 fault flags");
+                LdoLink_HardKillFromFault("G0 fault flags", LDO_STOP_G0_FAULT);
             }
             break;
         }
@@ -957,6 +966,8 @@ void LdoLink_Init(UART_HandleTypeDef *huart_g0)
     s_last_health_ms = 0U;
     s_last_recover_ms = 0U;
     s_output_wanted = false;
+    s_kill_confirm.active = false;
+    s_stop_reason = LDO_STOP_NONE;
     s_g0_volts = LDO_DEFAULT_V;
     s_g0_amps = LDO_DEFAULT_I;
     s_setpoint_dirty = false;
@@ -1018,6 +1029,8 @@ void LdoLink_RequestOutput(bool on)
     s_output_wanted = on;
     s_status.output_wanted = on;
     if (on) {
+        s_stop_reason = LDO_STOP_NONE;
+        s_kill_confirm.active = false;
         s_link_drop_latched = false;
         LdoPrereg_SetForceDisable(false);
         LdoPrereg_SetPermitOverrideOff(false);
@@ -1038,14 +1051,15 @@ void LdoLink_RequestOutput(bool on)
 
 void LdoLink_HostLinkLost(void)
 {
-    LdoLink_HardKillFromFault("H7 heartbeat lost");
-    PSU_Stop();
+    LdoLink_HardKillFromFault("H7 heartbeat lost", LDO_STOP_HOST_LINK);
 }
 
 /* CLEAR is an explicit stop/recovery, never an automatic ON. G0 OFF
  * clears its console fault after it has disabled the output locally. */
 void LdoLink_ClearFaults(void)
 {
+    s_stop_reason = LDO_STOP_NONE;
+    s_kill_confirm.active = false;
     LdoLink_RequestOutput(false);
     LdoLink_ClearPendingAcks();
     if (s_host_inflight) {
@@ -1055,6 +1069,11 @@ void LdoLink_ClearFaults(void)
     s_retry_count = 0U;
     s_link_drop_latched = false;
     LdoLink_EnterState(LDO_G0_CTRL_SEND_OUT_OFF, HAL_GetTick());
+}
+
+uint8_t LdoLink_GetStopReason(void)
+{
+    return s_stop_reason;
 }
 
 bool LdoLink_IsOutputWanted(void)
