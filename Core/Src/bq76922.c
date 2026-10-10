@@ -1178,10 +1178,11 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
         return BQ76922_INVALID_ARG;
     }
 
-    /* Clean FET path first, then SHUTDOWN twice to bypass command delay
-     * (TI BQ769x2: single write is ignored as accidental-shutdown guard). */
-    (void)BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_OFF);
-    HAL_Delay(2U);
+    /* Keep the pack path powered until the AFE accepts SHUTDOWN. Sending
+     * ALL_FETS_OFF first can brown out this MCU before either shutdown
+     * write, leaving an awake AFE with disabled FETs: TS2 cannot wake it.
+     * TI: sealed needs two writes within 4 s; unsealed accepts the first
+     * and the second skips the configured shutdown delays. */
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
     if (status != BQ76922_OK) {
         return status;

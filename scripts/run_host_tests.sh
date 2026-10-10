@@ -9,6 +9,7 @@ for test_source in tests/*.c; do
   "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ICore/Inc "${sources[@]}" -lm -o "$output/test"
   "$output/test"
 done
+python3 tests/test_bms_shutdown.py
 python3 tests/test_clear_recovery.py
 python3 tests/test_runtime_supervisor.py
 if [[ $# == 2 ]]; then
