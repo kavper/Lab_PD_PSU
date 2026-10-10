@@ -35,6 +35,7 @@
 #define LDO_RX_RECOVER_MS            1000U
 #define LDO_CMD_TIMEOUT_MS           150U
 #define LDO_CMD_RETRY_MAX            4U
+#define LDO_OUT_ON_RETRY_SETTLE_MS   20U
 #define LDO_VIN_MIN_MV               1000U
 #define LDO_VOUT_ZERO_MV             250U
 #define LDO_V_MIN                    0.0f
@@ -95,6 +96,8 @@ static bool s_ack_out_on_ok;
 static bool s_ack_out_off_ok;
 static bool s_nack_seen;
 static uint8_t s_nack_reason;
+static uint32_t s_out_nack_ms;
+static uint32_t s_out_nack_tlm_count;
 static char s_nack_line[48];
 static LinkUart s_link;
 static bool s_link_drop_latched;
@@ -469,6 +472,10 @@ static void LdoLink_HandleNack(uint8_t sequence, const uint8_t *payload,
     s_status.nack_count++;
     s_nack_seen = true;
     s_nack_reason = payload[1];
+    if (s_pending == LDO_PENDING_OUT_ON) {
+        s_out_nack_ms = HAL_GetTick();
+        s_out_nack_tlm_count = s_status.tlm_count;
+    }
     (void)snprintf(s_nack_line, sizeof(s_nack_line),
                    "NACK type=%02X reason=%02X",
                    (unsigned int)payload[0], (unsigned int)payload[1]);
@@ -818,6 +825,15 @@ static void LdoLink_CtrlTask(uint32_t now_ms)
         } else if (s_nack_seen) {
             LdoOnReject_t reject;
 
+            /* UNSAFE describes conditions at G0, not the older telemetry
+             * in our snapshot. Four immediate retries formerly exhausted
+             * the entire startup budget before the next 5 ms frame.
+             * Wait for settling AND a new snapshot before classifying it. */
+            if (((uint32_t)(now_ms - s_out_nack_ms)
+                    < LDO_OUT_ON_RETRY_SETTLE_MS) ||
+                (s_status.tlm_count == s_out_nack_tlm_count)) {
+                break;
+            }
             s_nack_seen = false;
             reject = Ldo_RejectOutOn(s_nack_reason, LdoLink_TlmFresh(now_ms),
                                      s_status.fault_flags,

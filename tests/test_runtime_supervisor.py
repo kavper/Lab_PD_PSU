@@ -46,6 +46,8 @@ static LdoLink_CtrlState_t s_ctrl;
 static bool s_output_wanted,s_link_drop_latched,s_dcdc_permit_request;
 static bool s_host_inflight,s_setpoint_dirty,s_ack_set_ok,s_ack_out_on_ok,s_ack_out_off_ok,s_nack_seen;
 static uint8_t s_stop_reason,s_host_inflight_seq,s_nack_reason,s_retry_count;
+static uint32_t s_out_nack_ms,s_out_nack_tlm_count;
+#define LDO_OUT_ON_RETRY_SETTLE_MS 20U
 static unsigned s_pending,s_pending_since_ms,s_state_since_ms;
 static LdoKillConfirm s_kill_confirm;
 static LdoPendingSet s_host_pending;
@@ -116,6 +118,16 @@ int main(void){
  assert(s_output_wanted&&s_ctrl==LDO_G0_CTRL_RUNNING&&s_stop_reason==0);
  running();now=UINT32_MAX;LdoLink_Task();
  assert(now==0&&s_output_wanted&&s_ctrl==LDO_G0_CTRL_RUNNING&&s_stop_reason==0);
+ reset();s_output_wanted=true;s_ctrl=LDO_G0_CTRL_WAIT_OUT_ON_ACK;
+ s_pending=LDO_PENDING_OUT_ON;s_nack_seen=true;s_nack_reason=4;
+ s_out_nack_ms=100;s_out_nack_tlm_count=10;s_status.tlm_count=10;
+ for(unsigned t=100;t<120;t++)tick(t,true);
+ assert(s_ctrl==LDO_G0_CTRL_WAIT_OUT_ON_ACK&&s_retry_count==0&&s_nack_seen);
+ tick(120,true);assert(s_ctrl==LDO_G0_CTRL_WAIT_OUT_ON_ACK); /* no new frame */
+ ++s_status.tlm_count;tick(121,true);
+ assert(s_ctrl==LDO_G0_CTRL_SEND_OUT_ON&&s_retry_count==1&&!s_nack_seen);
+ tick(122,true);assert(s_ctrl==LDO_G0_CTRL_WAIT_OUT_ON_ACK);
+ s_ack_out_on_ok=true;tick(123,true);assert(s_ctrl==LDO_G0_CTRL_RUNNING&&s_output_wanted);
  running();for(unsigned t=19;t<10000;t++)tick(t,true);
  assert(s_ctrl==LDO_G0_CTRL_RUNNING&&s_output_wanted&&hard_stops==0);
  s_status.kill_reported=1;tick(10000,true);tick(10004,true);
