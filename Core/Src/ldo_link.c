@@ -1208,11 +1208,15 @@ void LdoLink_GetStatus(LdoLink_Status_t *out)
 
 void LdoLink_Task(void)
 {
-    uint32_t now_ms = HAL_GetTick();
+    uint32_t now_ms;
     uint32_t age_ms;
 
     LinkUart_Poll(&s_link, LdoLink_OnRxByte, NULL);
     LdoLink_DumpFirstRx();
+    /* RX callbacks stamp telemetry with HAL_GetTick(). Sample time AFTER
+     * parsing: a tick crossing during Poll otherwise makes now-last_tlm
+     * underflow to UINT32_MAX and falsely trips the link watchdog. */
+    now_ms = HAL_GetTick();
 
     if (s_status.last_rx_ms != 0U) {
         age_ms = now_ms - s_status.last_rx_ms;

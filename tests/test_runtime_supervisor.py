@@ -71,7 +71,24 @@ static void LdoLink_HardKillFromFault(const char *why,uint8_t reason);
 '''
 # why is consumed only by a production debug macro.
 preamble=preamble.replace('#define Debug_Printf(...) ((void)0)', 'static void Debug_Printf(const char *fmt,...){(void)fmt;}')
-code=preamble+'\n'+ '\n'.join(body(n) for n in ['LdoLink_EnterState','LdoLink_HardKillFromFault','LdoLink_TlmFresh','LdoLink_PendingTimedOut','LdoLink_CtrlTask','LdoLink_RequestOutput','LdoLink_ClearFaults'])
+preamble += r'''
+#define LDO_RX_RECOVER_MS 1000U
+#define LDO_LINK_HEALTH_MS 1000U
+static uint32_t s_last_health_ms;
+static int s_link;
+static void LdoLink_OnRxByte(uint8_t b,void *ctx){(void)b;(void)ctx;}
+static void LinkUart_Poll(int *link,void (*cb)(uint8_t,void *),void *ctx){
+ (void)link;(void)cb;(void)ctx;
+ /* SysTick advances while the real UART parser receives a fresh frame. */
+ ++now;s_status.last_tlm_ms=now;s_status.last_rx_ms=now;
+}
+static void LdoLink_DumpFirstRx(void){}
+static void LdoLink_RecoverRx(uint32_t t){(void)t;}
+static void LdoLink_DumpDiag(void){}
+static bool LdoLink_IsUartPinSwapEnabled(void){return false;}
+static void LdoLink_ApplyActuators(uint32_t t){(void)t;}
+'''
+code=preamble+'\n'+ '\n'.join(body(n) for n in ['LdoLink_EnterState','LdoLink_HardKillFromFault','LdoLink_TlmFresh','LdoLink_PendingTimedOut','LdoLink_CtrlTask','LdoLink_RequestOutput','LdoLink_ClearFaults','LdoLink_Task'])
 code+=r'''
 static void reset(void){
  s_status=(LdoLink_Status_t){0};s_host_pending=(LdoPendingSet){0};
@@ -95,6 +112,10 @@ static void running(void){
  s_pending=0;s_status.output_on=true;
 }
 int main(void){
+ running();now=100;LdoLink_Task();
+ assert(s_output_wanted&&s_ctrl==LDO_G0_CTRL_RUNNING&&s_stop_reason==0);
+ running();now=UINT32_MAX;LdoLink_Task();
+ assert(now==0&&s_output_wanted&&s_ctrl==LDO_G0_CTRL_RUNNING&&s_stop_reason==0);
  running();for(unsigned t=19;t<10000;t++)tick(t,true);
  assert(s_ctrl==LDO_G0_CTRL_RUNNING&&s_output_wanted&&hard_stops==0);
  s_status.kill_reported=1;tick(10000,true);tick(10004,true);
