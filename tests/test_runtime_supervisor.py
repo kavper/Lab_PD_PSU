@@ -29,7 +29,7 @@ preamble=r'''
 #define LDO_TLM_STALE_MS 500U
 #define LDO_CMD_TIMEOUT_MS 150U
 #define LDO_CMD_RETRY_MAX 4U
-#define LDO_VIN_MIN_MV 4500U
+#define LDO_VIN_MIN_MV 1000U
 #define LDO_VOUT_ZERO_MV 250U
 #define LDO_FAULT_VIN_LOW 8U
 #define H7_LINK_NACK_LINK 7U
@@ -79,7 +79,7 @@ static void reset(void){
  s_host_inflight=s_setpoint_dirty=s_link_drop_latched=false;s_retry_count=0;s_pending=0;
  s_ack_set_ok=s_ack_out_on_ok=s_ack_out_off_ok=s_nack_seen=false;
  permit=true;force_disable=override_off=false;now=10;hard_stops=0;send_ok=true;
- s_status.telemetry_valid=true;s_status.vin_mv=6000;s_status.pgood=1;
+ s_status.telemetry_valid=true;s_status.vin_mv=2500;s_status.pgood=1;
 }
 static void tick(uint32_t t,bool fresh){now=t;if(fresh)s_status.last_tlm_ms=t;LdoLink_CtrlTask(t);}
 static void running(void){

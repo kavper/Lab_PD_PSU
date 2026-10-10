@@ -1,3 +1,5 @@
+> Headroom policy below is superseded by [ldo-headroom-fix.md](ldo-headroom-fix.md): the 6 V floor has been removed in both G0 and G4.
+
 # Przegląd współpracy H7, G4 i G0 — 2026-10-10
 
 ## Zakres i status

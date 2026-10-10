@@ -35,7 +35,7 @@
 #define LDO_RX_RECOVER_MS            1000U
 #define LDO_CMD_TIMEOUT_MS           150U
 #define LDO_CMD_RETRY_MAX            4U
-#define LDO_VIN_MIN_MV               4500U
+#define LDO_VIN_MIN_MV               1000U
 #define LDO_VOUT_ZERO_MV             250U
 #define LDO_V_MIN                    0.0f
 #define LDO_V_MAX                    27.0f

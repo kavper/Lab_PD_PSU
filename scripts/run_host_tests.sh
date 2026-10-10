@@ -11,4 +11,7 @@ for test_source in tests/*.c; do
 done
 python3 tests/test_clear_recovery.py
 python3 tests/test_runtime_supervisor.py
-if [[ $# == 2 ]]; then python3 tests/test_peer_protocol.py "$1" "$2"; fi
+if [[ $# == 2 ]]; then
+  python3 tests/test_headroom_pair.py "$1"
+  python3 tests/test_peer_protocol.py "$1" "$2"
+fi

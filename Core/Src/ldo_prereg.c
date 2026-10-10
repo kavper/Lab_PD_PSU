@@ -12,8 +12,8 @@
 #define LDO_G0_MODE_CC                       2U
 #define LDO_TLM_STALE_MS                     500U
 #define PREREG_SLEW_UP_V_PER_S               10.0f
-#define PREREG_SLEW_DOWN_V_PER_S             0.3f
-/* CC fold stays at or above the VIN floor, so it may come down faster. */
+#define PREREG_SLEW_DOWN_V_PER_S             5.0f
+/* CV and CC use the same bounded downward reference slew. */
 #define PREREG_SLEW_DOWN_CC_V_PER_S          5.0f
 #define PREREG_REGULATION_BAND_V             0.50f
 #define PREREG_REG_SETTLE_MS                 150U
@@ -151,7 +151,7 @@ static void Prereg_UpdateSlew(float request_v, float dt_s, bool hold_vin_floor,
 
     s_command_v = Prereg_ClampV(s_command_v + delta);
 
-    /* Hard stop: 6 V, which is 1.5 V above G0's 4.5 V VIN_LOW trip. */
+    /* Never request less than the specified zero-output headroom. */
     if (hold_vin_floor && (s_command_v < BOARD_VPRE_VIN_FLOOR_V)) {
         s_command_v = BOARD_VPRE_VIN_FLOOR_V;
     }

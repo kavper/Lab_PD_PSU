@@ -98,16 +98,11 @@
 #endif
 
 /* Pre-regulator headroom — must match G0 app_config.h (VPRE_*). */
-#define BOARD_VPRE_MIN_V                     3.0f
+#define BOARD_VPRE_MIN_V                     1.5f
 #define BOARD_VPRE_MAX_V                     36.0f
 #define BOARD_VPRE_MARGIN_V                  1.5f
-/*
- * G0 VIN_LOW trips at CONSOLE_MINIMUM_VIN_MV (4.5 V). While OUT is on OR
- * the host still wants output, never command the DCDC below 6.0 V. CC may
- * follow Vout + margin down to this floor. Following it on to VPRE_MIN
- * used to starve VIN and latch VIN_LOW.
- */
-#define BOARD_VPRE_VIN_FLOOR_V               6.0f
+/* At zero-output CC, retain only the specified 1.5 V LDO headroom. */
+#define BOARD_VPRE_VIN_FLOOR_V               1.5f
 
 /*
  * Bench image without G0 TLM: host "ON" grants POWER_PERMIT and runs local CV

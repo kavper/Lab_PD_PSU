@@ -9,11 +9,8 @@
  * CV, output wanted but still off, and a missing CC request all stay at
  * cv_floor_v (Vset + dropout, already not below the VIN floor).
  *
- * Confirmed CC: honor G0's lower vpre (measured Vout + dropout). Do not
- * lift that request back to Vset + dropout — that is the extra voltage
- * across the LDO. Still refuse anything under vin_floor_v. A collapsed
- * Vout used to be followed all the way to vpre_min and the rail tripped
- * VIN_LOW on the way down.
+ * Confirmed CC honors measured Vout + dropout, bounded by Vset + dropout.
+ * The lower bound is 1.5 V, the headroom at zero output, not a 6 V rail.
  */
 static inline float Prereg_SelectRequestV(bool output_on,
                                           bool output_wanted,
