@@ -7,8 +7,6 @@
 
 #define SENSE_SPIN_LIMIT                 200000U
 #define SENSE_VREF_MV                    ((uint32_t)(BOARD_VREF_V * 1000.0f + 0.5f))
-#define SENSE_G0_MODE_CV                 1U
-#define SENSE_G0_TLM_FRESH_MS            500U
 
 static ADC_HandleTypeDef *s_hadc;
 static bool s_configured;
@@ -120,21 +118,6 @@ static bool RemoteSense_Sample(uint32_t *local_mv, uint32_t *remote_p_mv,
     return true;
 }
 
-static bool RemoteSense_CompareSetpoint(uint32_t *setpoint_mv)
-{
-    LdoLink_Status_t ldo;
-    uint32_t now_ms = HAL_GetTick();
-
-    LdoLink_GetStatus(&ldo);
-    if ((!ldo.telemetry_valid) || (ldo.last_tlm_ms == 0U) ||
-        ((uint32_t)(now_ms - ldo.last_tlm_ms) > SENSE_G0_TLM_FRESH_MS)) {
-        return false;
-    }
-    *setpoint_mv = ldo.vset_mv;
-    /* mode 1 is CV. mode 2 is CC: VD follows the load, not the voltage set. */
-    return ldo.mode == SENSE_G0_MODE_CV;
-}
-
 void RemoteSense_Init(ADC_HandleTypeDef *hadc)
 {
     s_hadc = hadc;
@@ -208,7 +191,6 @@ void RemoteSense_Task(void)
     uint32_t local_mv = 0U;
     uint32_t remote_p_mv = 0U;
     uint32_t remote_n_mv = 0U;
-    uint32_t setpoint_mv = 0U;
     SenseInput in;
     SenseStep step;
     bool sampled;
@@ -234,11 +216,6 @@ void RemoteSense_Task(void)
         s_local_mv = Sense_MvToU16(local_mv);
         s_remote_p_mv = Sense_MvToU16(remote_p_mv);
         s_remote_n_mv = Sense_MvToU16(remote_n_mv);
-        if (s_gate.closed &&
-            RemoteSense_CompareSetpoint(&setpoint_mv)) {
-            in.compare_setpoint = true;
-            in.setpoint_mv = setpoint_mv;
-        }
     } else {
         s_local_mv = SENSE_MV_MISSING;
         s_remote_p_mv = SENSE_MV_MISSING;

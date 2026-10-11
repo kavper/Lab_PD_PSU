@@ -46,8 +46,8 @@
  * The gate checks DP, DN, the sum of the drops, and the top of the local
  * reading. Before K1 closes it also requires SENSE_OK_STREAK samples that
  * agree within the channel budget. After close it keeps watching the drops
- * and a missed conversion. In CV it also waits for VD to meet the setpoint;
- * in CC that comparison stays off, and a descent of the output to zero is
+ * and a missed conversion. The final voltage request is not a cable test:
+ * G0 ramps the applied target and enforces CC. A descent to zero is
  * the low-voltage state rather than a wiring fault.
  *
  * Below Sense_MinLocalMv the sample is NOT_READY. That is separate from a
@@ -413,12 +413,7 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
     gate->wanted = true;
 
     if (gate->latched) {
-        if (in->have_sample) {
-            gate->code = Sense_Classify(in->local_mv, in->remote_p_mv,
-                                        in->remote_n_mv);
-        } else {
-            gate->code = SENSE_NO_SAMPLE;
-        }
+        /* Preserve the first trip code after the output collapses to zero. */
         gate->closed = false;
         gate->streak = 0U;
         step.code = gate->code;
@@ -529,23 +524,9 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
     gate->prev_n_mv = in->remote_n_mv;
     gate->have_prev = true;
 
-    if (in->compare_setpoint &&
-        (!Sense_VdMatchesSetpoint(in->remote_p_mv, in->remote_n_mv,
-                                  in->setpoint_mv))) {
-        if (gate->cv_streak < SENSE_OK_STREAK) {
-            gate->cv_streak++;
-        }
-        gate->code = SENSE_CV_VD;
-        if (gate->cv_streak >= SENSE_OK_STREAK) {
-            Sense_GateTrip(gate, &step, SENSE_CV_VD);
-        } else {
-            step.code = SENSE_CV_VD;
-            step.closed = true;
-            step.latched = false;
-        }
-        return step;
-    }
-
+    /* Cable supervision compares simultaneous measured voltages, not the
+     * final CV request. G0 ramps its applied DAC target and enforces CC;
+     * being below the final request is not evidence of a broken sense wire. */
     gate->cv_streak = 0U;
     step.code = SENSE_OK;
     step.closed = true;

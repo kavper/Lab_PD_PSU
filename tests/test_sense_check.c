@@ -271,20 +271,16 @@ int main(void)
     ExpectTrue(step.closed, "CC with a legal drop stays remote");
     ExpectTrue(!step.drop_permit, "CC leaves PERMIT up");
 
-    /* CV: the same VD miss trips on the third sample. */
+    /* A valid wire pair below the final CV request must not trip during
+     * a ramp, a downward set change, or a CV/CC transition. */
     Sense_GateInit(&gate);
     CloseGood(&gate);
-    step = Feed(&gate, Sample(8000U, 7600U, 200U, 12000U, true, true));
-    ExpectEq(step.code, SENSE_CV_VD, "CV shows the setpoint miss immediately");
-    ExpectTrue(step.closed, "one CV miss does not open yet");
-    ExpectTrue(!step.drop_permit, "one CV miss does not drop PERMIT");
-    step = Feed(&gate, Sample(8000U, 7600U, 200U, 12000U, true, true));
-    ExpectTrue(step.closed, "two CV misses still wait");
-    step = Feed(&gate, Sample(8000U, 7600U, 200U, 12000U, true, true));
-    ExpectEq(step.code, SENSE_CV_VD, "third CV miss is the fault");
-    ExpectTrue(!step.closed, "CV fault opens K1");
-    ExpectTrue(step.drop_permit, "CV fault drops PERMIT");
-    ExpectTrue(step.latched, "CV fault latches");
+    for (i = 0U; i < 50U; i++) {
+        step = Feed(&gate, Sample(8000U, 7600U, 200U, 12000U, true, true));
+        ExpectEq(step.code, SENSE_OK, "final target mismatch is not a cable fault");
+        ExpectTrue(step.closed && !step.drop_permit && !step.latched,
+                   "legal cable drops keep remote active during settling");
+    }
 
     /* CC load short: the output falls through the floor to 0 V and stays remote. */
     Sense_GateInit(&gate);
@@ -321,6 +317,14 @@ int main(void)
     /* OFF while a real fault is latched must leave that latch set. */
     step = Feed(&gate, Sample(12000U, 0U, 0U, 12000U, false, true));
     ExpectTrue(step.latched && step.drop_permit, "wiring fault after close still latches");
+    {
+        uint8_t first_code = step.code;
+        SenseInput zero = Sample(0U, 0U, 0U, 12000U, false, true);
+        zero.output_on = false;
+        step = Feed(&gate, zero);
+        ExpectEq(step.code, first_code, "first remote fault survives output falling to zero");
+    }
+
     in = Sample(400U, 0U, 0U, 12000U, false, true);
     in.output_on = false;
     step = Feed(&gate, in);
