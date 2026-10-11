@@ -370,6 +370,21 @@ int main(void)
     ExpectTrue(!step.drop_permit, "ADC loss before close leaves PERMIT up");
     ExpectTrue(!step.latched, "ADC loss before close does not latch");
 
+    /* Isolated and alternating small drop spikes must not accumulate. */
+    Sense_GateInit(&gate);
+    CloseGood(&gate);
+    for (i=0U; i<20U; i++) {
+        step = Feed(&gate, Sample(5000U, 4000U, 0U, 5000U, false, true));
+        ExpectTrue(step.closed && !step.drop_permit, "isolated moderate spike stays remote");
+        step = Feed(&gate, Sample(5000U, 5000U, 0U, 5000U, false, true));
+    }
+    for (i=0U; i<2U; i++) {
+        step = Feed(&gate, Sample(5000U, 4000U, 0U, 5000U, false, true));
+        ExpectTrue(step.closed && !step.drop_permit, "two moderate spikes wait");
+    }
+    step = Feed(&gate, Sample(5000U, 4000U, 0U, 5000U, false, true));
+    ExpectTrue(step.latched && step.drop_permit, "persistent moderate drop trips on third sample");
+
     /* ADC loss after close. */
     Sense_GateInit(&gate);
     CloseGood(&gate);
@@ -377,7 +392,9 @@ int main(void)
     in.have_sample = false;
     step = Feed(&gate, in);
     ExpectEq(step.code, SENSE_NO_SAMPLE, "a missed conversion after close");
-    ExpectTrue(!step.closed, "ADC loss after close opens K1");
+    ExpectTrue(step.closed && !step.drop_permit, "one missed conversion does not stop remote");
+    step = Feed(&gate, in);
+    ExpectTrue(!step.closed, "two missed conversions after close open K1");
     ExpectTrue(step.drop_permit, "ADC loss after close drops PERMIT");
     ExpectTrue(step.latched, "ADC loss after close latches");
 

@@ -76,6 +76,8 @@
 #define SENSE_FILTER_TAU_US          183U
 #define SENSE_PERIOD_MS              100U
 #define SENSE_OK_STREAK              3U
+#define SENSE_BAD_STREAK             3U
+#define SENSE_ADC_MISS_STREAK        2U
 #define SENSE_MV_MISSING             0xFFFFU
 
 #define SENSE_FLAG_CLOSED            0x01U
@@ -120,6 +122,8 @@ typedef struct {
     bool have_prev;
     uint8_t streak;
     uint8_t cv_streak;
+    uint8_t bad_streak;
+    uint8_t miss_streak;
     uint8_t code;
     uint32_t prev_local_mv;
     uint32_t prev_p_mv;
@@ -343,6 +347,8 @@ static inline void Sense_GateInit(SenseGate *gate)
     gate->have_prev = false;
     gate->streak = 0U;
     gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
     gate->code = SENSE_NO_SAMPLE;
     gate->prev_local_mv = 0U;
     gate->prev_p_mv = 0U;
@@ -357,6 +363,8 @@ static inline void Sense_GateRequest(SenseGate *gate, bool enable)
     gate->wanted = enable;
     gate->streak = 0U;
     gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
     gate->have_prev = false;
     if (!enable) {
         gate->latched = false;
@@ -371,6 +379,8 @@ static inline void Sense_GateTrip(SenseGate *gate, SenseStep *step, uint8_t code
     gate->latched = true;
     gate->streak = 0U;
     gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
     gate->have_prev = false;
     step->code = code;
     step->closed = false;
@@ -396,6 +406,8 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
         gate->closed = false;
         gate->streak = 0U;
         gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
         gate->have_prev = false;
         if (in->have_sample) {
             gate->code = Sense_Classify(in->local_mv, in->remote_p_mv,
@@ -431,6 +443,8 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
         gate->closed = false;
         gate->streak = 0U;
         gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
         gate->have_prev = false;
         if (in->have_sample) {
             gate->code = Sense_Classify(in->local_mv, in->remote_p_mv,
@@ -448,17 +462,15 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
     if (!in->have_sample) {
         gate->have_prev = false;
         gate->streak = 0U;
-        gate->cv_streak = 0U;
-        if (was_closed) {
+        gate->bad_streak = 0U;
+        gate->code = SENSE_NO_SAMPLE;
+        step.code = SENSE_NO_SAMPLE;
+        if (was_closed && ++gate->miss_streak >= SENSE_ADC_MISS_STREAK) {
             Sense_GateTrip(gate, &step, SENSE_NO_SAMPLE);
-        } else {
-            gate->code = SENSE_NO_SAMPLE;
-            step.code = SENSE_NO_SAMPLE;
-            step.closed = false;
-            step.latched = false;
         }
         return step;
     }
+    gate->miss_streak = 0U;
 
     code = Sense_Classify(in->local_mv, in->remote_p_mv, in->remote_n_mv);
     gate->code = code;
@@ -471,6 +483,8 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
         gate->have_prev = false;
         gate->streak = 0U;
         gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
         gate->closed = was_closed;
         step.code = SENSE_NOT_READY;
         step.closed = was_closed;
@@ -484,14 +498,31 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
         gate->streak = 0U;
         gate->cv_streak = 0U;
         if (was_closed) {
-            Sense_GateTrip(gate, &step, code);
+            bool moderate = (code == SENSE_DROP_P || code == SENSE_DROP_N ||
+                             code == SENSE_DROP_SUM);
+            int32_t dp = (int32_t)in->local_mv - (int32_t)in->remote_p_mv;
+            /* Gross errors remain immediate. Only a small excess over the
+             * normal wire/error budget gets a consecutive-sample filter. */
+            bool gross = dp > (int32_t)(SENSE_DROP_WIRE_MV +
+                Sense_DpErrorMv(in->local_mv, in->remote_p_mv) + 1000U) ||
+                dp < -(int32_t)(Sense_DpErrorMv(in->local_mv, in->remote_p_mv) + 1000U) ||
+                in->remote_n_mv > SENSE_DROP_WIRE_MV +
+                    Sense_DnErrorMv(in->remote_n_mv) + 1000U;
+            if (!moderate || gross || ++gate->bad_streak >= SENSE_BAD_STREAK) {
+                Sense_GateTrip(gate, &step, code);
+            } else {
+                step.code = code;
+                step.closed = true;
+            }
         } else {
+            gate->bad_streak = 0U;
             step.code = code;
             step.closed = false;
             step.latched = false;
         }
         return step;
     }
+    gate->bad_streak = 0U;
 
     if (!was_closed) {
         if ((gate->streak == 0U) || (!gate->have_prev)) {
@@ -528,6 +559,8 @@ static inline SenseStep Sense_GateStep(SenseGate *gate, const SenseInput *in)
      * final CV request. G0 ramps its applied DAC target and enforces CC;
      * being below the final request is not evidence of a broken sense wire. */
     gate->cv_streak = 0U;
+    gate->bad_streak = 0U;
+    gate->miss_streak = 0U;
     step.code = SENSE_OK;
     step.closed = true;
     step.latched = false;
