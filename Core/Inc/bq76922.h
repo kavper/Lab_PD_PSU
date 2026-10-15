@@ -2,6 +2,7 @@
 #define BQ76922_H
 
 #include "bms_board.h"
+#include "bms_fet_guard.h"
 #include "stm32g4xx_hal.h"
 
 #include <stdbool.h>
@@ -38,6 +39,7 @@ typedef enum {
     BQ76922_FAULT_SAFETY            = (1U << 5),
     BQ76922_FAULT_ALERT             = (1U << 6),
     BQ76922_FAULT_I2C               = (1U << 7),
+    BQ76922_FAULT_FET_START         = (1U << 8),
 } BQ76922_FaultFlags_t;
 
 typedef struct {
@@ -104,6 +106,10 @@ typedef struct {
     uint32_t boot_settle_ms;
     /* Set when AFE returns after I2C loss / SHUTDOWN — longer settle + OTP fast path. */
     bool wake_from_absent;
+    BmsFetGuard fet_guard;
+    bool fet_guard_off_sent;
+    uint8_t pdsg_timeout_rb;
+    uint8_t pdsg_stop_delta_rb;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);

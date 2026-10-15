@@ -288,10 +288,18 @@ static BQ76922_Status_t BQ76922_WriteDirect(BQ76922_Device_t *dev,
 static BQ76922_Status_t BQ76922_SendSubcommand(BQ76922_Device_t *dev, uint16_t subcmd)
 {
     uint8_t buf[2];
+    BQ76922_Status_t status;
+    if (subcmd == BQ76922_SUBCMD_ALL_FETS_ON &&
+        !BmsFetGuard_AllowStart(&dev->fet_guard)) return BQ76922_NOT_READY;
 
     buf[0] = (uint8_t)(subcmd & 0xFFU);
     buf[1] = (uint8_t)((subcmd >> 8) & 0xFFU);
-    return BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, buf, 2U);
+    status = BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, buf, 2U);
+    /* A bus error is ambiguous: do not repeat a potentially accepted start.
+     * BUSY means no transaction was attempted and can be retried. */
+    if (subcmd == BQ76922_SUBCMD_ALL_FETS_ON && status != BQ76922_BUSY)
+        dev->fet_guard.start_attempted = true;
+    return status;
 }
 
 static BQ76922_Status_t BQ76922_WriteRamBlock(BQ76922_Device_t *dev,
@@ -661,6 +669,7 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             {
                 uint16_t vcell = 0U;
                 uint8_t fet_opt = 0U;
+                uint8_t timeout = 0U, delta = 0U;
 
                 status = BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &vcell);
                 if (status != BQ76922_OK) {
@@ -670,8 +679,15 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                 if (status != BQ76922_OK) {
                     break;
                 }
+                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT, &timeout);
+                if (status != BQ76922_OK) break;
+                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA, &delta);
+                if (status != BQ76922_OK) break;
+                dev->pdsg_timeout_rb = timeout;
+                dev->pdsg_stop_delta_rb = delta;
                 dev->snapshot.vcell_mode_rb = vcell;
-                if ((vcell == BMS_VCELL_MODE) && (fet_opt == BMS_FET_OPTIONS)) {
+                if ((vcell == BMS_VCELL_MODE) && (fet_opt == BMS_FET_OPTIONS) &&
+                    timeout == BMS_PDSG_TIMEOUT && delta == BMS_PDSG_STOP_DELTA) {
                     dev->init_step = (uint8_t)BQ76922_INIT_MANUF_ISSUE;
                     dev->snapshot.init_step = dev->init_step;
                     delay_ms = 20U;
@@ -824,12 +840,26 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
         case BQ76922_INIT_PDSG_TIMEOUT:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT,
                                         BMS_PDSG_TIMEOUT);
+            if (status == BQ76922_OK) {
+                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT, &dev->pdsg_timeout_rb);
+                if (status == BQ76922_OK && dev->pdsg_timeout_rb != BMS_PDSG_TIMEOUT) {
+                    dev->fet_guard.latched = true;
+                    return false;
+                }
+            }
             delay_ms = 20U;
             break;
 
         case BQ76922_INIT_PDSG_STOP_DELTA:
             status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA,
                                         BMS_PDSG_STOP_DELTA);
+            if (status == BQ76922_OK) {
+                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA, &dev->pdsg_stop_delta_rb);
+                if (status == BQ76922_OK && dev->pdsg_stop_delta_rb != BMS_PDSG_STOP_DELTA) {
+                    dev->fet_guard.latched = true;
+                    return false;
+                }
+            }
             delay_ms = 20U;
             break;
 
@@ -990,11 +1020,11 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             status = BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, buf, 1U);
             if (status == BQ76922_OK) {
                 uint8_t fet = buf[0];
-                bool path_on = ((fet & BQ76922_FET_STATUS_DSG) != 0U) ||
-                               ((fet & BQ76922_FET_STATUS_PDSG) != 0U);
+                bool path_on = ((fet & BQ76922_FET_STATUS_DSG) != 0U) &&
+                               ((fet & BQ76922_FET_STATUS_PDSG) == 0U);
+                BmsFetGuard_Observe(&dev->fet_guard, fet, HAL_GetTick());
                 bool chg_on = ((fet & BQ76922_FET_STATUS_CHG) != 0U);
-                bool false_cov;
-                bool cfetoff_force;
+
 
                 dev->snapshot.fet_status = fet;
                 dev->snapshot.chg_fet_on = chg_on;
@@ -1002,41 +1032,20 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                     ((fet & BQ76922_FET_STATUS_DSG) != 0U);
                 dev->snapshot.fets_enabled = (chg_on || path_on);
                 (void)BQ76922_ReadSafetyStatus(dev);
-                false_cov =
-                    ((dev->snapshot.safety_status_a & BQ76922_SAFETY_A_COV) != 0U) &&
-                    (!dev->snapshot.sample_valid ||
-                     (dev->snapshot.max_cell_mv < (int16_t)BMS_COV_THRESHOLD_MV));
-                cfetoff_force = ((fet & BQ76922_FET_STATUS_DCHG_PIN) != 0U) &&
-                                !chg_on;
-
                 if (chg_on && path_on) {
                     dev->fet_verify_attempts = 0U;
                     dev->fet_recover_fails = 0U;
                     break;
                 }
 
-                /* SCD/inrush, floating CFETOFF, or transient COV — clear +
-                 * ALL_FETS_ON; do not reboot. After CFETOFF Pin Config=0,
-                 * CHG should come back once any false COV latch clears. */
-                if (dev->fet_verify_attempts < BQ76922_FET_VERIFY_MAX) {
-                    dev->fet_verify_attempts++;
-                    (void)BQ76922_ClearAlarms(dev);
-                    status = BQ76922_SendSubcommand(dev,
-                                                    BQ76922_SUBCMD_ALL_FETS_ON);
-                    if (status == BQ76922_OK) {
-                        dev->last_fet_cmd_ms = HAL_GetTick();
-                        /* Longer settle when COV/CFETOFF was blocking CHG. */
-                        delay_ms = (false_cov || cfetoff_force) ? 200U : 120U;
-                        dev->init_step = (uint8_t)BQ76922_INIT_FET_SETTLE;
-                        dev->snapshot.init_step = dev->init_step;
-                        dev->next_action_ms = HAL_GetTick() + delay_ms;
-                        return false;
-                    }
-                    break;
+                /* Poll completion without reissuing ALL_FETS_ON. */
+                if ((uint32_t)(HAL_GetTick() - dev->last_fet_cmd_ms) <
+                    BMS_PDSG_HOST_LIMIT_MS) {
+                    dev->next_action_ms = HAL_GetTick() + 50U;
+                    return false;
                 }
-                /* Keep going READY even if FETs still off — runtime retry
-                 * will keep clearing SCD/false-COV and re-issuing ALL_FETS_ON. */
-                dev->fet_verify_attempts = 0U;
+                dev->fet_guard.latched = true;
+                return false;
             }
             break;
 
@@ -2070,6 +2079,19 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         return;
     }
 
+    if (BmsFetGuard_Expired(&dev->fet_guard, now_ms)) {
+        dev->snapshot.fault_flags |= BQ76922_FAULT_FET_START;
+        dev->snapshot.shutdown_request = true;
+        dev->snapshot.state = BQ76922_STATE_FAULT;
+        dev->snapshot.configured = false;
+        PowerManager_SetBmsBusHold(false);
+        if (!dev->fet_guard_off_sent) {
+            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_ALL_FETS_OFF);
+            if (status == BQ76922_OK) dev->fet_guard_off_sent = true;
+        }
+        return;
+    }
+
     BQ76922_UpdateBusHold(dev, now_ms);
 
     dev->snapshot.alert_pin =
@@ -2186,6 +2208,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
         if (status == BQ76922_OK) {
             dev->snapshot.fet_status = buf[0];
+            BmsFetGuard_Observe(&dev->fet_guard, buf[0], HAL_GetTick());
             dev->snapshot.chg_fet_on = ((buf[0] & BQ76922_FET_STATUS_CHG) != 0U);
             dev->snapshot.dsg_fet_on = ((buf[0] & BQ76922_FET_STATUS_DSG) != 0U);
             /* PDSG counts as discharge path while soft-starting PACK caps. */
@@ -2260,8 +2283,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         }
     } else {
         BmsSoc_Result_t soc;
-        bool hard_uv_ov;
-
+    
         BQ76922_PublishSoc(dev, now_ms, &soc);
         if (soc.balance_write) {
             /* RAM subcommand. Does not touch Balancing Configuration or OTP. */
@@ -2285,90 +2307,13 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         BQ76922_DecodeSafetyFaults(dev);
         BQ76922_UpdateWarnState(dev);
 
-        /* Button / USB-C wake unlock + charger-unplug recovery:
-         * clear recoverable SCD/OCC/false-COV, keep CHG+DSG both on.
-         * Floating CFETOFF (fet bit4) used to hold CHG off forever — pin
-         * config is now forced unused in CFGUPDATE; still retry ALL_FETS_ON
-         * and re-run CFGUPDATE if CHG never returns. */
-        hard_uv_ov = ((dev->snapshot.fault_flags &
-                       (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) != 0U);
-        {
-            bool dsg_path =
-                dev->snapshot.dsg_fet_on ||
-                ((dev->snapshot.fet_status & BQ76922_FET_STATUS_PDSG) != 0U);
-            bool false_cov =
-                ((dev->snapshot.safety_status_a & BQ76922_SAFETY_A_COV) != 0U) &&
-                !hard_uv_ov;
-            bool cfetoff_force =
-                ((dev->snapshot.fet_status & BQ76922_FET_STATUS_DCHG_PIN) != 0U) &&
-                !dev->snapshot.chg_fet_on;
-            bool need_fet_cmd =
-                (!dev->snapshot.chg_fet_on || !dsg_path) ||
-                ((dev->snapshot.safety_status_a & BQ76922_SAFETY_A_CURRENT) != 0U) ||
-                false_cov;
-
-            if (need_fet_cmd &&
-                ((int32_t)(now_ms - dev->last_fet_cmd_ms) >=
-                 (int32_t)BQ76922_FET_RETRY_MS)) {
-                if (hard_uv_ov && (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE)) {
-                    BQ76922_RequestReinit(dev);
-                    return;
-                }
-                if (!hard_uv_ov) {
-                    bool manuf_unknown =
-                        BQ76922_ManufLooksStaleVcell(dev->snapshot.manuf_status) ||
-                        ((dev->snapshot.manuf_status & BQ76922_MANUF_FET_EN) == 0U);
-
-                    if (manuf_unknown) {
-                        /* Need a verified FET_ENABLE path — do not toggle blindly. */
-                        BQ76922_RequestReinit(dev);
-                        return;
-                    }
-                    /* Sticky CHG-off with DCHG_PIN or false COV → re-apply
-                     * CFETOFF=unused + ALL_FETS_ON via full CFGUPDATE. */
-                    if (!dev->snapshot.chg_fet_on &&
-                        (cfetoff_force || false_cov) &&
-                        (dev->fet_recover_fails >= BQ76922_FET_RECOVER_REINIT_MAX)) {
-                        dev->fet_recover_fails = 0U;
-                        BQ76922_RequestReinit(dev);
-                        return;
-                    }
-                    status = BQ76922_ClearAlarms(dev);
-                    if (status == BQ76922_BUSY) {
-                        return;
-                    }
-                    if (status == BQ76922_OK) {
-                        status = BQ76922_SendSubcommand(dev,
-                                                        BQ76922_SUBCMD_ALL_FETS_ON);
-                    }
-                    if (status == BQ76922_BUSY) {
-                        return;
-                    }
-                    if (status == BQ76922_OK) {
-                        dev->last_fet_cmd_ms = now_ms;
-                        if (!dev->snapshot.chg_fet_on || !dsg_path) {
-                            if (dev->fet_recover_fails < 255U) {
-                                dev->fet_recover_fails++;
-                            }
-                        } else {
-                            dev->fet_recover_fails = 0U;
-                        }
-                        /* Recoverable current/COV latch must not keep FAULT. */
-                        if ((dev->snapshot.fault_flags &
-                             (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) == 0U) {
-                            dev->snapshot.shutdown_request = false;
-                            if (dev->snapshot.state == BQ76922_STATE_FAULT) {
-                                dev->snapshot.state = BQ76922_STATE_READY;
-                            }
-                        }
-                    }
-                }
-            } else if (dev->snapshot.chg_fet_on && dsg_path &&
-                       ((dev->snapshot.safety_status_a &
-                         (BQ76922_SAFETY_A_CURRENT | BQ76922_SAFETY_A_COV)) == 0U)) {
-                dev->fet_recover_fails = 0U;
-            }
+        /* Let the AFE's protection/recovery policy run. Never restart a
+         * failed power path repeatedly through the predischarge resistor. */
+        if (!dev->snapshot.dsg_fet_on &&
+            !(dev->snapshot.fet_status & BQ76922_FET_STATUS_PDSG)) {
+            dev->fet_guard.latched = true;
         }
+
     }
 
     dev->next_action_ms = now_ms + BQ76922_SCAN_PERIOD_MS;
