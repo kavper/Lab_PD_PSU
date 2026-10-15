@@ -565,6 +565,11 @@ static void HostLink_HandleLine(char *line)
             return;
         }
 
+        if (g_bq76922.shutdown_wait) {
+            HostLink_Tx("ERR BMS shutdown in progress — reinit refused\r\n");
+            return;
+        }
+
         /* GUI "BMS config" historically sent plain BMS while FETs were already
          * on → full CFGUPDATE, I2C bus-hold (bq_ok=0), ALL_FETS_ON inrush,
          * VIN dip, PIN/POR reboot. Soft path skips that when healthy. */

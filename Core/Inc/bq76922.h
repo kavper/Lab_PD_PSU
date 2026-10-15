@@ -3,6 +3,7 @@
 
 #include "bms_board.h"
 #include "bms_fet_guard.h"
+#include "bms_shutdown.h"
 #include "stm32g4xx_hal.h"
 
 #include <stdbool.h>
@@ -108,6 +109,10 @@ typedef struct {
     bool wake_from_absent;
     BmsFetGuard fet_guard;
     bool fet_guard_off_sent;
+    /* SHUTDOWN() sent, or SD_CMD seen at boot. The AFE keeps ACKing until it
+     * powers down; those ACKs must not be treated as a TS2 wake. */
+    bool shutdown_wait;
+    BmsShutdownWait shutdown_poll;
     uint8_t pdsg_timeout_rb;
     uint8_t pdsg_stop_delta_rb;
 } BQ76922_Device_t;
@@ -133,7 +138,10 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev);
  * Send SHUTDOWN() twice for sealed-mode acceptance / unsealed delay bypass.
  * Keep balance harness connected; do not hold the TS2 button (soft-SHUTDOWN).
  * Product wake is TS2 button only (or LD for charger) — no host command.
- * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */
+ * While SD_CMD is pending the driver only reads status; FET and CFGUPDATE
+ * commands wait until the AFE NACKs. Then it is marked absent so the button
+ * wake auto-runs FET_ENABLE. If the AFE keeps answering with SD_CMD clear,
+ * the shutdown was not accepted and normal operation resumes. */
 BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 
 /* Lab/production OTP — NEVER called from boot. UART: BMS OTP STATUS / BURN. */

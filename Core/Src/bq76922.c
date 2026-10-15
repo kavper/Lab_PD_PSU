@@ -172,6 +172,7 @@ static bool BQ76922_ManufLooksStaleVcell(uint16_t manuf)
 }
 
 static void BQ76922_ForceAbsent(BQ76922_Device_t *dev);
+static void BQ76922_BeginShutdownWait(BQ76922_Device_t *dev);
 static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
                                     BQ76922_Status_t status);
 
@@ -289,6 +290,9 @@ static BQ76922_Status_t BQ76922_SendSubcommand(BQ76922_Device_t *dev, uint16_t s
 {
     uint8_t buf[2];
     BQ76922_Status_t status;
+    if (!BmsShutdown_AllowSubcommand(dev->shutdown_wait, subcmd)) {
+        return BQ76922_NOT_READY;
+    }
     if (subcmd == BQ76922_SUBCMD_ALL_FETS_ON &&
         !BmsFetGuard_AllowStart(&dev->fet_guard)) return BQ76922_NOT_READY;
 
@@ -619,6 +623,12 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
              * Also wait BOOT_SETTLE_MS — TI recommends ~300 ms before CFGUPDATE. */
             status = BQ76922_ReadBatteryStatus(dev);
             if (status == BQ76922_OK) {
+                /* An ACK while SD_CMD=1 is the shutdown still running, not a
+                 * wake. Never enter CFGUPDATE or FET_ENABLE/ALL_FETS_ON here. */
+                if (BmsShutdown_SdCmd(dev->snapshot.battery_status)) {
+                    BQ76922_BeginShutdownWait(dev);
+                    return false;
+                }
                 sec = (uint16_t)(dev->snapshot.battery_status & BQ76922_BATT_SEC_MASK);
                 if (sec == 0U) {
                     delay_ms = 50U;
@@ -1201,10 +1211,11 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
     s_passq_reset_pending = true;
     HAL_Delay(2U);
     status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_SHUTDOWN);
-    /* Always invalidate session after the dual SHUTDOWN write. Leaving
-     * init_step at DONE + configured=0 falsely re-marked READY without
-     * FET_ENABLE — button wake then left MOSFETs off with no host cmd. */
-    BQ76922_ForceAbsent(dev);
+    /* The AFE keeps ACKing while SD_CMD is set. Marking it absent here made
+     * the next probe look like a TS2 wake and restarted CFGUPDATE /
+     * ALL_FETS_ON on top of the shutdown. Task() marks it absent once the
+     * bus goes quiet, or resumes if the shutdown was not accepted. */
+    BQ76922_BeginShutdownWait(dev);
     return status;
 #endif
 }
@@ -1985,6 +1996,63 @@ static void BQ76922_ForceAbsent(BQ76922_Device_t *dev)
     dev->next_action_ms = HAL_GetTick() + BQ76922_PROBE_RETRY_MS;
 }
 
+static void BQ76922_BeginShutdownWait(BQ76922_Device_t *dev)
+{
+    dev->shutdown_wait = true;
+    dev->shutdown_poll.fail_streak = 0U;
+    dev->shutdown_poll.idle_polls = 0U;
+    PowerManager_SetBmsBusHold(false);
+    dev->next_action_ms = HAL_GetTick() + 100U;
+}
+
+/* Status-only polling while SHUTDOWN is pending. */
+static void BQ76922_ShutdownWaitTask(BQ76922_Device_t *dev, uint32_t now_ms)
+{
+    BQ76922_Status_t status;
+    uint8_t fet = 0U;
+
+    PowerManager_SetBmsBusHold(false);
+    if ((int32_t)(now_ms - dev->next_action_ms) < 0) {
+        return;
+    }
+    status = BQ76922_ReadBatteryStatus(dev);
+    if (status == BQ76922_BUSY) {
+        return;
+    }
+    if ((status == BQ76922_OK) &&
+        (BQ76922_ReadDirect(dev, BQ76922_CMD_FET_STATUS, &fet, 1U) == BQ76922_OK)) {
+        dev->snapshot.fet_status = fet;
+        dev->snapshot.chg_fet_on = ((fet & BQ76922_FET_STATUS_CHG) != 0U);
+        dev->snapshot.dsg_fet_on = ((fet & BQ76922_FET_STATUS_DSG) != 0U);
+        dev->snapshot.fets_enabled = dev->snapshot.chg_fet_on ||
+                                     dev->snapshot.dsg_fet_on;
+    }
+    dev->next_action_ms = now_ms + 100U;
+
+    switch (BmsShutdown_Poll(&dev->shutdown_poll, status == BQ76922_OK,
+                             dev->snapshot.battery_status,
+                             BQ76922_I2C_ABSENT_STREAK)) {
+        case BMS_SHUT_POLL_GONE:
+            dev->shutdown_wait = false;
+            /* The AFE really powered down, so the next TS2 wake gets one
+             * bounded FET start even if this MCU stayed powered. */
+            if (!dev->fet_guard.latched) {
+                dev->fet_guard.start_attempted = false;
+                dev->fet_guard.pdsg_seen = false;
+            }
+            BQ76922_ForceAbsent(dev);
+            break;
+        case BMS_SHUT_POLL_ABORTED:
+            /* Still awake with SD_CMD clear: SHUTDOWN was not taken. Resume
+             * from the current init/runtime state; no reinit is forced. */
+            dev->shutdown_wait = false;
+            break;
+        case BMS_SHUT_POLL_WAIT:
+        default:
+            break;
+    }
+}
+
 /* True when AFE should be treated as gone (SHUTDOWN / unpowered). */
 static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
                                     BQ76922_Status_t status)
@@ -2008,7 +2076,7 @@ static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
 
 void BQ76922_RequestReinit(BQ76922_Device_t *dev)
 {
-    if (dev == NULL) {
+    if ((dev == NULL) || dev->shutdown_wait) {
         return;
     }
 
@@ -2076,6 +2144,11 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     BQ76922_Status_t status;
 
     if ((dev == NULL) || (dev->hi2c == NULL)) {
+        return;
+    }
+
+    if (dev->shutdown_wait) {
+        BQ76922_ShutdownWaitTask(dev, now_ms);
         return;
     }
 
