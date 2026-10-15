@@ -51,16 +51,20 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/board_mx.c
     Core/Src/bq25731.c
     Core/Src/bq76922.c
+    Core/Src/bms_soc.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
     Core/Src/fan_pwm.c
+    Core/Src/fan_tach.c
     Core/Src/host_link.c
     Core/Src/ldo_link.c
+    Core/Src/link_uart.c
     Core/Src/ldo_prereg.c
     Core/Src/measurements.c
     Core/Src/power_manager.c
     Core/Src/power_stage.c
     Core/Src/psu_gui_api.c
+    Core/Src/remote_sense.c
     Core/Src/status_led.c
     Core/Src/tps25751.c
     Core/Src/tps_int_event.c

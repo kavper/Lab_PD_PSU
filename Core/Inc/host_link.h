@@ -6,21 +6,10 @@
 #include <stdint.h>
 
 /*
- * USART1 PC4 TX / PC5 RX — H7 / PC parser only (115200 8N1).
- *
- * Default: clean machine telemetry. Debug spam is OFF (VERBOSE 0).
- * G0 TLM/ACK stay on USART2; they are not mirrored here.
- * See docs/HOST_TELEMETRY.md for the field list, H7 parser notes, and G0 FW.
- *
- * Frame (every TEL period or on ? / STATUS):
- *   T  … PSU / G0 / PD / pre-reg  (follows TEL; back-pressured if TX busy)
- *   TB … BMS (cells, pack/stack V, pack I, FETs, safety)
- *   TC … BQ25731 + TPS path
- *   TEL < 200 ms → T at TEL, TB/TC at 200 ms (115200 cannot carry all three
- *   at 50–100 Hz). Cell voltages are never dropped; they are just not 10 Hz.
- *
- * Commands: HELP, ON, OFF, SET, ILIM, PERMIT, REMOTE, TEL, ?, STATUS,
- *           BMS, VERBOSE, G0DIAG, G0SWAP, CLR
+ * USART1 PC4 TX / PC5 RX — H7 production link (460800 8N1, DMA).
+ * Binary frames are defined in h7_link_proto.h. METER is 5 ms, BMS/PD 200 ms.
+ * Diagnostic ASCII is carried in TEXT frames (type 0x20), lowest TX priority.
+ * TEL is ignored. G0 traffic stays on USART2.
  */
 
 void HostLink_Init(UART_HandleTypeDef *huart);

@@ -2,6 +2,7 @@
 #define BQ76922_H
 
 #include "bms_board.h"
+#include "bms_fet_guard.h"
 #include "stm32g4xx_hal.h"
 
 #include <stdbool.h>
@@ -38,6 +39,7 @@ typedef enum {
     BQ76922_FAULT_SAFETY            = (1U << 5),
     BQ76922_FAULT_ALERT             = (1U << 6),
     BQ76922_FAULT_I2C               = (1U << 7),
+    BQ76922_FAULT_FET_START         = (1U << 8),
 } BQ76922_FaultFlags_t;
 
 typedef struct {
@@ -75,6 +77,15 @@ typedef struct {
     uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
+    /* passq_mah is DASTATUS6. session_mah stays 0; SOC uses the passQ delta. */
+    int32_t passq_mah;
+    int32_t session_mah;
+    uint16_t soc_permille;
+    int16_t cc1_ma;
+    int16_t int_temp_dk;
+    uint8_t balance_mask;
+    uint8_t soc_flags;
+    bool passq_valid;
 } BQ76922_Snapshot_t;
 
 typedef struct {
@@ -95,6 +106,10 @@ typedef struct {
     uint32_t boot_settle_ms;
     /* Set when AFE returns after I2C loss / SHUTDOWN — longer settle + OTP fast path. */
     bool wake_from_absent;
+    BmsFetGuard fet_guard;
+    bool fet_guard_off_sent;
+    uint8_t pdsg_timeout_rb;
+    uint8_t pdsg_stop_delta_rb;
 } BQ76922_Device_t;
 
 void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c);
@@ -114,7 +129,8 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev);
  * While FETs are already on this can drop PACK, hold I2C4 (starve BQ/TPS), and
  * ALL_FETS_ON inrush may brown-out the MCU (PIN/POR). Prefer host BMS soft path. */
 void BQ76922_RequestReinit(BQ76922_Device_t *dev);
-/* Enter BQ769x2 SHUTDOWN: ALL_FETS_OFF then SHUTDOWN() twice (TI).
+/* Enter BQ769x2 SHUTDOWN directly, without first cutting the host power path.
+ * Send SHUTDOWN() twice for sealed-mode acceptance / unsealed delay bypass.
  * Keep balance harness connected; do not hold the TS2 button (soft-SHUTDOWN).
  * Product wake is TS2 button only (or LD for charger) — no host command.
  * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */

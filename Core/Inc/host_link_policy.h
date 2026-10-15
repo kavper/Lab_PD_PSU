@@ -6,9 +6,8 @@
 #include <string.h>
 
 /*
- * USART1 (H7 / PC) stays ASCII T/TB/TC. G0 TLM/ACK on USART2 is control
- * traffic — do not mirror it to the host unless VERBOSE is on.
- * NACK is rare and user-visible, so it still reaches the console.
+ * USART1 is the binary H7 link. G0 frames stay on USART2.
+ * VERBOSE may forward a G0 text line inside a TEXT frame.
  */
 
 static inline bool HostLink_IsG0TlmLine(const char *line)
@@ -58,16 +57,16 @@ static inline bool HostLink_LooksLikeHostCommand(const char *line)
     return (c == (unsigned char)'?') || (isalpha(c) != 0);
 }
 
-/* At 115200 8N1, full T+TB+TC (~1.3 kB) cannot run faster than ~150 ms.
- * Fast TEL keeps T at the requested period and spaces BMS/charger frames. */
-static inline uint32_t HostLink_BmsPeriodMs(uint32_t tel_ms)
+/* Production METER is binary and fixed. H7 does not choose the period.
+ * BMS/PD stay on their own 200 ms timer as separate frames. */
+static inline uint32_t HostLink_MeterPeriodMs(void)
 {
-    const uint32_t bms_min_ms = 200U;
+    return 5U;
+}
 
-    if (tel_ms == 0U) {
-        return 0U;
-    }
-    return (tel_ms >= bms_min_ms) ? tel_ms : bms_min_ms;
+static inline uint32_t HostLink_BmsPeriodMs(void)
+{
+    return 200U;
 }
 
 #endif /* HOST_LINK_POLICY_H */

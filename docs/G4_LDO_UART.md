@@ -21,15 +21,15 @@ Mirrors G0 `control_update_vpre_request()`, with a **VIN floor** so CC collapse 
 |---|---|
 | `out=0`, host idle (`g0_want=0`) | disable DCDC, ramp command → 3 V |
 | `out=0`, host wants ON | `max(host_vset, tlm_vset) + 1.5 V`, floored at **6 V** |
-| CV (`cccv=0`) | same floor (or `vpre=` from TLM if present) |
-| CC (`cccv=1`) | `max(vout + 1.5 V, vset + 1.5 V, 6 V)` — do **not** follow collapsed `vout` |
+| CV (`mode=1`) | `max(vpre, vset + 1.5 V, 6 V)` |
+| CC (`mode=2`, filtered) | G0 `vpre` = measured `vout + 1.5 V`, clamped to `[6 V, vset + 1.5 V]`. Do **not** lift that request back to `vset + 1.5 V` — the difference would sit on the LDO. A raw `cccv` blip does not fold. |
 | Stale TLM while `g0_want=1` | **hold** CV/VIN floor (do not dive to 3 V) |
 
 `fault=VIN_LOW` does **not** disable the pre-reg DCDC (that fault is caused by a low rail; killing DCDC worsens the spiral). Other faults still drop enable.
 
 Constants (match G0 `app_config.h`): min 3 V, max 36 V, margin 1.5 V, **VIN floor 6 V**.
 
-Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). **POWER_PERMIT_G4** asserts only after DCDC is within 0.5 V of command for 150 ms (`pgood=1`, non-blocking fault, G0 `out=1` or want).
+Slew: up 10 V/s, down 0.3 V/s while leaving the rail or holding the CV floor. Confirmed CC folds down at 5 V/s and still never commands below 6 V while output is wanted or on. Host ON starts the DCDC with the LDO output still off and asserts **POWER_PERMIT_G4** to clear G0's hardware kill. No voltage measurement gates PB7. G0 still keeps its output disabled until measurements are fresh, PGOOD is valid, VIN is at least 4.5 V, SETPOINT is accepted, and SET_OUTPUT=1 arrives. The WAIT_PERMIT state waits until telemetry reports `kill=0`; it does not drive PB7 itself. `reg_ok` is only the ±0.5 V status flag.
 
 ## Pin / module map (schematic U7)
 
@@ -37,24 +37,34 @@ Slew: up 10 V/s, down 0.3 V/s (command never below 6 V while output wanted/on). 
 |---|---|---|
 | G0 isolated UART | USART2 **PB3 TX / PB4 RX** AF7 | `ldo_link.c` |
 | H7 / PC host | USART1 PC4/PC5 | `host_link.c` |
-| Fan PWM | **PA7** TIM17_CH1 AF1 | `fan_pwm.c` (PA6 is NC) |
+| Fan PWM | **PA7** TIM17_CH1 AF1 | `fan_pwm.c` (Q9 inverts; PA6 is NC) |
+| Fan tach | **PA5** TIM2_CH1 AF1 | `fan_tach.c`, 2 pulses/rev |
 | BLEED_ON | **PB5** | `ldo_link.c` |
 | REMOTE_ON | **PB6** | `ldo_link.c` (default LOW) |
 | POWER_PERMIT_G4 | **PB7** | `ldo_prereg.c` → `ldo_link.c` (HIGH=ena, Low/reset=LDO zabity) |
 | I2C_USBPD_IRQ | **PB9** | EXTI |
 | Local Vout sense (DCDC) | PB2 `ADC_VOUT` | `measurements.c` (CV) |
-| ADC_LOCAL_VOUT | **PB14** | analog (no DMA rank yet) |
+| ADC_LOCAL_VOUT | **PB14** ADC1_IN5 | injected self-test, 220 kΩ / 20 kΩ |
 | I_L_ZERO | **PB15** | analog (no DMA rank yet) |
-| Remote Kelvin sense | PB0/PB1 `ADC_REMOTE_P/N` | analog inputs (no DMA ranks yet) |
+| Remote Kelvin sense | PB0 ADC1_IN15 / PB1 ADC1_IN12 | injected self-test, same divider |
 | PA2 | NC | — |
 
 ## Local vs remote sense
 
-- **Default at boot:** local only (`REMOTE_ON` = LOW). CV regulation always uses `ADC_VOUT` (PB2).
-- Host `REMOTE ON` / `REMOTE 1` asserts `REMOTE_ON` (**PB6**) to switch the hardware remote sense path.
-- Host `REMOTE OFF` / `REMOTE 0` returns to local.
-- Telemetry `T` line includes `rem_sense=0|1`.
-- Open-lead / differential remote ADC readback needs PB0/PB1 added to ADC DMA ranks later; until then remote is a GPIO path switch only.
+- **Default at boot:** local only (`REMOTE_ON` = LOW). The DCDC still regulates from `ADC_VOUT` (PB2). K1 switches the LDO Kelvin sense, not that ADC.
+- Host `REMOTE ON` / `REMOTE 1` requests remote sense. PB0/PB1 stay on the remote wires, so the check runs while K1 is still local. The relay stays off until three samples, 100 ms apart, read OK and agree within the ADC error.
+- The input filter is about 0.19 ms, so a 100 ms sample is settled. The check is DP = local − remote_p, DN = remote_n, and DP+DN, plus a saturated local reading. Cable limits (500 mV per wire, 1000 mV total) and the per-channel error (1.85% and 40 mV, no stored trim) are separate. The 500/1000 mV pair is a bench starting point. The low-voltage floor falls out of that budget (592 mV at the 500 mV wire limit). Below that floor the code is NOT_READY, which is not a remote fault: a closed relay stays closed and PERMIT stays up. A CC load short that falls to 0 V is that case.
+- R112 and R115 (4.7 kΩ) sit on the V_SNS commons. They pull the remote wires only while K1 is energized. An open positive lead then reads about 98.1% of Vout and an open negative lead reads ground, which is reported as OK. Before the coil pulls in, an open lead falls toward ground on its divider and the close is refused.
+- A wiring fault before close leaves the relay local and leaves PERMIT alone. Host OFF releases the relay and does not latch. After close, a drop fault, a missed conversion, or (in CV only) VD missing the setpoint for three samples calls the immediate output-off path (PERMIT pin first) and only then opens K1, and latches remote off until the host sends REMOTE 0 and then REMOTE 1. CC does not compare VD with the voltage setpoint.
+- Host `REMOTE OFF` / `REMOTE 0` releases the relay immediately and clears the latch. The next host ON clears the permit override.
+
+## Fan
+
+G0 sends `fan` as 0..100. That number is already the higher of the output-power map (0 W → 0 %, 150 W → 100 %) and the NTC map (25 °C → 0 %, 60 °C → 100 %). G4 copies it onto PA7 and does not draw its own curve. If G0 telemetry is older than 500 ms the pin is forced to 40 %.
+
+Q9 inverts PA7 onto J7 pin 4. A 4-wire fan runs while that pin is high, so 0 % holds PA7 high (fan stopped) and 100 % holds PA7 low (fan pull-up, full speed).
+
+PA5 counts falling edges on the open-collector tach (two per revolution) for one second. RPM goes out on AUX byte 28 (`0xFFFF` until the first second closes, `0` when the fan is stopped or the tach wire is open). Bytes 30..31 stay zero.
 
 ## Host UART commands (USART1)
 
@@ -84,9 +94,9 @@ With `BMS_ENABLE=1`: used cells between CUV (2.8 V) and COV (4.25 V); unused `c4
 
 ## Bring-up sequence
 
-1. Flash G0 + G4. Connect isolator UART (115200).
+1. Flash G0 + G4 together. Isolator UART is 460800 8N1, DMA, telemetry every 5 ms.
 2. PC on USART1: `SET 5.0`, `ILIM 0.1`, then **`ON`**.
-3. G4 asserts `POWER_PERMIT` (**PB7** HIGH) → waits `kill=0` / `pgood=1` / `vin≥4500` → sends binary atomic SETPOINT → binary SET_OUTPUT=1.
+3. G4 starts the DCDC with the LDO output off and asserts `POWER_PERMIT` (**PB7** HIGH). It then waits for `kill=0` / `pgood=1` / `vin≥4500` before binary SETPOINT and SET_OUTPUT=1.
 4. Watch host `T` (`g0_vout_mv`, `g0_want=1 g0_ctrl=… g0_out=1`). G0 `TLM` stays on USART2 and is **not** forwarded to USART1 unless `VERBOSE 1`.
 
 Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`** / **`PERMIT 0`** sends binary output-off, forces **PB7** low, and stops DCDC.
@@ -94,6 +104,17 @@ Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`**
 `g0_ctrl` states: 0 idle, 1 wait link, 2 wait permit, 3 wait VIN, 4–8 SET/OUT handshake, 9 running, 10–11 OFF, 12 fault.
 
 `g0_want=0` means the host has not started the G0 sequencer — send **`ON`** after permit is on the correct pad.
+
+## Fan pins and HRTIM FLT3
+
+`FanPwm_Init` and `FanTach_Init` program the timers. Cube must not also emit `MX_TIM17_Init` or `MX_TIM2_Init`.
+
+| Pin | Code | `.ioc` |
+|---|---|---|
+| PA7 `FAN_PWM` | TIM17_CH1, AF1, 25 kHz, inverted by Q9 | `TIM17_CH1`, `GPIO_AF1_TIM17` |
+| PA5 `FAN_TACH` | TIM2_CH1, AF1, falling edges, pull-up | `TIM2_CH1`, `GPIO_AF1_TIM2`, pull-up |
+
+PB10 stays `HRTIM1_FLT3` in the `.ioc` (digital input, pull-up, polarity active-low, fault armed on timers A and C). `BoardMx_ApplyHrtimFault()` then disables fault mode and clears `FLT3EN` on timers A and C. The pin is the ACS37100 series-inductor FAULT. The net and the active level were not measured on this board, so FLT3 stays off. High-side INA296 OCP remains the current protection. Do not enable FLT3 until that source and polarity are checked.
 
 ## G0 link triage (`g0_*` on host `T` line)
 
@@ -105,4 +126,4 @@ Host **`ON`** starts G4 DCDC pre-reg and the G0 binary sequencer. Host **`OFF`**
 | `g0_tlm` rising, `g0_vout_mv` tracking | Link OK — check G0 LED / `g0_kill` / `pgood` via G0 TLM on USART2, `g0_out` on `T` |
 | `permit=1` but G0 `kill=1` | Firmware was driving PERMIT on wrong pad (was PB6/REMOTE_ON); must be **PB7** |
 
-Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 115200; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
+Hardware checks: G4 **PB3↔G0 RX**, **PB4↔G0 TX** via ISO6721; J6 sniffer at 460800; G0 LED double-blink = KILL/!PGOOD; meter on LDO Vout (not DCDC rail on PB2).
