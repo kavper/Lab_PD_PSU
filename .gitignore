@@ -1,3 +1,5 @@
 build
 mx.scratch
 !.settings
+tools/debug/logs/
+tools/debug/__pycache__/
