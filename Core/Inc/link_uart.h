@@ -14,7 +14,7 @@
 #define LINK_UART_RX_BYTES           512U
 #define LINK_UART_FRAME_MAX          120U
 #define LINK_UART_FIFO_DEPTH         4U
-#define LINK_UART_SLOW_SLOTS         3U
+#define LINK_UART_SLOW_SLOTS         4U
 
 typedef enum {
     LINK_UART_PRI_SAFETY = 0,

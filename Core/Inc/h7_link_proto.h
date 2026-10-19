@@ -48,6 +48,7 @@
 #define H7_LINK_METER                0x10U
 #define H7_LINK_BMS_TLM              0x11U
 #define H7_LINK_PD_TLM               0x12U
+#define H7_LINK_PD_CAPS              0x14U /* versioned source PDO list + active RDO */
 #define H7_LINK_AUX_TLM              0x13U /* G0 DAC, NTC, fan, sense self-test */
 #define H7_LINK_TEXT                 0x20U
 #define H7_LINK_ACK                  0x81U /* u8 acknowledged type */
@@ -64,6 +65,14 @@
 #define H7_LINK_METER_BYTES          72U
 #define H7_LINK_BMS_BYTES            72U
 #define H7_LINK_PD_BYTES             64U
+#define H7_LINK_PD_CAPS_BYTES        44U
+/* PD bytes[11] carries attach_generation low 8 bits (previously reserved).
+ * PD_CAPS: version=1[0], flags[1], role[2], count[3], u32 generation[4],
+ * u32 RDO[8], u32 active PDO[12], seven raw source PDOs[16..43].
+ * flags: attached=1, valid current source caps=2, active RDO=4, local TX caps=8.
+ * When Sink, list is the current partner's RX_SOURCE_CAPS; when Source,
+ * it is the device's TX_SOURCE_CAPS. Invalid/previous attach data is never sent.
+ */
 #define H7_LINK_AUX_BYTES            32U
 
 /* BMS bytes 0..52 match the previous 56-byte payload (53..55 stay zero). */

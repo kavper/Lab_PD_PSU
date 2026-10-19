@@ -107,5 +107,11 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode);
 PowerManager_State_t PowerManager_GetState(void);
 BQ25731_Status_t PowerManager_GetBqStatus(void);
 bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out);
+typedef struct {
+    uint32_t attach_generation, rdo, active_pdo, pdo[7];
+    uint8_t flags, role, count;
+} PowerManager_PdCapabilities_t;
+/* Read-only snapshot. Flags: attached=1, current caps=2, active RDO=4, local caps=8. */
+void PowerManager_GetPdCapabilities(PowerManager_PdCapabilities_t *out);
 
 #endif

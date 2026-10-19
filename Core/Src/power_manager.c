@@ -3266,3 +3266,32 @@ bool PowerManager_GetPdSnapshot(PowerManager_PdSnapshot_t *out)
            (g_pm.status.pd_snapshot.contract_voltage_mv != 0U) &&
            (g_pm.status.pd_snapshot.contract_power_mw != 0U);
 }
+
+void PowerManager_GetPdCapabilities(PowerManager_PdCapabilities_t *out)
+{
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    out->attach_generation = g_pm.attach_generation;
+    out->role = (uint8_t)g_pm.status.tps.role;
+    if (!g_pm.status.tps.attached || g_pm.status.pd_reset_busy) return;
+    out->flags = 1U;
+    const TPS25751_Capabilities_t *caps = NULL;
+    if (g_pm.status.tps.role == TPS25751_ROLE_SINK &&
+        g_pm.partner_source_caps_current && g_pm.partner_source_caps_fresh) {
+        caps = &g_pm.partner_source_caps;
+    } else if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE && g_pm.local_source_caps_valid) {
+        caps = &g_pm.local_source_caps;
+        out->flags |= 8U;
+    }
+    if (caps != NULL && caps->count > 0U && caps->count <= 7U) {
+        out->count = caps->count;
+        out->flags |= 2U;
+        for (unsigned i = 0; i < out->count; ++i) out->pdo[i] = caps->pdo[i].raw;
+    }
+    if (g_pm.coherent_snapshot_valid && g_pm.snap_rdo_valid && g_pm.snap_pdo_valid &&
+        g_pm.snap_role == g_pm.status.tps.role && g_pm.status.pd_snapshot.active_rdo_raw) {
+        out->flags |= 4U;
+        out->rdo = g_pm.status.pd_snapshot.active_rdo_raw;
+        out->active_pdo = (uint32_t)g_pm.status.pd_snapshot.active_pdo_raw;
+    }
+}

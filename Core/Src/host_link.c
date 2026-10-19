@@ -685,6 +685,8 @@ static void HostLink_QueueSlow(void)
 {
     uint8_t bms_payload[H7_LINK_BMS_BYTES];
     uint8_t pd_payload[H7_LINK_PD_BYTES];
+    uint8_t caps_payload[H7_LINK_PD_CAPS_BYTES] = {0};
+    PowerManager_PdCapabilities_t caps;
     BQ76922_Snapshot_t bms;
     PowerManager_Status_t pm;
     int16_t dV;
@@ -696,6 +698,7 @@ static void HostLink_QueueSlow(void)
     memset(pd_payload, 0, sizeof(pd_payload));
     BQ76922_GetSnapshot(&g_bq76922, &bms);
     PowerManager_GetStatus(&pm);
+    PowerManager_GetPdCapabilities(&caps);
     (void)PSU_GuiGetPdContract(&pd_v, &pd_a, NULL, NULL);
     dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
     bms_payload[0] = (BQ76922_IsEnabled() && bms.present) ? 1U : 0U;
@@ -756,6 +759,7 @@ static void HostLink_QueueSlow(void)
     pd_payload[8] = pm.tps.connection_state;
     pd_payload[9] = pm.tps.typec_port_state;
     pd_payload[10] = pm.pd_snapshot.power_role;
+    pd_payload[11] = (uint8_t)caps.attach_generation;
     H7Link_PutU32(&pd_payload[12], pm.bq.adc_vbat_mv);
     H7Link_PutU32(&pd_payload[16], pm.bq.adc_vsys_mv);
     H7Link_PutI32(&pd_payload[20], pm.bq.battery_current_ma);
@@ -773,6 +777,16 @@ static void HostLink_QueueSlow(void)
                               H7_LINK_BMS_BYTES, LINK_UART_PRI_SLOW, 0U);
     (void)HostLink_QueueFrame(H7_LINK_PD_TLM, s_host_tx_seq++, pd_payload,
                               H7_LINK_PD_BYTES, LINK_UART_PRI_SLOW, 1U);
+    caps_payload[0] = 1U;
+    caps_payload[1] = caps.flags;
+    caps_payload[2] = caps.role;
+    caps_payload[3] = caps.count;
+    H7Link_PutU32(caps_payload + 4, caps.attach_generation);
+    H7Link_PutU32(caps_payload + 8, caps.rdo);
+    H7Link_PutU32(caps_payload + 12, caps.active_pdo);
+    for (unsigned i = 0; i < 7U; ++i) H7Link_PutU32(caps_payload + 16 + 4U*i, caps.pdo[i]);
+    (void)HostLink_QueueFrame(H7_LINK_PD_CAPS, s_host_tx_seq++, caps_payload,
+                              H7_LINK_PD_CAPS_BYTES, LINK_UART_PRI_SLOW, 3U);
     {
         uint8_t aux_payload[H7_LINK_AUX_BYTES];
         LdoLink_Status_t ldo;
