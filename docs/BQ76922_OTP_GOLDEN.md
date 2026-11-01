@@ -1,3 +1,6 @@
+> **Nieaktualne (4S Li-ion).** Obowiązuje `docs/BMS_5S_LFP.md` — konfiguracja 5S LiFePO4,
+> jedna tabela `Core/Src/bms_golden.c`. Poniżej zostawiono historię pierwszego wypalenia.
+
 # BQ76922 OTP golden (4S, button wake → FETs on, no MCU)
 
 Goal: after `SHUTDOWN`, a short **TS2** press brings CHG/DSG up **without G4**.

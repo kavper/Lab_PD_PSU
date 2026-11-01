@@ -16,7 +16,8 @@ typedef enum {
     BQ76922_NOT_READY,
     BQ76922_I2C_ERROR,
     BQ76922_BUSY,
-    BQ76922_INVALID_ARG
+    BQ76922_INVALID_ARG,
+    BQ76922_NOT_BLANK      /* OTP BURN refused: chip already carries an image */
 } BQ76922_Status_t;
 
 typedef enum {
@@ -77,15 +78,21 @@ typedef struct {
     uint16_t cfg_fail_count;
     bool chg_fet_on;
     bool dsg_fet_on;
-    /* passq_mah is DASTATUS6. session_mah stays 0; SOC uses the passQ delta. */
+    /* DASTATUS6 accumulated charge: mAh (rounded), raw fraction, AFE time. */
     int32_t passq_mah;
-    int32_t session_mah;
-    uint16_t soc_permille;
-    int16_t cc1_ma;
-    int16_t int_temp_dk;
-    uint8_t balance_mask;
-    uint8_t soc_flags;
+    int32_t passq_whole;
+    uint32_t passq_frac;
+    uint32_t passq_time_s;
     bool passq_valid;
+    int16_t cc1_ma;
+    int16_t int_temp_dk;     /* AFE die, 0.1 K */
+    int16_t ts1_temp_dk;     /* TS1 NTC (cell), 0.1 K */
+    uint8_t balance_mask;    /* CB_ACTIVE_CELLS readback, bit0 = cell 1 */
+    /* Golden image state: golden_otp = fingerprint matched before any RAM
+     * write on this wake (OTP burned); golden_ok = running golden (either). */
+    bool golden_otp;
+    bool golden_ok;
+    uint16_t fp_fail_addr;
 } BQ76922_Snapshot_t;
 
 typedef struct {
@@ -96,6 +103,7 @@ typedef struct {
     uint8_t init_step;
     uint8_t cfg_poll_tries;
     uint8_t cfg_enter_tries;
+    uint16_t table_index;
     uint8_t fet_en_attempts;
     uint8_t fet_verify_attempts;
     uint8_t fet_recover_fails;
@@ -136,36 +144,60 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev);
  * On success driver marks AFE absent so button wake auto-runs FET_ENABLE. */
 BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev);
 
-/* Lab/production OTP — NEVER called from boot. UART: BMS OTP STATUS / BURN. */
+/* DASTATUS6 userAh (signed whole + 32-bit fraction) → nearest mAh. */
+int32_t BQ76922_UserAhToMah(int32_t whole, uint32_t frac);
+
+/* Lab/production OTP — NEVER called from boot. */
 typedef struct {
-    uint8_t wr_check;          /* raw OTP_WR_CHECK() byte; 0x80 = OK */
-    uint16_t fail_addr;        /* first No_DATA addr (0 if unused) */
+    uint16_t fail_addr;        /* first RAM≠golden address (0 = all match) */
+    uint16_t fp_fail_addr;     /* first fingerprint mismatch */
     uint16_t battery_status;
     uint16_t mfg_status_init;  /* Data Memory 0x9343 */
     uint16_t vcell_mode;       /* Data Memory 0x9304 */
     uint8_t fet_options;       /* Data Memory 0x9308 */
-    uint8_t fet_options_want;  /* golden target (BMS_FET_OPTIONS) */
+    uint8_t fet_options_want;
+    uint32_t golden_crc;
+    uint16_t golden_count;
+    bool fp_match;
+    bool ram_match;
+    bool golden_otp_at_wake;
     bool cfgupdate;
     bool fullaccess;
     bool otpb_blocked;
     bool session_already_burned;
 } BQ76922_OtpReport_t;
 
+/* Values read right after a device RESET (= what OTP holds). */
+typedef struct {
+    uint16_t vcell_mode;
+    uint16_t mfg_status_init;
+    uint8_t fet_options;
+    uint8_t cov_threshold;
+    uint8_t prot_b;
+    bool blank;
+} BQ76922_OtpBlank_t;
+
 /* Read-only snapshot (no CONFIG_UPDATE — safe while FETs are on). */
 BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out);
-/* CONFIG_UPDATE + write golden to RAM + OTP_WR_CHECK + EXIT + reinit.
- * Drops FETs briefly. Fills wr_check and optional fail_addr (No_DATA). */
+
+#if (BMS_OTP_SERVICE != 0U)
+/* RESET (blank report) + CONFIG_UPDATE + golden → RAM + readback +
+ * OTP_WR_CHECK.  Drops FETs briefly; works on any chip (reports blank=0
+ * on a programmed one). */
 BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
                                        uint8_t *wr_check,
-                                       uint16_t *fail_addr);
-/* Burns Data Memory image (golden includes FET Options 0x1D / PDSG_EN).
- * Requires BAT≈10–12 V, FULLACCESS.
+                                       uint16_t *fail_addr,
+                                       BQ76922_OtpBlank_t *blank);
+/* Burns the golden table. Refuses (BQ76922_NOT_BLANK) unless a RESET shows
+ * TI factory defaults. Requires BAT 10–12 V, FULLACCESS, T ≤ 45 °C.
  * confirm_token must be the exact string "I-UNDERSTAND-OTP". */
 BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
                                  const char *confirm_token,
                                  uint8_t *wr_check,
                                  uint8_t *wr_result,
-                                 uint16_t *fail_addr);
+                                 uint16_t *fail_addr,
+                                 BQ76922_OtpBlank_t *blank);
+#endif
 
 #endif /* BQ76922_H */

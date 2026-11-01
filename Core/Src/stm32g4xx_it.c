@@ -22,6 +22,7 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bms_store.h"
 #include "board_mx.h"
 /* USER CODE END Includes */
 
@@ -76,7 +77,10 @@ extern UART_HandleTypeDef huart2;
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
-
+  /* Flash double-ECC error on a torn gauge record: skip that record. */
+  if (BmsStore_HandleEccNmi()) {
+    return;
+  }
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
    while (1)

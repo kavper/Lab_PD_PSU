@@ -5,6 +5,9 @@
 #include "board_rev.h"
 #include "bms_board.h"
 #include "bq76922.h"
+#include "bms_golden.h"
+#include "bms_manager.h"
+#include "tlm_fields.h"
 #include "debug_uart.h"
 #include "h7_link_proto.h"
 #include "ldo_link.h"
@@ -140,10 +143,7 @@ static int32_t HostLink_DutyX10(uint32_t duty_10k)
 }
 
 
-static void HostLink_SendTelemetry(void)
-{
-    HostLink_Tx("OK STATUS binary METER 5 ms, BMS/PD 200 ms. TEL is ignored.\r\n");
-}
+static void HostLink_SendTelemetryText(void);
 
 static bool HostLink_EqToken(const char *s, const char *token)
 {
@@ -245,7 +245,9 @@ static void HostLink_SendHelp(void)
         "  TEXT_CMD 0x21 carries these lines. TEL is ignored.\r\n"
         "  ON / OFF / SET V= I= / PERMIT / REMOTE / BMS / USB\r\n"
         "  VERBOSE       ignored on the production link\r\n"
-        "  G0DIAG / G0SWAP / CLR / STATUS\r\n");
+        "  G0DIAG / G0SWAP / CLR / STATUS\r\n"
+        "  TLM | ?       all telemetry groups as text (tlm_fields.h)\r\n"
+        "  BMS GAUGE [RESET] / BMS SAVE / BMS SHUTDOWN / BMS OTP STATUS\r\n");
 }
 
 static void HostLink_ApplyOff(void)
@@ -450,7 +452,7 @@ static void HostLink_HandleLine(char *line)
 
         if (otp) {
             const char *otp_arg = HostLink_SkipToken(arg);
-            char msg[220];
+            char msg[240];
 
             if (HostLink_EqToken(otp_arg, "STATUS") || (*otp_arg == '\0')) {
                 BQ76922_OtpReport_t rep;
@@ -461,38 +463,42 @@ static void HostLink_HandleLine(char *line)
                     return;
                 }
                 (void)snprintf(msg, sizeof(msg),
-                    "OK BMS OTP STATUS batt=0x%04X mfg_init=0x%04X "
-                    "vcell=0x%04X fet_opt=0x%02X want=0x%02X match=%u "
-                    "full=%u otpb_now=%u burned=%u "
-                    "(ro; OTPB is normally 1 outside CFGUPDATE; CHECK tests it)\r\n",
-                    (unsigned)rep.battery_status,
-                    (unsigned)rep.mfg_status_init,
-                    (unsigned)rep.vcell_mode,
-                    (unsigned)rep.fet_options,
-                    (unsigned)rep.fet_options_want,
-                    (rep.fet_options == rep.fet_options_want) ? 1U : 0U,
-                    rep.fullaccess ? 1U : 0U,
-                    rep.otpb_blocked ? 1U : 0U,
-                    rep.session_already_burned ? 1U : 0U);
+                    "OK BMS OTP STATUS golden=5S-LFP crc=0x%08lX n=%u "
+                    "ram_match=%u fail=0x%04X fp_match=%u otp_at_wake=%u "
+                    "vcell=0x%04X fet_opt=0x%02X mfg_init=0x%04X batt=0x%04X "
+                    "full=%u service=%u\r\n",
+                    (unsigned long)rep.golden_crc, (unsigned)rep.golden_count,
+                    rep.ram_match ? 1U : 0U, (unsigned)rep.fail_addr,
+                    rep.fp_match ? 1U : 0U, rep.golden_otp_at_wake ? 1U : 0U,
+                    (unsigned)rep.vcell_mode, (unsigned)rep.fet_options,
+                    (unsigned)rep.mfg_status_init, (unsigned)rep.battery_status,
+                    rep.fullaccess ? 1U : 0U, (unsigned)BMS_OTP_SERVICE);
                 HostLink_Tx(msg);
                 return;
             }
-
+#if (BMS_OTP_SERVICE != 0U)
             if (HostLink_EqToken(otp_arg, "CHECK")) {
                 uint8_t check = 0U;
                 uint16_t fail = 0U;
-                BQ76922_Status_t st =
-                    BQ76922_OtpRunWrCheck(&g_bq76922, &check, &fail);
+                BQ76922_OtpBlank_t blank;
+                BQ76922_Status_t st;
 
+                memset(&blank, 0, sizeof(blank));
+                st = BQ76922_OtpRunWrCheck(&g_bq76922, &check, &fail, &blank);
                 (void)snprintf(msg, sizeof(msg),
-                    "%s BMS OTP CHECK check=0x%02X fail_addr=0x%04X "
-                    "nodata=%u nosig=%u "
-                    "(0x80=golden readback verified + can burn; FETs reinited)\r\n",
-                    (st == BQ76922_OK) ? "OK" : "ERR",
-                    (unsigned)check,
-                    (unsigned)fail,
+                    "%s BMS OTP CHECK check=0x%02X fail_addr=0x%04X blank=%u "
+                    "(otp: vcell=0x%04X fet=0x%02X mfg=0x%04X cov=%u protB=0x%02X) "
+                    "nodata=%u nosig=%u lowV=%u highV=%u hot=%u\r\n",
+                    ((st == BQ76922_OK) && blank.blank) ? "OK" : "ERR",
+                    (unsigned)check, (unsigned)fail, blank.blank ? 1U : 0U,
+                    (unsigned)blank.vcell_mode, (unsigned)blank.fet_options,
+                    (unsigned)blank.mfg_status_init, (unsigned)blank.cov_threshold,
+                    (unsigned)blank.prot_b,
                     ((check & 0x08U) != 0U) ? 1U : 0U,
-                    ((check & 0x10U) != 0U) ? 1U : 0U);
+                    ((check & 0x10U) != 0U) ? 1U : 0U,
+                    ((check & 0x02U) != 0U) ? 1U : 0U,
+                    ((check & 0x01U) != 0U) ? 1U : 0U,
+                    ((check & 0x04U) != 0U) ? 1U : 0U);
                 HostLink_Tx(msg);
                 return;
             }
@@ -502,45 +508,82 @@ static void HostLink_HandleLine(char *line)
                 uint8_t check = 0U;
                 uint8_t result = 0U;
                 uint16_t fail = 0U;
+                BQ76922_OtpBlank_t blank;
                 BQ76922_Status_t st;
 
                 if (!HostLink_EqToken(token, "I-UNDERSTAND-OTP")) {
                     HostLink_Tx(
                         "ERR BMS OTP BURN requires exact token:\r\n"
                         "  BMS OTP BURN I-UNDERSTAND-OTP\r\n"
-                        "OTP is one-way. Boot never burns. Run BMS OTP CHECK first.\r\n");
+                        "OTP is one-way. Run BMS OTP CHECK first (blank=1 check=0x80).\r\n");
                     return;
                 }
-
-                HostLink_Tx(
-                    "OK BMS OTP BURN starting — golden (fet_opt want 0x1D) + "
-                    "OTP_WRITE (BAT 10-12V required)...\r\n");
+                HostLink_Tx("OK BMS OTP BURN starting: RESET+blank check, golden 5S LFP, "
+                            "OTP_WRITE (BAT 10-12 V)...\r\n");
                 HAL_Delay(20U);
+                memset(&blank, 0, sizeof(blank));
                 st = BQ76922_OtpBurn(&g_bq76922, "I-UNDERSTAND-OTP",
-                                     &check, &result, &fail);
+                                     &check, &result, &fail, &blank);
                 if (st != BQ76922_OK) {
                     (void)snprintf(msg, sizeof(msg),
-                        "ERR BMS OTP BURN failed st=%d check=0x%02X "
-                        "write=0x%02X fail_addr=0x%04X nodata=%u nosig=%u "
-                        "(FULLACCESS+OTPB=0+BAT10-12V; 0x9308=PDSG bit may be exhausted)\r\n",
-                        (int)st, (unsigned)check, (unsigned)result,
-                        (unsigned)fail,
-                        ((check & 0x08U) != 0U) ? 1U : 0U,
-                        ((check & 0x10U) != 0U) ? 1U : 0U);
+                        "ERR BMS OTP BURN %s st=%d check=0x%02X write=0x%02X "
+                        "fail_addr=0x%04X blank=%u vcell_otp=0x%04X\r\n",
+                        (st == BQ76922_NOT_BLANK) ? "REFUSED (chip not blank)" : "failed",
+                        (int)st, (unsigned)check, (unsigned)result, (unsigned)fail,
+                        blank.blank ? 1U : 0U, (unsigned)blank.vcell_mode);
                     HostLink_Tx(msg);
                     return;
                 }
                 (void)snprintf(msg, sizeof(msg),
-                    "OK BMS OTP BURNED check=0x%02X write=0x%02X — "
-                    "cold-reset golden verified; then "
-                    "BMS SHUTDOWN + short TS2.\r\n",
-                    (unsigned)check, (unsigned)result);
+                    "OK BMS OTP BURNED check=0x%02X write=0x%02X crc=0x%08lX - "
+                    "RESET readback = golden. Next: BMS SHUTDOWN + short TS2.\r\n",
+                    (unsigned)check, (unsigned)result,
+                    (unsigned long)BmsGolden_Crc32());
                 HostLink_Tx(msg);
                 return;
             }
+            HostLink_Tx("ERR BMS OTP use: STATUS | CHECK | BURN I-UNDERSTAND-OTP\r\n");
+#else
+            HostLink_Tx("ERR BMS OTP: production build has STATUS only "
+                        "(CHECK/BURN need the OtpService build)\r\n");
+#endif
+            return;
+        }
 
-            HostLink_Tx(
-                "ERR BMS OTP use: STATUS | CHECK | BURN I-UNDERSTAND-OTP\r\n");
+        if (HostLink_EqToken(arg, "GAUGE")) {
+            const char *garg = HostLink_SkipToken(arg);
+            BmsGauge_Output_t g;
+            char msg[240];
+
+            if (HostLink_EqToken(garg, "RESET")) {
+                BmsMgr_ResetPack();
+                HostLink_Tx("OK BMS GAUGE RESET - new pack: FCC=design, cycles=0, "
+                            "SOC kept but uncertain until the next full charge\r\n");
+                return;
+            }
+            BmsMgr_GetGauge(&g);
+            (void)snprintf(msg, sizeof(msg),
+                "OK BMS GAUGE soc=%u.%u%% rem=%ld mAh fcc=%ld mAh soh=%u.%u%% "
+                "cycles=%u.%02u rcell=%d.%d mOhm ocv=%d mV anchor=%u learn=%u "
+                "flags=0x%04X tte=%u ttf=%u store_seq=%lu loaded=%u\r\n",
+                (unsigned)(g.soc_permille / 10U), (unsigned)(g.soc_permille % 10U),
+                (long)g.remaining_mah, (long)g.fcc_mah,
+                (unsigned)(g.soh_permille / 10U), (unsigned)(g.soh_permille % 10U),
+                (unsigned)(g.cycles_x100 / 100U), (unsigned)(g.cycles_x100 % 100U),
+                (int)(g.rcell_mohm_x10 / 10), (int)(g.rcell_mohm_x10 % 10),
+                (int)g.ocv_avg_mv, (unsigned)g.last_anchor, (unsigned)g.learn_count,
+                (unsigned)g.flags, (unsigned)g.tte_min, (unsigned)g.ttf_min,
+                (unsigned long)BmsMgr_StoreSeq(), BmsMgr_StoreLoaded() ? 1U : 0U);
+            HostLink_Tx(msg);
+            return;
+        }
+
+        if (HostLink_EqToken(arg, "SAVE")) {
+            bool refused = false;
+            bool ok = BmsMgr_SaveNow(&refused);
+
+            HostLink_Tx(refused ? "ERR BMS SAVE: turn the output OFF first\r\n" :
+                        ok ? "OK BMS SAVE\r\n" : "ERR BMS SAVE flash write failed\r\n");
             return;
         }
 
@@ -552,9 +595,17 @@ static void HostLink_HandleLine(char *line)
             LdoPrereg_SetForceDisable(true);
             LdoPrereg_SetPermitOverrideOff(true);
             PSU_Stop();
+            /* Converter is stopped: safe to program flash. Clean record =
+             * the pack rests from now on. */
+            {
+                bool saved = BmsMgr_SaveForShutdown();
+
+                HostLink_Tx(saved ? "OK BMS gauge saved\r\n" :
+                                    "WARN BMS gauge save failed\r\n");
+            }
 
             HostLink_Tx(
-                "OK BMS SHUTDOWN — balance cable on; release TS2 (no hold). "
+                "OK BMS SHUTDOWN - release TS2 (no hold). "
                 "Wake = short TS2 press only; FETs auto, no command.\r\n");
             /* Flush UART before AFE drops. */
             HAL_Delay(20U);
@@ -581,7 +632,7 @@ static void HostLink_HandleLine(char *line)
         BQ76922_ClearShutdownRequest(&g_bq76922);
         App_ClearFaults();
         HostLink_Tx(
-            "OK BMS reinit (4S CFGUPDATE + ALL_FETS_ON, no OTP; "
+            "OK BMS reinit (5S LFP CFGUPDATE + ALL_FETS_ON, no OTP; "
             "bus-hold + FET inrush may reboot)\r\n");
         return;
     }
@@ -590,8 +641,8 @@ static void HostLink_HandleLine(char *line)
         HostLink_Tx("ERR TEL ignored; METER is fixed at 5 ms\r\n");
         return;
     }
-    if (HostLink_EqToken(line, "?")) {
-        HostLink_SendTelemetry();
+    if (HostLink_EqToken(line, "?") || HostLink_EqToken(line, "TLM")) {
+        HostLink_SendTelemetryText();
         return;
     }
 
@@ -681,7 +732,7 @@ static void HostLink_QueueMeter(void)
     }
 }
 
-static void HostLink_QueueSlow(void)
+static void HostLink_QueueLegacySlow(void)
 {
     uint8_t bms_payload[H7_LINK_BMS_BYTES];
     uint8_t pd_payload[H7_LINK_PD_BYTES];
@@ -734,12 +785,24 @@ static void HostLink_QueueSlow(void)
     H7Link_PutI32(&bms_payload[48], bms.cc2_ma);
     bms_payload[52] = bms.sample_valid ? 1U : 0U;
     H7Link_PutI32(&bms_payload[H7_BMS_PASSQ_MAH], bms.passq_mah);
-    H7Link_PutI32(&bms_payload[H7_BMS_SESSION_MAH], bms.session_mah);
-    H7Link_PutU16(&bms_payload[H7_BMS_SOC_PERMILLE], bms.soc_permille);
+    {
+        BmsGauge_Output_t gg;
+        uint8_t lf = 0U;
+
+        BmsMgr_GetGauge(&gg);
+        H7Link_PutI32(&bms_payload[H7_BMS_SESSION_MAH], gg.remaining_mah);
+        H7Link_PutU16(&bms_payload[H7_BMS_SOC_PERMILLE], gg.soc_permille);
+        /* legacy soc_flags: valid, resting, learned, passQ valid, balance */
+        if ((gg.flags & BMS_GAUGE_F_VALID) != 0U) lf |= 0x01U;
+        if ((gg.flags & BMS_GAUGE_F_RESTING) != 0U) lf |= 0x02U;
+        if ((gg.flags & BMS_GAUGE_F_FCC_LEARNED) != 0U) lf |= 0x04U;
+        if (bms.passq_valid) lf |= 0x08U;
+        if (bms.balance_mask != 0U) lf |= 0x10U;
+        bms_payload[H7_BMS_SOC_FLAGS] = lf;
+    }
     H7Link_PutU16(&bms_payload[H7_BMS_CC1_MA], (uint16_t)bms.cc1_ma);
     H7Link_PutU16(&bms_payload[H7_BMS_INT_TEMP_DK], (uint16_t)bms.int_temp_dk);
     bms_payload[H7_BMS_BALANCE] = bms.balance_mask;
-    bms_payload[H7_BMS_SOC_FLAGS] = bms.soc_flags;
 
     if (pm.bq.input_present) flags |= 0x01U;
     if (pm.bq.in_precharge) flags |= 0x02U;
@@ -827,6 +890,169 @@ static void HostLink_QueueSlow(void)
         (void)HostLink_QueueFrame(H7_LINK_AUX_TLM, s_host_tx_seq++, aux_payload,
                                   H7_LINK_AUX_BYTES, LINK_UART_PRI_SLOW, 2U);
     }
+}
+
+/* ------------------------------------------------------------------------
+ * Unified telemetry (tlm_fields.h): the same field table feeds the binary
+ * FIELDS frames for the H7 and the "TLM"/"?" text lines.
+ * ---------------------------------------------------------------------- */
+static void HostLink_FillPd(TlmBuilder_t *b)
+{
+    PowerManager_PdCapabilities_t caps;
+    PowerManager_Status_t pm;
+    float pd_v = 0.0f;
+    float pd_a = 0.0f;
+
+    PowerManager_GetStatus(&pm);
+    PowerManager_GetPdCapabilities(&caps);
+    (void)PSU_GuiGetPdContract(&pd_v, &pd_a, NULL, NULL);
+    Tlm_Begin(b, TLM_GROUP_PD);
+    Tlm_Put(b, TLM_PD_BQ_OK, (pm.bq.online && pm.bq.adc_sample_valid) ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_IN, pm.bq.input_present ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_PRE, pm.bq.in_precharge ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_FAST, pm.bq.in_fast_charge ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_OTG, pm.bq.in_otg ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_IINDPM, pm.bq.in_iin_dpm ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_VINDPM, pm.bq.in_vindpm ? 1 : 0);
+    Tlm_Put(b, TLM_PD_RST_BUSY, pm.pd_reset_busy ? 1 : 0);
+    Tlm_Put(b, TLM_PD_PLUG, pm.tps.attached ? 1 : 0);
+    Tlm_Put(b, TLM_PD_BQ_ST, pm.bq.charger_status);
+    Tlm_Put(b, TLM_PD_BQ_FAULT, pm.bq.fault_flags);
+    Tlm_Put(b, TLM_PD_CC1, pm.tps.cc1_state);
+    Tlm_Put(b, TLM_PD_CC2, pm.tps.cc2_state);
+    Tlm_Put(b, TLM_PD_ROLE, pm.tps.role);
+    Tlm_Put(b, TLM_PD_CONN, pm.tps.connection_state);
+    Tlm_Put(b, TLM_PD_TYPEC, pm.tps.typec_port_state);
+    Tlm_Put(b, TLM_PD_PD_ROLE, pm.pd_snapshot.power_role);
+    Tlm_Put(b, TLM_PD_ATTACH_GEN, (int32_t)caps.attach_generation);
+    Tlm_Put(b, TLM_PD_VBAT_MV, (int32_t)pm.bq.adc_vbat_mv);
+    Tlm_Put(b, TLM_PD_VSYS_MV, (int32_t)pm.bq.adc_vsys_mv);
+    Tlm_Put(b, TLM_PD_IBAT_MA, pm.bq.battery_current_ma);
+    Tlm_Put(b, TLM_PD_ICHG_MA, (int32_t)pm.bq.adc_ichg_ma);
+    Tlm_Put(b, TLM_PD_IDCHG_MA, (int32_t)pm.bq.adc_idchg_ma);
+    Tlm_Put(b, TLM_PD_VBUS_MV, (int32_t)pm.bq.adc_vbus_mv);
+    Tlm_Put(b, TLM_PD_IIN_MA, (int32_t)pm.bq.adc_iin_ma);
+    Tlm_Put(b, TLM_PD_VREG_MV, (int32_t)pm.bq.charge_voltage_mv);
+    Tlm_Put(b, TLM_PD_ICHG_SET_MA, (int32_t)pm.bq.charge_current_ma);
+    Tlm_Put(b, TLM_PD_IIN_SET_MA, (int32_t)pm.bq.input_current_ma);
+    Tlm_Put(b, TLM_PD_TPS_VBUS_MV, (int32_t)pm.tps.vbus_mv);
+    Tlm_Put(b, TLM_PD_PD_MV, HostLink_Mv(pd_v));
+    Tlm_Put(b, TLM_PD_PD_MA, HostLink_Ma(pd_a));
+}
+
+static void HostLink_FillAux(TlmBuilder_t *b)
+{
+    LdoLink_Status_t ldo;
+    uint32_t now_ms = HAL_GetTick();
+    bool g0_fresh;
+    uint8_t i;
+
+    LdoLink_GetStatus(&ldo);
+    g0_fresh = ldo.telemetry_valid && (ldo.last_tlm_ms != 0U) &&
+               ((uint32_t)(now_ms - ldo.last_tlm_ms) <= H7_LINK_G0_STALE_MS);
+    Tlm_Begin(b, TLM_GROUP_AUX);
+    Tlm_Put(b, TLM_AUX_DAC_CV_MV, (int32_t)ldo.dac_cv_mv);
+    Tlm_Put(b, TLM_AUX_DAC_CC_MV, (int32_t)ldo.dac_cc_mv);
+    for (i = 0U; i < 4U; i++) {
+        if (g0_fresh && (ldo.temp_centi_c[i] != (int16_t)INT16_MIN)) {
+            Tlm_Put(b, (uint8_t)(TLM_AUX_T1 + i), ldo.temp_centi_c[i]);
+        }
+    }
+    Tlm_Put(b, TLM_AUX_FAN, ldo.fan_applied);
+    Tlm_Put(b, TLM_AUX_PGOOD, ldo.pgood);
+    Tlm_Put(b, TLM_AUX_BLEED, ldo.bleed_request);
+    Tlm_Put(b, TLM_AUX_VALID, g0_fresh ? 1 : 0);
+    if (RemoteSense_LocalMv() != 0xFFFFU) {
+        Tlm_Put(b, TLM_AUX_LOCAL_MV, RemoteSense_LocalMv());
+    }
+    if (RemoteSense_RemotePMv() != 0xFFFFU) {
+        Tlm_Put(b, TLM_AUX_REMOTE_P_MV, RemoteSense_RemotePMv());
+    }
+    if (RemoteSense_RemoteNMv() != 0xFFFFU) {
+        Tlm_Put(b, TLM_AUX_REMOTE_N_MV, RemoteSense_RemoteNMv());
+    }
+    Tlm_Put(b, TLM_AUX_SENSE_CODE, RemoteSense_Code());
+    Tlm_Put(b, TLM_AUX_SENSE_FLAGS,
+            (int32_t)((RemoteSense_IsClosed() ? SENSE_FLAG_CLOSED : 0U) |
+                      (RemoteSense_IsWanted() ? SENSE_FLAG_WANTED : 0U) |
+                      (RemoteSense_IsLatched() ? SENSE_FLAG_LATCH : 0U)));
+    if (FanTach_Rpm() != 0xFFFFU) {
+        Tlm_Put(b, TLM_AUX_FAN_RPM, FanTach_Rpm());
+    }
+    Tlm_Put(b, TLM_AUX_STOP_REASON, LdoLink_GetStopReason());
+}
+
+typedef void (*HostLink_FillFn)(TlmBuilder_t *b);
+static const HostLink_FillFn s_tlm_groups[] = {
+    BmsMgr_FillBms, BmsMgr_FillBatt, HostLink_FillPd, HostLink_FillAux,
+};
+#define HOSTLINK_GROUPS ((uint8_t)(sizeof(s_tlm_groups) / sizeof(s_tlm_groups[0])))
+
+static TlmBuilder_t s_tlm;
+
+static void HostLink_QueueFields(void)
+{
+    uint8_t payload[TLM_MAX_PAYLOAD];
+    uint8_t slot = HOSTLINK_FIELDS_SLOT0;
+    uint8_t g;
+
+    for (g = 0U; g < HOSTLINK_GROUPS; g++) {
+        uint8_t parts;
+        uint8_t part;
+
+        s_tlm_groups[g](&s_tlm);
+        parts = Tlm_Parts(&s_tlm);
+        for (part = 0U; (part < parts) && (slot < LINK_UART_SLOW_SLOTS); part++) {
+            uint8_t n = Tlm_EncodePart(&s_tlm, part, payload);
+
+            (void)HostLink_QueueFrame(TLM_FRAME_FIELDS, s_host_tx_seq++, payload,
+                                      n, LINK_UART_PRI_SLOW, slot++);
+        }
+    }
+}
+
+/* "?" / "TLM": every group as one text line, from the same table. */
+static void HostLink_SendTelemetryText(void)
+{
+    static char line[900];
+    uint8_t g;
+
+    for (g = 0U; g < HOSTLINK_GROUPS; g++) {
+        unsigned n;
+
+        s_tlm_groups[g](&s_tlm);
+        n = Tlm_Format(&s_tlm, line, (unsigned)sizeof(line) - 3U);
+        line[n++] = '\r';
+        line[n++] = '\n';
+        line[n] = '\0';
+        HostLink_Tx(line);
+    }
+}
+
+static void HostLink_QueueSlow(void)
+{
+#if (H7_LINK_LEGACY_SLOW != 0U)
+    HostLink_QueueLegacySlow();
+#else
+    {
+        /* PD_CAPS stays a fixed frame (raw PDO array). */
+        uint8_t caps_payload[H7_LINK_PD_CAPS_BYTES] = {0};
+        PowerManager_PdCapabilities_t caps;
+
+        PowerManager_GetPdCapabilities(&caps);
+        caps_payload[0] = 1U;
+        caps_payload[1] = caps.flags;
+        caps_payload[2] = caps.role;
+        caps_payload[3] = caps.count;
+        H7Link_PutU32(caps_payload + 4, caps.attach_generation);
+        H7Link_PutU32(caps_payload + 8, caps.rdo);
+        H7Link_PutU32(caps_payload + 12, caps.active_pdo);
+        for (unsigned i = 0; i < 7U; ++i) H7Link_PutU32(caps_payload + 16 + 4U*i, caps.pdo[i]);
+        (void)HostLink_QueueFrame(H7_LINK_PD_CAPS, s_host_tx_seq++, caps_payload,
+                                  H7_LINK_PD_CAPS_BYTES, LINK_UART_PRI_SLOW, 3U);
+    }
+#endif
+    HostLink_QueueFields();
 }
 
 static void HostLink_FinishOn(bool ack, uint8_t reason)

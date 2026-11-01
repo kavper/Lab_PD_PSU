@@ -1,7 +1,7 @@
 #include "bq76922.h"
 
 #include "bms_board.h"
-#include "bms_soc.h"
+#include "bms_golden.h"
 #include "board_mx.h"
 #include "power_manager.h"
 
@@ -19,6 +19,7 @@
 #define BQ76922_CMD_PACK_V               0x36U
 #define BQ76922_CMD_CC2                  0x3AU
 #define BQ76922_CMD_INT_TEMP             0x68U
+#define BQ76922_CMD_TS1_TEMP             0x70U
 #define BQ76922_CMD_ALARM_STATUS         0x62U
 #define BQ76922_CMD_FET_STATUS           0x7FU
 
@@ -122,37 +123,14 @@ typedef enum {
     BQ76922_INIT_OTP_FAST_CHECK,
     BQ76922_INIT_ENTER_CFG,
     BQ76922_INIT_WAIT_CFG,
-    BQ76922_INIT_VCELL_MODE,
-    BQ76922_INIT_PROT_A,
-    BQ76922_INIT_PROT_B,
-    BQ76922_INIT_CHG_FET_PROT_A,
-    BQ76922_INIT_DSG_FET_PROT_A,
-    BQ76922_INIT_CUV_THRESH,
-    BQ76922_INIT_COV_THRESH,
-    BQ76922_INIT_OCC_THRESH,
-    BQ76922_INIT_OCD1_THRESH,
-    BQ76922_INIT_OCC_RECOVERY,
-    BQ76922_INIT_CC_GAIN,
-    BQ76922_INIT_CAPACITY_GAIN,
-    BQ76922_INIT_CFETOFF_PIN,
-    BQ76922_INIT_DFETOFF_PIN,
-    BQ76922_INIT_FET_OPTIONS,
-    BQ76922_INIT_MFG_STATUS_INIT,
-    BQ76922_INIT_AUTO_SHUTDOWN,
-    BQ76922_INIT_PDSG_TIMEOUT,
-    BQ76922_INIT_PDSG_STOP_DELTA,
-    BQ76922_INIT_SCD_THRESH,
-    BQ76922_INIT_BODY_DIODE,
+    BQ76922_INIT_WRITE_TABLE,
     BQ76922_INIT_EXIT_CFG,
     BQ76922_INIT_WAIT_EXIT,
-    BQ76922_INIT_READ_VCELL_ADDR,
-    BQ76922_INIT_READ_VCELL_DATA,
+    BQ76922_INIT_VERIFY_TABLE,
     BQ76922_INIT_SLEEP_DISABLE,
     BQ76922_INIT_CLR_ALARM,
-    BQ76922_INIT_MANUF_ISSUE,
     BQ76922_INIT_MANUF_READ,
     BQ76922_INIT_FET_ENABLE,
-    BQ76922_INIT_MANUF_CONFIRM_ISSUE,
     BQ76922_INIT_MANUF_CONFIRM_READ,
     BQ76922_INIT_ALL_FETS_ON,
     BQ76922_INIT_FET_SETTLE,
@@ -160,16 +138,6 @@ typedef enum {
     BQ76922_INIT_RESET_PASSQ,
     BQ76922_INIT_DONE,
 } BQ76922_InitStep_t;
-
-/*
- * VCell Mode 0x0017 has bit4 set — the same bit as Manufacturing Status
- * FET_EN. A stale 0x40 buffer after VCELL readback must never be treated
- * as manuf status or we skip FET_ENABLE and leave FETs in test mode.
- */
-static bool BQ76922_ManufLooksStaleVcell(uint16_t manuf)
-{
-    return manuf == BMS_VCELL_MODE;
-}
 
 static void BQ76922_ForceAbsent(BQ76922_Device_t *dev);
 static bool BQ76922_NoteCommsResult(BQ76922_Device_t *dev,
@@ -348,24 +316,6 @@ static BQ76922_Status_t BQ76922_WriteRamBlock(BQ76922_Device_t *dev,
     return status;
 }
 
-static BQ76922_Status_t BQ76922_WriteRamU1(BQ76922_Device_t *dev,
-                                           uint16_t address,
-                                           uint8_t value)
-{
-    return BQ76922_WriteRamBlock(dev, address, &value, 1U);
-}
-
-static BQ76922_Status_t BQ76922_WriteRamU2(BQ76922_Device_t *dev,
-                                           uint16_t address,
-                                           uint16_t value)
-{
-    uint8_t data[2];
-
-    data[0] = (uint8_t)(value & 0xFFU);
-    data[1] = (uint8_t)((value >> 8) & 0xFFU);
-    return BQ76922_WriteRamBlock(dev, address, data, 2U);
-}
-
 static BQ76922_Status_t BQ76922_ReadRamU1(BQ76922_Device_t *dev,
                                           uint16_t address,
                                           uint8_t *out);
@@ -373,22 +323,96 @@ static BQ76922_Status_t BQ76922_ReadRamU2(BQ76922_Device_t *dev,
                                           uint16_t address,
                                           uint16_t *out);
 
-static BQ76922_Status_t BQ76922_WriteRamF4(BQ76922_Device_t *dev,
-                                           uint16_t address,
-                                           float value)
-{
-    uint8_t data[4];
-    union {
-        float f;
-        uint32_t u;
-    } conv;
+static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
+                                             uint16_t address,
+                                             uint8_t *data,
+                                             uint8_t length);
 
-    conv.f = value;
-    data[0] = (uint8_t)(conv.u & 0xFFU);
-    data[1] = (uint8_t)((conv.u >> 8) & 0xFFU);
-    data[2] = (uint8_t)((conv.u >> 16) & 0xFFU);
-    data[3] = (uint8_t)((conv.u >> 24) & 0xFFU);
-    return BQ76922_WriteRamBlock(dev, address, data, 4U);
+static BQ76922_Status_t BQ76922_WriteGoldenEntry(BQ76922_Device_t *dev,
+                                                 const BmsDmEntry_t *e)
+{
+    uint8_t b[4];
+
+    BmsGolden_Bytes(e, b);
+    return BQ76922_WriteRamBlock(dev, e->addr, b, e->type);
+}
+
+/* Reads one entry back; *match = RAM value equals the golden value. */
+static BQ76922_Status_t BQ76922_CheckGoldenEntry(BQ76922_Device_t *dev,
+                                                 const BmsDmEntry_t *e,
+                                                 bool *match)
+{
+    uint8_t want[4];
+    uint8_t got[4] = {0};
+    uint8_t k;
+    BQ76922_Status_t status;
+
+    status = BQ76922_ReadRamBlock(dev, e->addr, got, e->type);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    BmsGolden_Bytes(e, want);
+    *match = true;
+    for (k = 0U; k < e->type; k++) {
+        if (got[k] != want[k]) {
+            *match = false;
+        }
+    }
+    return BQ76922_OK;
+}
+
+/* only_fp: check FINGERPRINT entries only (wake fast path) or every entry
+ * (OTP preflight / post-burn readback). fail = first mismatching address. */
+static BQ76922_Status_t BQ76922_GoldenCompare(BQ76922_Device_t *dev,
+                                              bool only_fp,
+                                              bool *match,
+                                              uint16_t *fail)
+{
+    uint16_t i;
+    BQ76922_Status_t status;
+
+    *match = true;
+    *fail = 0U;
+    for (i = 0U; i < g_bms_golden_count; i++) {
+        const BmsDmEntry_t *e = &g_bms_golden[i];
+        bool ok = false;
+
+        if (only_fp && ((e->flags & BMS_DM_FLAG_FINGERPRINT) == 0U)) {
+            continue;
+        }
+        status = BQ76922_CheckGoldenEntry(dev, e, &ok);
+        if (status != BQ76922_OK) {
+            return status;
+        }
+        if (!ok) {
+            *match = false;
+            *fail = e->addr;
+            return BQ76922_OK;
+        }
+    }
+    return BQ76922_OK;
+}
+
+static BQ76922_Status_t BQ76922_GoldenFingerprint(BQ76922_Device_t *dev,
+                                                  bool *match,
+                                                  uint16_t *fail)
+{
+    return BQ76922_GoldenCompare(dev, true, match, fail);
+}
+
+/* Subcommand with a 16-bit response.  The 0x3E echo check inside
+ * ReadRamBlock rejects a stale 0x40 buffer from the previous command. */
+static BQ76922_Status_t BQ76922_ReadSubcmdU2(BQ76922_Device_t *dev,
+                                             uint16_t subcmd,
+                                             uint16_t *out)
+{
+    uint8_t buf[2];
+    BQ76922_Status_t status = BQ76922_ReadRamBlock(dev, subcmd, buf, 2U);
+
+    if (status == BQ76922_OK) {
+        *out = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+    }
+    return status;
 }
 
 static bool BQ76922_CellUsed(uint8_t index)
@@ -443,11 +467,11 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
      * ALL_FETS_ON transient can latch safety bits without a real OV/UV. */
     real_cov = ((sa & BQ76922_SAFETY_A_COV) != 0U) &&
                dev->snapshot.sample_valid &&
-               (dev->snapshot.max_cell_mv >= (int16_t)BMS_COV_THRESHOLD_MV);
+               (dev->snapshot.max_cell_mv >= (int16_t)(BMS_COV_EFFECTIVE_MV - 20U));
     real_cuv = ((sa & BQ76922_SAFETY_A_CUV) != 0U) &&
                dev->snapshot.sample_valid &&
                (dev->snapshot.min_cell_mv > 0) &&
-               (dev->snapshot.min_cell_mv <= (int16_t)BMS_CUV_THRESHOLD_MV);
+               (dev->snapshot.min_cell_mv <= (int16_t)(BMS_CUV_EFFECTIVE_MV + 20U));
 
     if (real_cov) {
         flags |= BQ76922_FAULT_CELL_OV;
@@ -664,31 +688,23 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             break;
 
         case BQ76922_INIT_OTP_FAST_CHECK:
-            /* After OTP burn, SHUTDOWN wake already has golden in Data Memory.
-             * SET_CFGUPDATE would force FETs off for a long CFGUPDATE — skip it. */
+            /* Golden OTP already loaded (SHUTDOWN wake on a burned chip):
+             * SET_CFGUPDATE would hold the FETs off — skip it. Any other
+             * image (blank chip, old 4S Li-ion OTP) gets the RAM table. */
             {
-                uint16_t vcell = 0U;
-                uint8_t fet_opt = 0U;
-                uint8_t timeout = 0U, delta = 0U;
+                bool match = false;
+                uint16_t fail = 0U;
 
-                status = BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &vcell);
+                status = BQ76922_GoldenFingerprint(dev, &match, &fail);
                 if (status != BQ76922_OK) {
                     break;
                 }
-                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &fet_opt);
-                if (status != BQ76922_OK) {
-                    break;
-                }
-                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT, &timeout);
-                if (status != BQ76922_OK) break;
-                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA, &delta);
-                if (status != BQ76922_OK) break;
-                dev->pdsg_timeout_rb = timeout;
-                dev->pdsg_stop_delta_rb = delta;
-                dev->snapshot.vcell_mode_rb = vcell;
-                if ((vcell == BMS_VCELL_MODE) && (fet_opt == BMS_FET_OPTIONS) &&
-                    timeout == BMS_PDSG_TIMEOUT && delta == BMS_PDSG_STOP_DELTA) {
-                    dev->init_step = (uint8_t)BQ76922_INIT_MANUF_ISSUE;
+                dev->snapshot.golden_otp = match;
+                dev->snapshot.fp_fail_addr = fail;
+                if (match) {
+                    dev->snapshot.golden_ok = true;
+                    dev->snapshot.vcell_mode_rb = BMS_VCELL_MODE;
+                    dev->init_step = (uint8_t)BQ76922_INIT_MANUF_READ;
                     dev->snapshot.init_step = dev->init_step;
                     delay_ms = 20U;
                     dev->next_action_ms = HAL_GetTick() + delay_ms;
@@ -729,150 +745,24 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                 }
                 dev->cfg_poll_tries = 0U;
                 dev->cfg_enter_tries = 0U;
+                dev->table_index = 0U;
             }
             break;
 
-        case BQ76922_INIT_VCELL_MODE:
-            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_PROT_A:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_A,
-                                        BMS_ENABLED_PROTECTIONS_A);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_PROT_B:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_B,
-                                        BMS_ENABLED_PROTECTIONS_B);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_CHG_FET_PROT_A:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CHG_FET_PROT_A,
-                                        BMS_CHG_FET_PROTECTIONS_A);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_DSG_FET_PROT_A:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_DSG_FET_PROT_A,
-                                        BMS_DSG_FET_PROTECTIONS_A);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_CUV_THRESH:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CUV_THRESHOLD,
-                                        BMS_CUV_THRESHOLD_CODE);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_COV_THRESH:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
-                                        BMS_COV_THRESHOLD_CODE);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_OCC_THRESH:
-            /* Raise above default ~0.8 A @ 5 mOhm so USB-C charge works. */
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCC_THRESHOLD,
-                                        BMS_OCC_THRESHOLD_CODE);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_OCD1_THRESH:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCD1_THRESHOLD,
-                                        BMS_OCD1_THRESHOLD_CODE);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_OCC_RECOVERY:
-            /* I2 little-endian; +100 mA lets I≈0 clear a latched OCC. */
-            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_OCC_RECOVERY,
-                                        (uint16_t)(int16_t)BMS_OCC_RECOVERY_MA);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_CC_GAIN:
-            /* 5 mOhm pack shunt — TRM CC Gain = 7.5684 / Rsense_mOhm. */
-            status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_CAPACITY_GAIN:
-            status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CAPACITY_GAIN,
-                                        BMS_CAPACITY_GAIN);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_CFETOFF_PIN:
-            /* Unused — floating TP29 must not force CHG off. */
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CFETOFF_PIN_CONFIG,
-                                        BMS_CFETOFF_PIN_CONFIG);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_DFETOFF_PIN:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_DFETOFF_PIN_CONFIG,
-                                        BMS_DFETOFF_PIN_CONFIG);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_FET_OPTIONS:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_FET_OPTIONS,
-                                        BMS_FET_OPTIONS);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_MFG_STATUS_INIT:
-            /* OTP wake needs FET_EN=1 here — FET_ENABLE() alone is RAM-only. */
-            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_MFG_STATUS_INIT,
-                                        BMS_MFG_STATUS_INIT);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_AUTO_SHUTDOWN:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_AUTO_SHUTDOWN_TIME,
-                                        BMS_AUTO_SHUTDOWN_TIME);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_PDSG_TIMEOUT:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT,
-                                        BMS_PDSG_TIMEOUT);
-            if (status == BQ76922_OK) {
-                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT, &dev->pdsg_timeout_rb);
-                if (status == BQ76922_OK && dev->pdsg_timeout_rb != BMS_PDSG_TIMEOUT) {
-                    dev->fet_guard.latched = true;
+        case BQ76922_INIT_WRITE_TABLE:
+            /* One golden entry per step (≈3 ms commit each) so the task
+             * stays responsive; same table as the OTP image. */
+            if (dev->table_index < g_bms_golden_count) {
+                status = BQ76922_WriteGoldenEntry(dev, &g_bms_golden[dev->table_index]);
+                if (status == BQ76922_OK) {
+                    dev->table_index++;
+                }
+                if ((status == BQ76922_OK) && (dev->table_index < g_bms_golden_count)) {
+                    dev->next_action_ms = HAL_GetTick() + 2U;
                     return false;
                 }
+                delay_ms = 5U;
             }
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_PDSG_STOP_DELTA:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA,
-                                        BMS_PDSG_STOP_DELTA);
-            if (status == BQ76922_OK) {
-                status = BQ76922_ReadRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA, &dev->pdsg_stop_delta_rb);
-                if (status == BQ76922_OK && dev->pdsg_stop_delta_rb != BMS_PDSG_STOP_DELTA) {
-                    dev->fet_guard.latched = true;
-                    return false;
-                }
-            }
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_SCD_THRESH:
-            status = BQ76922_WriteRamU1(dev, BQ76922_RAM_SCD_THRESHOLD,
-                                        BMS_SCD_THRESHOLD);
-            delay_ms = 20U;
-            break;
-
-        case BQ76922_INIT_BODY_DIODE:
-            status = BQ76922_WriteRamU2(dev, BQ76922_RAM_BODY_DIODE,
-                                        BMS_BODY_DIODE_THRESHOLD_MA);
-            delay_ms = 20U;
             break;
 
         case BQ76922_INIT_EXIT_CFG:
@@ -900,20 +790,20 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             }
             break;
 
-        case BQ76922_INIT_READ_VCELL_ADDR:
-            buf[0] = (uint8_t)(BQ76922_RAM_VCELL_MODE & 0xFFU);
-            buf[1] = (uint8_t)((BQ76922_RAM_VCELL_MODE >> 8) & 0xFFU);
-            status = BQ76922_WriteDirect(dev, BQ76922_CMD_SUBCMD_LOW, buf, 2U);
-            delay_ms = 15U;
-            break;
+        case BQ76922_INIT_VERIFY_TABLE:
+            {
+                bool match = false;
+                uint16_t fail = 0U;
 
-        case BQ76922_INIT_READ_VCELL_DATA:
-            status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 2U);
-            if (status == BQ76922_OK) {
-                dev->snapshot.vcell_mode_rb = (uint16_t)BQ76922_Le16(buf);
-                if (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE) {
-                    BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
-                    return false;
+                status = BQ76922_GoldenFingerprint(dev, &match, &fail);
+                if (status == BQ76922_OK) {
+                    dev->snapshot.fp_fail_addr = fail;
+                    if (!match) {
+                        BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
+                        return false;
+                    }
+                    dev->snapshot.golden_ok = true;
+                    dev->snapshot.vcell_mode_rb = BMS_VCELL_MODE;
                 }
             }
             break;
@@ -932,33 +822,20 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             }
             break;
 
-        case BQ76922_INIT_MANUF_ISSUE:
-            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
-            delay_ms = 15U;
-            break;
-
         case BQ76922_INIT_MANUF_READ:
-            status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 2U);
-            if (status == BQ76922_OK) {
-                uint16_t manuf = (uint16_t)BQ76922_Le16(buf);
+            {
+                uint16_t manuf = 0U;
 
-                if (BQ76922_ManufLooksStaleVcell(manuf)) {
-                    /* 0x40 still has VCell Mode — re-issue ManufacturingStatus. */
-                    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
-                    if (status == BQ76922_OK) {
-                        delay_ms = 20U;
+                status = BQ76922_ReadSubcmdU2(dev, BQ76922_SUBCMD_MANUF_STATUS, &manuf);
+                if (status == BQ76922_OK) {
+                    dev->snapshot.manuf_status = manuf;
+                    /* FET_ENABLE is a toggle — do not send it if FET_EN is already 1. */
+                    if ((manuf & BQ76922_MANUF_FET_EN) != 0U) {
+                        dev->init_step = (uint8_t)BQ76922_INIT_ALL_FETS_ON;
+                        dev->snapshot.init_step = dev->init_step;
                         dev->next_action_ms = HAL_GetTick() + delay_ms;
                         return false;
                     }
-                    break;
-                }
-                dev->snapshot.manuf_status = manuf;
-                /* FET_ENABLE is a toggle — do not send it if FET_EN is already 1. */
-                if ((manuf & BQ76922_MANUF_FET_EN) != 0U) {
-                    dev->init_step = (uint8_t)BQ76922_INIT_ALL_FETS_ON;
-                    dev->snapshot.init_step = dev->init_step;
-                    dev->next_action_ms = HAL_GetTick() + delay_ms;
-                    return false;
                 }
             }
             break;
@@ -969,38 +846,26 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
             delay_ms = 20U;
             break;
 
-        case BQ76922_INIT_MANUF_CONFIRM_ISSUE:
-            status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
-            delay_ms = 15U;
-            break;
-
         case BQ76922_INIT_MANUF_CONFIRM_READ:
-            status = BQ76922_ReadDirect(dev, BQ76922_CMD_RAM_DATA, buf, 2U);
-            if (status == BQ76922_OK) {
-                uint16_t manuf = (uint16_t)BQ76922_Le16(buf);
+            {
+                uint16_t manuf = 0U;
 
-                if (BQ76922_ManufLooksStaleVcell(manuf)) {
-                    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_MANUF_STATUS);
-                    if (status == BQ76922_OK) {
-                        delay_ms = 20U;
-                        dev->next_action_ms = HAL_GetTick() + delay_ms;
+                status = BQ76922_ReadSubcmdU2(dev, BQ76922_SUBCMD_MANUF_STATUS, &manuf);
+                if (status == BQ76922_OK) {
+                    dev->snapshot.manuf_status = manuf;
+                    if ((manuf & BQ76922_MANUF_FET_EN) == 0U) {
+                        if (dev->fet_en_attempts < 4U) {
+                            dev->fet_en_attempts++;
+                            dev->init_step = (uint8_t)BQ76922_INIT_FET_ENABLE;
+                            dev->snapshot.init_step = dev->init_step;
+                            dev->next_action_ms = HAL_GetTick() + 30U;
+                            return false;
+                        }
+                        BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
                         return false;
                     }
-                    break;
+                    dev->fet_en_attempts = 0U;
                 }
-                dev->snapshot.manuf_status = manuf;
-                if ((manuf & BQ76922_MANUF_FET_EN) == 0U) {
-                    if (dev->fet_en_attempts < 4U) {
-                        dev->fet_en_attempts++;
-                        dev->init_step = (uint8_t)BQ76922_INIT_FET_ENABLE;
-                        dev->snapshot.init_step = dev->init_step;
-                        dev->next_action_ms = HAL_GetTick() + 30U;
-                        return false;
-                    }
-                    BQ76922_InitRestart(dev, BQ76922_PROBE_RETRY_MS);
-                    return false;
-                }
-                dev->fet_en_attempts = 0U;
             }
             break;
 
@@ -1105,8 +970,6 @@ void BQ76922_Bind(BQ76922_Device_t *dev, I2C_HandleTypeDef *hi2c)
             }
         }
     }
-    dev->snapshot.soc_permille = BMS_SOC_INVALID_PERMILLE;
-    BmsSoc_Reset();
 }
 
 BQ76922_Status_t BQ76922_Probe(BQ76922_Device_t *dev)
@@ -1209,6 +1072,7 @@ BQ76922_Status_t BQ76922_EnterShutdown(BQ76922_Device_t *dev)
 #endif
 }
 
+#if (BMS_OTP_SERVICE != 0U)
 static BQ76922_Status_t BQ76922_WaitSubcommandDone(BQ76922_Device_t *dev,
                                                    uint16_t subcmd)
 {
@@ -1270,6 +1134,8 @@ static BQ76922_Status_t BQ76922_CallOtpStatus(BQ76922_Device_t *dev,
     return BQ76922_OK;
 }
 
+#endif /* BMS_OTP_SERVICE */
+
 static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
                                              uint16_t address,
                                              uint8_t *data,
@@ -1321,6 +1187,7 @@ static BQ76922_Status_t BQ76922_ReadRamU2(BQ76922_Device_t *dev,
     return BQ76922_OK;
 }
 
+#if (BMS_OTP_SERVICE != 0U)
 static BQ76922_Status_t BQ76922_OtpEnterCfgupdate(BQ76922_Device_t *dev)
 {
     BQ76922_Status_t status;
@@ -1372,247 +1239,36 @@ static BQ76922_Status_t BQ76922_OtpExitCfgupdate(BQ76922_Device_t *dev)
 
 static BQ76922_Status_t BQ76922_OtpWriteGolden(BQ76922_Device_t *dev)
 {
+    uint16_t i;
     BQ76922_Status_t status;
 
-    /* Complete golden needed for autonomous TS2 wake. */
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_REG1_CONFIG,
-                                BMS_REG1_CONFIG);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_REG0_CONFIG,
-                                BMS_REG0_CONFIG);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_A,
-                                BMS_ENABLED_PROTECTIONS_A);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_ENABLED_PROT_B,
-                                BMS_ENABLED_PROTECTIONS_B);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CHG_FET_PROT_A,
-                                BMS_CHG_FET_PROTECTIONS_A);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_DSG_FET_PROT_A,
-                                BMS_DSG_FET_PROTECTIONS_A);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CUV_THRESHOLD,
-                                BMS_CUV_THRESHOLD_CODE);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_COV_THRESHOLD,
-                                BMS_COV_THRESHOLD_CODE);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCC_THRESHOLD,
-                                BMS_OCC_THRESHOLD_CODE);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_OCD1_THRESHOLD,
-                                BMS_OCD1_THRESHOLD_CODE);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_OCC_RECOVERY,
-                                (uint16_t)(int16_t)BMS_OCC_RECOVERY_MA);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamF4(dev, BQ76922_RAM_CAPACITY_GAIN, BMS_CAPACITY_GAIN);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_CFETOFF_PIN_CONFIG,
-                                BMS_CFETOFF_PIN_CONFIG);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_DFETOFF_PIN_CONFIG,
-                                BMS_DFETOFF_PIN_CONFIG);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_TS2_CONFIG,
-                                BMS_TS2_CONFIG);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_FET_OPTIONS, BMS_FET_OPTIONS);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_MFG_STATUS_INIT,
-                                BMS_MFG_STATUS_INIT);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_AUTO_SHUTDOWN_TIME,
-                                BMS_AUTO_SHUTDOWN_TIME);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_PCHG_START,
-                                BMS_PCHG_START_MV);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU2(dev, BQ76922_RAM_PCHG_STOP,
-                                BMS_PCHG_STOP_MV);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_TIMEOUT, BMS_PDSG_TIMEOUT);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_PDSG_STOP_DELTA,
-                                BMS_PDSG_STOP_DELTA);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    status = BQ76922_WriteRamU1(dev, BQ76922_RAM_SCD_THRESHOLD, BMS_SCD_THRESHOLD);
-    if (status != BQ76922_OK) {
-        return status;
-    }
-    return BQ76922_WriteRamU2(dev, BQ76922_RAM_BODY_DIODE,
-                               BMS_BODY_DIODE_THRESHOLD_MA);
-}
-
-static BQ76922_Status_t BQ76922_VerifyRamU1(BQ76922_Device_t *dev,
-                                             uint16_t address,
-                                             uint8_t expected,
-                                             uint16_t *fail_addr)
-{
-    uint8_t actual = 0U;
-    BQ76922_Status_t status = BQ76922_ReadRamU1(dev, address, &actual);
-
-    if ((status != BQ76922_OK) || (actual != expected)) {
-        if (fail_addr != NULL) {
-            *fail_addr = address;
+    /* Complete golden image — same table as the runtime RAM path. */
+    for (i = 0U; i < g_bms_golden_count; i++) {
+        status = BQ76922_WriteGoldenEntry(dev, &g_bms_golden[i]);
+        if (status != BQ76922_OK) {
+            return status;
         }
-        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
     }
     return BQ76922_OK;
 }
-
-static BQ76922_Status_t BQ76922_VerifyRamU2(BQ76922_Device_t *dev,
-                                             uint16_t address,
-                                             uint16_t expected,
-                                             uint16_t *fail_addr)
-{
-    uint16_t actual = 0U;
-    BQ76922_Status_t status = BQ76922_ReadRamU2(dev, address, &actual);
-
-    if ((status != BQ76922_OK) || (actual != expected)) {
-        if (fail_addr != NULL) {
-            *fail_addr = address;
-        }
-        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
-    }
-    return BQ76922_OK;
-}
-
-static BQ76922_Status_t BQ76922_VerifyRamF4(BQ76922_Device_t *dev,
-                                             uint16_t address,
-                                             float expected,
-                                             uint16_t *fail_addr)
-{
-    uint8_t actual[4];
-    union {
-        float f;
-        uint32_t u;
-    } conv;
-    BQ76922_Status_t status;
-
-    conv.f = expected;
-    status = BQ76922_ReadRamBlock(dev, address, actual, sizeof(actual));
-    if ((status != BQ76922_OK) ||
-        (actual[0] != (uint8_t)(conv.u & 0xFFU)) ||
-        (actual[1] != (uint8_t)((conv.u >> 8) & 0xFFU)) ||
-        (actual[2] != (uint8_t)((conv.u >> 16) & 0xFFU)) ||
-        (actual[3] != (uint8_t)((conv.u >> 24) & 0xFFU))) {
-        if (fail_addr != NULL) {
-            *fail_addr = address;
-        }
-        return (status == BQ76922_OK) ? BQ76922_NOT_READY : status;
-    }
-    return BQ76922_OK;
-}
-
-#define BQ_VERIFY_U1(addr_, value_) do { \
-    status = BQ76922_VerifyRamU1(dev, (addr_), (value_), fail_addr); \
-    if (status != BQ76922_OK) return status; \
-} while (0)
-#define BQ_VERIFY_U2(addr_, value_) do { \
-    status = BQ76922_VerifyRamU2(dev, (addr_), (value_), fail_addr); \
-    if (status != BQ76922_OK) return status; \
-} while (0)
-#define BQ_VERIFY_F4(addr_, value_) do { \
-    status = BQ76922_VerifyRamF4(dev, (addr_), (value_), fail_addr); \
-    if (status != BQ76922_OK) return status; \
-} while (0)
 
 static BQ76922_Status_t BQ76922_OtpVerifyGolden(BQ76922_Device_t *dev,
                                                 uint16_t *fail_addr)
 {
-    BQ76922_Status_t status;
+    bool match = false;
+    uint16_t fail = 0U;
+    BQ76922_Status_t status = BQ76922_GoldenCompare(dev, false, &match, &fail);
 
     if (fail_addr != NULL) {
-        *fail_addr = 0U;
+        *fail_addr = fail;
     }
-    BQ_VERIFY_U1(BQ76922_RAM_REG1_CONFIG, BMS_REG1_CONFIG);
-    BQ_VERIFY_U1(BQ76922_RAM_REG0_CONFIG, BMS_REG0_CONFIG);
-    BQ_VERIFY_U2(BQ76922_RAM_VCELL_MODE, BMS_VCELL_MODE);
-    BQ_VERIFY_U1(BQ76922_RAM_ENABLED_PROT_A, BMS_ENABLED_PROTECTIONS_A);
-    BQ_VERIFY_U1(BQ76922_RAM_ENABLED_PROT_B, BMS_ENABLED_PROTECTIONS_B);
-    BQ_VERIFY_U1(BQ76922_RAM_CHG_FET_PROT_A, BMS_CHG_FET_PROTECTIONS_A);
-    BQ_VERIFY_U1(BQ76922_RAM_DSG_FET_PROT_A, BMS_DSG_FET_PROTECTIONS_A);
-    BQ_VERIFY_U1(BQ76922_RAM_CUV_THRESHOLD, BMS_CUV_THRESHOLD_CODE);
-    BQ_VERIFY_U1(BQ76922_RAM_COV_THRESHOLD, BMS_COV_THRESHOLD_CODE);
-    BQ_VERIFY_U1(BQ76922_RAM_OCC_THRESHOLD, BMS_OCC_THRESHOLD_CODE);
-    BQ_VERIFY_U1(BQ76922_RAM_OCD1_THRESHOLD, BMS_OCD1_THRESHOLD_CODE);
-    BQ_VERIFY_U2(BQ76922_RAM_OCC_RECOVERY,
-                 (uint16_t)(int16_t)BMS_OCC_RECOVERY_MA);
-    BQ_VERIFY_F4(BQ76922_RAM_CC_GAIN, BMS_CC_GAIN);
-    BQ_VERIFY_F4(BQ76922_RAM_CAPACITY_GAIN, BMS_CAPACITY_GAIN);
-    BQ_VERIFY_U1(BQ76922_RAM_CFETOFF_PIN_CONFIG, BMS_CFETOFF_PIN_CONFIG);
-    BQ_VERIFY_U1(BQ76922_RAM_DFETOFF_PIN_CONFIG, BMS_DFETOFF_PIN_CONFIG);
-    BQ_VERIFY_U1(BQ76922_RAM_TS2_CONFIG, BMS_TS2_CONFIG);
-    BQ_VERIFY_U1(BQ76922_RAM_FET_OPTIONS, BMS_FET_OPTIONS);
-    BQ_VERIFY_U2(BQ76922_RAM_MFG_STATUS_INIT, BMS_MFG_STATUS_INIT);
-    BQ_VERIFY_U1(BQ76922_RAM_AUTO_SHUTDOWN_TIME, BMS_AUTO_SHUTDOWN_TIME);
-    BQ_VERIFY_U2(BQ76922_RAM_PCHG_START, BMS_PCHG_START_MV);
-    BQ_VERIFY_U2(BQ76922_RAM_PCHG_STOP, BMS_PCHG_STOP_MV);
-    BQ_VERIFY_U1(BQ76922_RAM_PDSG_TIMEOUT, BMS_PDSG_TIMEOUT);
-    BQ_VERIFY_U1(BQ76922_RAM_PDSG_STOP_DELTA, BMS_PDSG_STOP_DELTA);
-    BQ_VERIFY_U1(BQ76922_RAM_SCD_THRESHOLD, BMS_SCD_THRESHOLD);
-    BQ_VERIFY_U2(BQ76922_RAM_BODY_DIODE, BMS_BODY_DIODE_THRESHOLD_MA);
-    return BQ76922_OK;
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    return match ? BQ76922_OK : BQ76922_NOT_READY;
 }
 
-#undef BQ_VERIFY_U1
-#undef BQ_VERIFY_U2
-#undef BQ_VERIFY_F4
+#endif /* BMS_OTP_SERVICE */
 
 BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
                                       BQ76922_OtpReport_t *out)
@@ -1633,7 +1289,6 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
      * OTP_WR_CHECK used to drop FETs and leave the driver thinking cfg=1. */
     memset(out, 0, sizeof(*out));
     out->session_already_burned = s_otp_burned_this_boot;
-    out->wr_check = 0U; /* use BQ76922_OtpRunWrCheck() for 0x80 preflight */
     out->fet_options_want = BMS_FET_OPTIONS;
 
     PowerManager_SetBmsBusHold(true);
@@ -1662,6 +1317,17 @@ BQ76922_Status_t BQ76922_OtpGetReport(BQ76922_Device_t *dev,
         goto out_hold;
     }
     status = BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &out->fet_options);
+    if (status != BQ76922_OK) {
+        goto out_hold;
+    }
+    status = BQ76922_GoldenCompare(dev, true, &out->fp_match, &out->fp_fail_addr);
+    if (status != BQ76922_OK) {
+        goto out_hold;
+    }
+    status = BQ76922_GoldenCompare(dev, false, &out->ram_match, &out->fail_addr);
+    out->golden_crc = BmsGolden_Crc32();
+    out->golden_count = g_bms_golden_count;
+    out->golden_otp_at_wake = dev->snapshot.golden_otp;
 
 out_hold:
     if (held) {
@@ -1671,9 +1337,47 @@ out_hold:
 #endif
 }
 
+#if (BMS_OTP_SERVICE != 0U)
+/*
+ * RESET reloads RAM from OTP, so what is read right after it IS the burned
+ * image.  A blank BQ76922 still shows the TI defaults in every fingerprint
+ * field.  Anything else (e.g. the old 4S Li-ion chip) must never be burned
+ * again: OTP bits only go 0→1 and the result would be a mix of both images.
+ * Drops the FETs for ~0.5 s; the caller re-inits afterwards.
+ */
+static BQ76922_Status_t BQ76922_OtpBlankCheck(BQ76922_Device_t *dev,
+                                              BQ76922_OtpBlank_t *b)
+{
+    BQ76922_Status_t status;
+
+    memset(b, 0, sizeof(*b));
+    status = BQ76922_SendSubcommand(dev, BQ76922_SUBCMD_RESET);
+    if (status != BQ76922_OK) {
+        return status;
+    }
+    HAL_Delay(500U);
+    status = BQ76922_ReadRamU2(dev, BQ76922_RAM_VCELL_MODE, &b->vcell_mode);
+    if (status != BQ76922_OK) return status;
+    status = BQ76922_ReadRamU1(dev, BQ76922_RAM_FET_OPTIONS, &b->fet_options);
+    if (status != BQ76922_OK) return status;
+    status = BQ76922_ReadRamU2(dev, BQ76922_RAM_MFG_STATUS_INIT, &b->mfg_status_init);
+    if (status != BQ76922_OK) return status;
+    status = BQ76922_ReadRamU1(dev, BQ76922_RAM_COV_THRESHOLD, &b->cov_threshold);
+    if (status != BQ76922_OK) return status;
+    status = BQ76922_ReadRamU1(dev, BQ76922_RAM_ENABLED_PROT_B, &b->prot_b);
+    if (status != BQ76922_OK) return status;
+    b->blank = (b->vcell_mode == BMS_BLANK_VCELL_MODE) &&
+               (b->fet_options == BMS_BLANK_FET_OPTIONS) &&
+               (b->mfg_status_init == BMS_BLANK_MFG_STATUS_INIT) &&
+               (b->cov_threshold == BMS_BLANK_COV_THRESHOLD) &&
+               (b->prot_b == BMS_BLANK_PROT_B);
+    return BQ76922_OK;
+}
+
 BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
                                        uint8_t *wr_check,
-                                       uint16_t *fail_addr)
+                                       uint16_t *fail_addr,
+                                       BQ76922_OtpBlank_t *blank)
 {
     BQ76922_Status_t status;
     uint8_t check = 0U;
@@ -1694,9 +1398,17 @@ BQ76922_Status_t BQ76922_OtpRunWrCheck(BQ76922_Device_t *dev,
     PowerManager_SetBmsBusHold(true);
     held = true;
 
+    if (blank != NULL) {
+        /* Informational here: CHECK may run on any chip. BURN enforces it. */
+        status = BQ76922_OtpBlankCheck(dev, blank);
+        if (status != BQ76922_OK) {
+            goto out_reinit;
+        }
+    }
+
     status = BQ76922_OtpEnterCfgupdate(dev);
     if (status != BQ76922_OK) {
-        goto out_hold;
+        goto out_reinit;
     }
     cfgupdate = true;
 
@@ -1754,7 +1466,6 @@ out_reinit:
     /* EXIT_CFGUPDATE kills FET drivers — bring FETs back. */
     BQ76922_RequestReinit(dev);
 
-out_hold:
     if (held) {
         PowerManager_SetBmsBusHold(false);
     }
@@ -1769,8 +1480,10 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
                                  const char *confirm_token,
                                  uint8_t *wr_check,
                                  uint8_t *wr_result,
-                                 uint16_t *fail_addr)
+                                 uint16_t *fail_addr,
+                                 BQ76922_OtpBlank_t *blank)
 {
+    BQ76922_OtpBlank_t local_blank;
     BQ76922_Status_t status;
     uint8_t check = 0U;
     uint8_t result = 0U;
@@ -1809,9 +1522,22 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
     PowerManager_SetBmsBusHold(true);
     held = true;
 
+    if (blank == NULL) {
+        blank = &local_blank;
+    }
+    status = BQ76922_OtpBlankCheck(dev, blank);
+    if (status != BQ76922_OK) {
+        goto out_reinit;
+    }
+    if (!blank->blank) {
+        /* Not a factory-blank chip: refuse before anything is staged. */
+        status = BQ76922_NOT_BLANK;
+        goto out_reinit;
+    }
+
     status = BQ76922_OtpEnterCfgupdate(dev);
     if (status != BQ76922_OK) {
-        goto out_hold;
+        goto out_reinit;
     }
     cfgupdate = true;
 
@@ -1908,13 +1634,14 @@ out_reinit:
     /* Reload FETs after CFGUPDATE/reset. */
     BQ76922_RequestReinit(dev);
 
-out_hold:
     if (held) {
         PowerManager_SetBmsBusHold(false);
     }
     return status;
 #endif
 }
+
+#endif /* BMS_OTP_SERVICE */
 
 void BQ76922_ClearShutdownRequest(BQ76922_Device_t *dev)
 {
@@ -1941,7 +1668,7 @@ bool BQ76922_IsConfiguredHealthy(const BQ76922_Device_t *dev)
     if (!dev->snapshot.present || !dev->snapshot.configured) {
         return false;
     }
-    if (dev->snapshot.vcell_mode_rb != BMS_VCELL_MODE) {
+    if (!dev->snapshot.golden_ok) {
         return false;
     }
     /* Require both charge and discharge paths — matches a good TB line. */
@@ -1967,6 +1694,7 @@ static void BQ76922_ForceAbsent(BQ76922_Device_t *dev)
     dev->snapshot.sample_valid = false;
     dev->snapshot.shutdown_request = false;
     dev->snapshot.vcell_mode_rb = 0U;
+    dev->snapshot.golden_ok = false;
     dev->snapshot.manuf_status = 0U;
     dev->snapshot.fet_status = 0U;
     dev->snapshot.state = BQ76922_STATE_ABSENT;
@@ -2022,6 +1750,7 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     dev->snapshot.sample_valid = false;
     dev->snapshot.shutdown_request = false;
     dev->snapshot.vcell_mode_rb = 0U;
+    dev->snapshot.golden_ok = false;
     dev->snapshot.manuf_status = 0U;
     dev->snapshot.state = BQ76922_STATE_INIT;
     dev->init_step = (uint8_t)BQ76922_INIT_WAIT_READY;
@@ -2039,29 +1768,26 @@ void BQ76922_RequestReinit(BQ76922_Device_t *dev)
     BQ76922_UpdateBusHold(dev, HAL_GetTick());
 }
 
-static void BQ76922_PublishSoc(BQ76922_Device_t *dev, uint32_t now_ms,
-                               BmsSoc_Result_t *out)
+int32_t BQ76922_UserAhToMah(int32_t whole, uint32_t frac)
 {
-    uint8_t used = 0U;
-    uint8_t i;
+    uint64_t bits = ((uint64_t)(uint32_t)whole << 32) | (uint64_t)frac;
+    int64_t q = (int64_t)bits;
+    int64_t mah;
 
-    memset(out, 0, sizeof(*out));
-    out->soc_permille = BMS_SOC_INVALID_PERMILLE;
-    for (i = 0U; i < BQ76922_CELL_COUNT; i++) {
-        if (BMS_CELL_USED(i)) {
-            used = (uint8_t)(used | (uint8_t)(1U << i));
-        }
+    if (q >= 0) {
+        mah = (q + 0x80000000LL) >> 32;
+    } else {
+        uint64_t mag = (uint64_t)(-(q + 1)) + 1U;
+
+        mah = -((int64_t)((mag + 0x80000000ULL) >> 32));
     }
-    if (!BmsSoc_OnSample(now_ms, dev->snapshot.cc2_ma, dev->snapshot.cell_mv,
-                         (uint8_t)BQ76922_CELL_COUNT, used,
-                         dev->snapshot.passq_valid, dev->snapshot.passq_mah,
-                         out)) {
-        return;
+    if (mah > 2147483647LL) {
+        return 2147483647;
     }
-    dev->snapshot.session_mah = out->session_mah;
-    dev->snapshot.soc_permille = out->soc_permille;
-    dev->snapshot.soc_flags = out->flags;
-    dev->snapshot.balance_mask = out->balance_mask;
+    if (mah < (-2147483647LL - 1)) {
+        return (int32_t)(-2147483647 - 1);
+    }
+    return (int32_t)mah;
 }
 
 void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
@@ -2250,7 +1976,13 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
                    ((uint32_t)ram[5] << 8) |
                    ((uint32_t)ram[6] << 16) |
                    ((uint32_t)ram[7] << 24);
-            dev->snapshot.passq_mah = BmsSoc_UserAhToMah(whole, frac);
+            dev->snapshot.passq_mah = BQ76922_UserAhToMah(whole, frac);
+            dev->snapshot.passq_whole = whole;
+            dev->snapshot.passq_frac = frac;
+            dev->snapshot.passq_time_s = (uint32_t)ram[8] |
+                                         ((uint32_t)ram[9] << 8) |
+                                         ((uint32_t)ram[10] << 16) |
+                                         ((uint32_t)ram[11] << 24);
             dev->snapshot.passq_valid = true;
             dev->scan_index++;
         } else if (status == BQ76922_BUSY) {
@@ -2281,25 +2013,32 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         } else if (status == BQ76922_BUSY) {
             return;
         }
-    } else {
-        BmsSoc_Result_t soc;
-    
-        BQ76922_PublishSoc(dev, now_ms, &soc);
-        if (soc.balance_write) {
-            /* RAM subcommand. Does not touch Balancing Configuration or OTP. */
-            status = BQ76922_WriteRamU2(dev, BQ76922_SUBCMD_CB_ACTIVE_CELLS,
-                                        soc.balance_cells);
-            if (BQ76922_NoteCommsResult(dev, status)) {
-                return;
-            }
-            if (status == BQ76922_BUSY) {
-                return;
-            }
-            if (status == BQ76922_OK) {
-                BmsSoc_NoteBalanceSent(now_ms);
-            }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 8U)) {
+        status = BQ76922_ReadDirect(dev, BQ76922_CMD_TS1_TEMP, buf, 2U);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
         }
+        if (status == BQ76922_OK) {
+            dev->snapshot.ts1_temp_dk = BQ76922_Le16(buf);
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else if (dev->scan_index == (BQ76922_CELL_COUNT + 9U)) {
+        uint16_t mask = 0U;
 
+        /* Autonomous balancing runs inside the AFE; this only reports it. */
+        status = BQ76922_ReadSubcmdU2(dev, BQ76922_SUBCMD_CB_ACTIVE_CELLS, &mask);
+        if (BQ76922_NoteCommsResult(dev, status)) {
+            return;
+        }
+        if (status == BQ76922_OK) {
+            dev->snapshot.balance_mask = (uint8_t)(mask & 0x1FU);
+            dev->scan_index++;
+        } else if (status == BQ76922_BUSY) {
+            return;
+        }
+    } else {
         dev->snapshot.sample_valid = true;
         dev->snapshot.sample_tick_ms = now_ms;
         dev->scan_index = 0U;

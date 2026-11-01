@@ -50,6 +50,7 @@
 #define H7_LINK_PD_TLM               0x12U
 #define H7_LINK_PD_CAPS              0x14U /* versioned source PDO list + active RDO */
 #define H7_LINK_AUX_TLM              0x13U /* G0 DAC, NTC, fan, sense self-test */
+#define H7_LINK_FIELDS               0x15U /* tlm_fields.h: id/type/value groups */
 #define H7_LINK_TEXT                 0x20U
 #define H7_LINK_ACK                  0x81U /* u8 acknowledged type */
 #define H7_LINK_NACK                 0x82U /* u8 rejected type, u8 reason */
@@ -74,6 +75,13 @@
  * it is the device's TX_SOURCE_CAPS. Invalid/previous attach data is never sent.
  */
 #define H7_LINK_AUX_BYTES            32U
+
+/* Fixed BMS/PD/AUX frames (0x11/0x12/0x13) kept for H7 firmware that does
+ * not decode FIELDS yet. Set to 0 once the H7 runs the FIELDS decoder. */
+#ifndef H7_LINK_LEGACY_SLOW
+#define H7_LINK_LEGACY_SLOW          1U
+#endif
+#define HOSTLINK_FIELDS_SLOT0        4U
 
 /* BMS bytes 0..52 match the previous 56-byte payload (53..55 stay zero). */
 #define H7_BMS_PASSQ_MAH             56U /* i32, DASTATUS6 mAh, signed */

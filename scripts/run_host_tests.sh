@@ -5,7 +5,9 @@ output=$(mktemp -d "${TMPDIR:-/tmp}/g4-host-tests.XXXXXX")
 trap 'rm -rf "$output"' EXIT
 for test_source in tests/*.c; do
   sources=("$test_source")
-  if [[ "$test_source" == tests/test_bms_soc.c ]]; then sources+=(Core/Src/bms_soc.c); fi
+  if [[ "$test_source" == tests/test_bms_gauge.c ]]; then sources+=(Core/Src/bms_gauge.c); fi
+  if [[ "$test_source" == tests/test_bms_store.c ]]; then sources+=(Core/Src/bms_store_codec.c); fi
+  if [[ "$test_source" == tests/test_tlm_fields.c ]]; then sources+=(Core/Src/tlm_fields.c); fi
   "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ICore/Inc "${sources[@]}" -lm -o "$output/test"
   "$output/test"
 done

@@ -23,6 +23,14 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "OtpService",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "BMS_OTP_SERVICE": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -33,6 +41,10 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "OtpService",
+            "configurePreset": "OtpService"
         },
         {
             "name": "Flash",

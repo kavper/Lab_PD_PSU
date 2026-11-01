@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile, subprocess
 root=Path(__file__).resolve().parents[1]
 s=(root/'Core/Src/bq76922.c').read_text()
-a=s.index('BQ76922_Status_t BQ76922_EnterShutdown('); b=s.index('\nstatic BQ76922_Status_t',a)
+a=s.index('BQ76922_Status_t BQ76922_EnterShutdown('); b=min(i for i in (s.find('\nstatic BQ76922_Status_t',a), s.find('\n#if (BMS_OTP_SERVICE',a)) if i>0)
 h=r'''#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

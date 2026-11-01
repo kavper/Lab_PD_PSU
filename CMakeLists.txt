@@ -51,7 +51,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/board_mx.c
     Core/Src/bq25731.c
     Core/Src/bq76922.c
-    Core/Src/bms_soc.c
+    Core/Src/bms_gauge.c
+    Core/Src/bms_golden.c
+    Core/Src/bms_manager.c
+    Core/Src/bms_store.c
+    Core/Src/bms_store_codec.c
+    Core/Src/tlm_fields.c
     Core/Src/control_cv.c
     Core/Src/debug_uart.c
     Core/Src/fan_pwm.c
@@ -77,8 +82,10 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add project symbols (macros)
+option(BMS_OTP_SERVICE "Service build: BMS OTP CHECK/BURN commands and OTP_WRITE code" OFF)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    $<$<BOOL:${BMS_OTP_SERVICE}>:BMS_OTP_SERVICE=1U>
 )
 
 # Remove wrong libob.a library dependency when using cpp files
@@ -118,15 +125,12 @@ add_custom_target(flash
             -ob DBANK=0
     COMMAND "${STM32_PROGRAMMER_CLI}"
             -c port=SWD mode=UR reset=HWrst
-            -e all
-    COMMAND "${STM32_PROGRAMMER_CLI}"
-            -c port=SWD mode=UR reset=HWrst
             -w "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin" 0x08000000
             -v
             -rst
     DEPENDS ${CMAKE_PROJECT_NAME}
     USES_TERMINAL
-    COMMENT "DBANK=0 + mass-erase + flash ${CMAKE_PROJECT_NAME}.bin"
+    COMMENT "DBANK=0 + flash ${CMAKE_PROJECT_NAME}.bin (no mass erase: keeps the BMS gauge pages at 0x0803E000)"
 )
 
 # VS Code can keep an old selected target in its internal state.

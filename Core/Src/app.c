@@ -2,6 +2,7 @@
 
 #include "board_rev.h"
 #include "bms_board.h"
+#include "bms_manager.h"
 #include "bq76922.h"
 #include "control_cv.h"
 #include "dcdc_hs_policy.h"
@@ -1760,6 +1761,7 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
 
     PowerManager_Init(hi2c_pd);
     BQ76922_Bind(&g_bq76922, hi2c_pd);
+    BmsMgr_Init();
     App_ControlTimerInit();
 
     PowerStage_ForceSafeState();
@@ -1800,10 +1802,11 @@ void App_Init(HRTIM_HandleTypeDef *hhrtim,
                  (long)(BOARD_VPRE_MARGIN_V * 1000.0f),
                  (long)(BOARD_VPRE_VIN_FLOOR_V * 1000.0f));
 #if (BMS_ENABLE != 0U)
-    Debug_Printf("[APP] BMS: %uS Li-ion skip VC4 COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
+    Debug_Printf("[APP] BMS: %uS LiFePO4 %u mAh COV=%u mV CUV=%u mV prot=0x%02X/0x%02X",
                  (unsigned int)BMS_SERIES_COUNT,
-                 (unsigned int)BMS_COV_THRESHOLD_MV,
-                 (unsigned int)BMS_CUV_THRESHOLD_MV,
+                 (unsigned int)BMS_DESIGN_CAPACITY_MAH,
+                 (unsigned int)BMS_COV_EFFECTIVE_MV,
+                 (unsigned int)BMS_CUV_EFFECTIVE_MV,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_A,
                  (unsigned int)BMS_ENABLED_PROTECTIONS_B);
 #else
@@ -1857,6 +1860,7 @@ void App_Run(void)
     App_ControlSlowTask();
     /* BMS before PM: button/charger wake must open FETs before TPS grabs I2C4. */
     BQ76922_Task(&g_bq76922, HAL_GetTick());
+    BmsMgr_Task(HAL_GetTick());
     PowerManager_Task();
     App_BmsShutdownTask();
     App_StatusLedUpdate();

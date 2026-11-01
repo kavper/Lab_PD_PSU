@@ -6,131 +6,151 @@
 /*
  * BQ76922 on shared I2C4 with TPS25751.
  *
- * Hardware is a 4S Li-ion pack on the 5-channel AFE: VC4 is unused
- * (user pack / harness skips that tap). VCell Mode must omit cell 4
- * or CUV/imbalance on the empty input keeps CHG/DSG FETs off — button
- * wake and USB-C bring-up then look "alive" (G4 boots, cells 1/2/3/5
- * read OK) while the pack path stays locked.
+ * Pack: 5S1P LiFePO4, 6.7 Ah nominal (all five AFE inputs used, VCell Mode
+ * 0x001F).  The complete Data Memory image the firmware writes to RAM and
+ * the image that is burned to OTP are the same table: bms_golden.c.  This
+ * header only holds the human-readable numbers that table is built from.
  *
  * Wake hardware (BQ769x2):
  *   - Button → TS2 pulled to VSS (exit SHUTDOWN) — product wake, no host cmd
  *   - USB-C / charger → LD pin > VWAKEONLD (~1.45 V)
- *   - After wake, blank OTP needs MCU: FET_ENABLE + ALL_FETS_ON (RAM).
- *   - Optional OTP golden (docs/BQ76922_OTP_GOLDEN.md): BQ can turn FETs
- *     on from TS2 alone (FET_EN + FET_INIT_OFF=0 + Vcell Mode).
- *
- * Blank OTP boots FET Test Mode (Mfg Status Init FET_EN=0). Every wake must
- * FET_ENABLE() then ALL_FETS_ON() in software until OTP is programmed.
+ *   - Blank / foreign OTP: MCU writes the golden table to RAM on every wake,
+ *     then FET_ENABLE + ALL_FETS_ON.
+ *   - Golden OTP: BQ turns the FETs on from TS2 alone (FET_EN + FET_INIT_OFF=0)
+ *     and the MCU skips CONFIG_UPDATE when the fingerprint matches.
  *
  * BMS_ENABLE=0: skip I2C init/scan and do not trip on BMS faults (bring-up).
- * BMS_ENABLE=1: full monitor + shutdown on hardware safety faults.
  */
 #ifndef BMS_ENABLE
 #define BMS_ENABLE                       1U
 #endif
 
+/*
+ * OTP programming commands (BMS OTP CHECK / BURN) and the OTP_WRITE code path
+ * exist only in a service build: cmake --preset OtpService (or -DBMS_OTP_SERVICE=1).
+ * The production image keeps the read-only BMS OTP STATUS.
+ */
+#ifndef BMS_OTP_SERVICE
+#define BMS_OTP_SERVICE                  0U
+#endif
+
+/* ---------------------------------------------------------------- pack -- */
+#define BMS_CHEMISTRY_LFP                1U
+#define BMS_AFE_CELL_CHANNELS            5U
+#define BMS_CELL_COUNT                   BMS_AFE_CELL_CHANNELS
+#define BMS_SERIES_COUNT                 5U
+#define BMS_DESIGN_CAPACITY_MAH          6700
+/* Settings:VCell Mode — bit0=C1 … bit4=C5. 5S: every input is a cell. */
+#define BMS_VCELL_MODE                   0x001FU
+#define BMS_VCELL_MODE_5S                0x001FU
+#define BMS_VCELL_MODE_4S_SKIP4          0x0017U /* old harness, reference only */
+#define BMS_UNUSED_CELL_MV               (-1)
+#define BMS_CELL_USED(i)                 (((BMS_VCELL_MODE >> (i)) & 1U) != 0U)
+
+/* ------------------------------------------------- LFP voltage window -- */
+/*
+ * Hardware limits (AFE, autonomous, burned into OTP):
+ *   COV 3.70 V   — backstop above the 3.50 V charge target, below the cell
+ *                  absolute maximum region. Recovery 2 × 50.6 mV ≈ 3.59 V.
+ *   CUV 2.50 V   — hard floor. Software stops the load at 2.80 V first.
+ *   Shutdown 2.30 V/cell — BQ enters SHUTDOWN (nA drain) on a flat pack;
+ *                  a charger on PACK/LD aborts that, so the pack can be
+ *                  recovered by charging.
+ * Software window (G4):
+ *   charge target 3.50 V/cell (17.50 V pack), low warning 3.00 V,
+ *   load cut-off 2.80 V (under load, filtered).
+ */
+#define BMS_COV_THRESHOLD_MV             3700U
+#define BMS_CUV_THRESHOLD_MV             2500U
+#define BMS_COV_RECOVERY_HYST            2U   /* × 50.6 mV */
+#define BMS_CUV_RECOVERY_HYST            4U   /* × 50.6 mV ≈ 2.70 V recover */
+#define BMS_SHUTDOWN_CELL_MV             2300U
+#define BMS_SHUTDOWN_STACK_10MV          1000U /* 10.0 V stack */
+
+#define BMS_CHARGE_TARGET_CELL_MV        3500U
+#define BMS_CHARGE_TARGET_PACK_MV        (BMS_CHARGE_TARGET_CELL_MV * BMS_SERIES_COUNT)
+#define BMS_WARN_CELL_LOW_MV             3000U
+#define BMS_CUTOFF_CELL_MV               2800U
+#define BMS_WARN_CELL_HIGH_MV            3600U
+#define BMS_WARN_CELL_DELTA_MV           100U
+#define BMS_WARN_PACK_LOW_MV             (BMS_WARN_CELL_LOW_MV * BMS_SERIES_COUNT)
+#define BMS_WARN_PACK_HIGH_MV            (BMS_WARN_CELL_HIGH_MV * BMS_SERIES_COUNT)
+
+/* U1 thresholds in 50.6 mV steps, rounded to nearest. */
 #define BMS_U1_THRESHOLD_CODE_MV(mv)     ((uint8_t)((((uint32_t)(mv) * 10U) + 253U) / 506U))
 #define BMS_COV_THRESHOLD_CODE           BMS_U1_THRESHOLD_CODE_MV(BMS_COV_THRESHOLD_MV)
 #define BMS_CUV_THRESHOLD_CODE           BMS_U1_THRESHOLD_CODE_MV(BMS_CUV_THRESHOLD_MV)
-#define BMS_COV_RECOVERY_CODE            BMS_U1_THRESHOLD_CODE_MV(BMS_COV_RECOVERY_MV)
-#define BMS_CUV_RECOVERY_CODE            BMS_U1_THRESHOLD_CODE_MV(BMS_CUV_RECOVERY_MV)
+/* Effective trip voltages after rounding (3694 mV / 2479 mV). */
+#define BMS_COV_EFFECTIVE_MV             ((BMS_COV_THRESHOLD_CODE * 506U) / 10U)
+#define BMS_CUV_EFFECTIVE_MV             ((BMS_CUV_THRESHOLD_CODE * 506U) / 10U)
 
-/* AFE has 5 cell registers; series count is 4 (skip VC4). */
-#define BMS_AFE_CELL_CHANNELS            5U
-#define BMS_CELL_COUNT                   BMS_AFE_CELL_CHANNELS
-#define BMS_SERIES_COUNT                 4U
+/* ------------------------------------------------------- temperature -- */
+/*
+ * TS1 = 10 k NTC 103AT (R68) on the 18 k pull-up model: TI default TS1 Config
+ * 0x07 (thermistor, 18 k model, used for cell protections).
+ * LiFePO4 must not be charged below 0 °C.
+ */
+#define BMS_TS1_CONFIG                   0x07U
+#define BMS_OTC_C                        45
+#define BMS_OTC_RECOVERY_C               40
+#define BMS_UTC_C                        0
+#define BMS_UTC_RECOVERY_C               5
+#define BMS_OTD_C                        60
+#define BMS_OTD_RECOVERY_C               55
+#define BMS_UTD_C                        (-20)
+#define BMS_UTD_RECOVERY_C               (-15)
+#define BMS_OTINT_C                      85
+#define BMS_OTINT_RECOVERY_C             80
 
-/* Settings:VCell Mode — bit0=C1 … bit4=C5. 4S skip VC4: cells 1,2,3,5. */
-#define BMS_VCELL_MODE                   0x0017U
-#define BMS_VCELL_MODE_4S                BMS_VCELL_MODE
-#define BMS_VCELL_MODE_5S                0x001FU
-#define BMS_UNUSED_CELL_MV               (-1)
+/*
+ * Enabled Protections A (TI bits 7..2): SCD=0x80 OCD2=0x40 OCD1=0x20
+ * OCC=0x10 COV=0x08 CUV=0x04.  0xBC = SCD|OCD1|OCC|COV|CUV.
+ * Enabled Protections B: OTF=0x80 OTINT=0x40 OTD=0x20 OTC=0x10 UTINT=0x04
+ * UTD=0x02 UTC=0x01.  0x73 = OTINT|OTD|OTC|UTD|UTC.
+ * CHG/DSG FET Protections B keep the TI defaults (0xD5 / 0xE6), which map
+ * OTC/UTC to CHG and OTD/UTD to DSG.
+ */
+#define BMS_ENABLED_PROTECTIONS_A        0xBCU
+#define BMS_ENABLED_PROTECTIONS_B        0x73U
+#define BMS_CHG_FET_PROTECTIONS_A        0x98U
+#define BMS_DSG_FET_PROTECTIONS_A        0xE4U
+#define BMS_CHG_FET_PROTECTIONS_B        0xD5U
+#define BMS_DSG_FET_PROTECTIONS_B        0xE6U
 
-#define BMS_COV_THRESHOLD_MV             4250U
-#define BMS_CUV_THRESHOLD_MV             2800U
-#define BMS_COV_RECOVERY_MV              4150U
-#define BMS_CUV_RECOVERY_MV              2900U
+/* ---------------------------------------------------------- balancing -- */
+/*
+ * Autonomous AFE balancing, top of charge only (LFP plateau voltages say
+ * nothing about SOC, so no balancing there).  Internal FETs through the
+ * 100 Ω series resistors: ≈15 mA per cell.
+ * CB_CHG|CB_RLX|CB_SLEEP|CB_NOSLEEP = 0x0F.
+ */
+#define BMS_BALANCING_CONFIG             0x0FU
+#define BMS_CB_MIN_CELL_TEMP_C           0
+#define BMS_CB_MAX_CELL_TEMP_C           50
+#define BMS_CB_MAX_INTERNAL_TEMP_C       70
+#define BMS_CB_INTERVAL_S                20U
+#define BMS_CB_MAX_CELLS                 2U
+#define BMS_CB_MIN_CELL_MV_CHG           3350U
+#define BMS_CB_MIN_DELTA_CHG_MV          20U
+#define BMS_CB_STOP_DELTA_CHG_MV         8U
+#define BMS_CB_MIN_CELL_MV_RLX           3350U
+#define BMS_CB_MIN_DELTA_RLX_MV          20U
+#define BMS_CB_STOP_DELTA_RLX_MV         8U
 
-#define BMS_WARN_CELL_DELTA_MV           200U
-#define BMS_WARN_CELL_LOW_MV             3000U
-#define BMS_WARN_CELL_HIGH_MV            4200U
-#define BMS_WARN_PACK_LOW_MV             11000U
-#define BMS_WARN_PACK_HIGH_MV            17000U
-
+/* ------------------------------------------------------------ current -- */
 /* BQ76922 SRP/SRN sense resistor (pack current). Not the DCDC INA296 shunt. */
 #define BMS_SENSE_MOHM                   5U
-/*
- * CC Gain = 7.5684 / Rsense_mOhm (BQ76922 TRM, VREF2=1.24 V).
- * Older BQ769x2 notes used 7.4768 (default OTP assumes ~1 mOhm → 7.4768).
- * With a 5 mOhm shunt, write 1.51368 or CC2/i_pack reads ~5× too high.
- * Capacity Gain = CC Gain × 298261.6178 (TRM).
- */
+/* CC Gain = 7.5684 / Rsense_mOhm (BQ76922 TRM, VREF2=1.24 V).
+ * Capacity Gain = CC Gain × 298261.6178. */
 #define BMS_CC_GAIN                      (7.5684f / (float)BMS_SENSE_MOHM)
 #define BMS_CAPACITY_GAIN                (BMS_CC_GAIN * 298261.6178f)
 
-/*
- * Enabled Protections A (TI TRM bits 7..2):
- *   SCD=0x80 OCD2=0x40 OCD1=0x20 OCC=0x10 COV=0x08 CUV=0x04
- * 0xBC = SCD|OCD1|OCC|COV|CUV (no OCD2 — SCD covers hard shorts).
- * Never use the reversed bit0..5 map; that labeled real OCC (0x10) as COV.
- */
-#define BMS_ENABLED_PROTECTIONS_A        0xBCU
-/* Prot B: leave OT/UT off until TS pins are proven; TS2 is the wake button. */
-#define BMS_ENABLED_PROTECTIONS_B        0x00U
-
-/*
- * FET Options 0x9308: SFET|HOST_FETOFF_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D).
- * PDSG_EN soft-starts PACK caps before DSG — without it ALL_FETS_ON into
- * VIN/GaN capacitance trips SCD (sa bit7) and the pack path collapses hard
- * enough to BOR the 3V3 rail (PIN+POR reboot loop).
- */
-#define BMS_FET_OPTIONS                  0x1DU
-/*
- * Mfg Status Init 0x9343: default 0x0040 (PF_EN). Add FET_EN (bit4) → 0x0050
- * so OTP wake leaves firmware FET control (not FET Test Mode).
- */
-#define BMS_MFG_STATUS_INIT              0x0050U
-/* Power:Shutdown:Auto Shutdown Time 0x9254 — 0 = never auto-reenter SHUTDOWN. */
-#define BMS_AUTO_SHUTDOWN_TIME           0U
-/*
- * CHG/DSG FET Protections A — keep TI defaults (only legal fast-path values):
- *   CHG 0x98 = SCD|OCC|COV; DSG 0xE4 = SCD|OCD1|CUV (TRM).
- * Written explicitly so RAM bring-up and OTP golden match.
- */
-#define BMS_CHG_FET_PROTECTIONS_A        0x98U
-#define BMS_DSG_FET_PROTECTIONS_A        0xE4U
-/*
- * CFETOFF / DFETOFF Pin Config (0x92FA / 0x92FB): PIN_FXN=0 → unused.
- * HW rev2 leaves TP29/TP30 floating; if PIN_FXN=CFETOFF (0x02) and the pin
- * floats high (active-high default), CHG stays forced off forever
- * (fet≈0x14 = DSG + DCHG_PIN) even after ALL_FETS_ON. Explicit 0x00.
- */
-#define BMS_CFETOFF_PIN_CONFIG           0x00U
-#define BMS_DFETOFF_PIN_CONFIG           0x00U
-/* HW rev2 uses the BQ7692202-style regulator setup: REG0 feeds REGIN and
- * REG1 is enabled at 3.3 V.  These values must survive a hostless wake. */
-#define BMS_REG1_CONFIG                  0x0DU
-#define BMS_REG0_CONFIG                  0x01U
-/* TS2 is a wake push-button, not a thermistor/ADC input. */
-#define BMS_TS2_CONFIG                   0x00U
-/* No PCHG hardware is fitted.  Keep precharge disabled; PDSG is independent. */
-#define BMS_PCHG_START_MV                0U
-#define BMS_PCHG_STOP_MV                 0U
-/* Predischarge Timeout 0x930E (U1, ~10 ms/step); Stop Delta 0x930F (U1, 10 mV). */
-#define BMS_PDSG_TIMEOUT                 0x32U  /* ~500 ms max predischarge */
-#define BMS_PDSG_STOP_DELTA              50U    /* exit PDSG when |stack-pack| < 500 mV */
-/*
- * SCD Threshold 0x9286 index — hardware mV on sense, independent of CC Gain.
- * 0x05 ≈ 100 mV → ~20 A across 5 mOhm.
- */
+/* SCD Threshold index — hardware mV on sense. 0x05 ≈ 100 mV → ~20 A @ 5 mΩ. */
 #define BMS_SCD_THRESHOLD                0x05U
-/*
- * OCC / OCD1 Threshold: U1, 2 mV/LSB on the sense resistor (not CC Gain).
- * Default OCC=2 → 4 mV / 5 mOhm ≈ 0.8 A — trips immediately when BQ25731
- * tries ~8 A charge. Code = I_mA * R_mOhm / 2000, clamped to TI min/max.
- */
-#define BMS_OCC_THRESHOLD_MA             10000U /* ~10 A @ 5 mOhm → 50 mV → code 25 */
-#define BMS_OCD1_THRESHOLD_MA            15000U /* ~15 A @ 5 mOhm → 75 mV → code 38 */
+/* OCC / OCD1: U1, 2 mV/LSB on the sense resistor.  6.7 Ah pack:
+ * OCC 10 A (1.5 C, above any charger setting), OCD1 15 A (2.2 C). */
+#define BMS_OCC_THRESHOLD_MA             10000U
+#define BMS_OCD1_THRESHOLD_MA            15000U
 #define BMS_SENSE_MV_CODE_2MV(ma) \
     ((uint8_t)((((uint32_t)(ma) * (uint32_t)BMS_SENSE_MOHM) + 1000U) / 2000U))
 #define BMS_OCC_THRESHOLD_CODE \
@@ -141,16 +161,24 @@
     ((BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA) < 2U) ? 2U : \
      ((BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA) > 100U) ? 100U : \
       BMS_SENSE_MV_CODE_2MV(BMS_OCD1_THRESHOLD_MA)))
-/*
- * OCC recovers when I <= this for Recovery:Time (default -200 mA needs
- * discharge). With CHG latched off and a USB charger still raising PACK,
- * I≈0 never meets -200 mA and PACK-TOS also fails — CHG stays off forever.
- * +100 mA lets I≈0 clear OCC once the charge pulse is gone.
- */
+/* OCC recovers when I <= this (default −200 mA never clears at I≈0). */
 #define BMS_OCC_RECOVERY_MA              100
-/* Body Diode Threshold 0x9273 (mA after CC Gain). */
 #define BMS_BODY_DIODE_THRESHOLD_MA      2000U
 
-#define BMS_CELL_USED(i)                 (((BMS_VCELL_MODE >> (i)) & 1U) != 0U)
+/* ------------------------------------------------------ FET / pins etc -- */
+/* FET Options 0x9308: SFET|HOST_FET_EN|FET_CTRL_EN|PDSG_EN (TI demo 0x1D). */
+#define BMS_FET_OPTIONS                  0x1DU
+/* Mfg Status Init 0x9343: PF_EN (TI default) | FET_EN → autonomous FETs. */
+#define BMS_MFG_STATUS_INIT              0x0050U
+#define BMS_AUTO_SHUTDOWN_TIME           0U
+#define BMS_CFETOFF_PIN_CONFIG           0x00U
+#define BMS_DFETOFF_PIN_CONFIG           0x00U
+#define BMS_REG1_CONFIG                  0x0DU
+#define BMS_REG0_CONFIG                  0x01U
+#define BMS_TS2_CONFIG                   0x00U /* wake push-button, not an NTC */
+#define BMS_PCHG_START_MV                0U
+#define BMS_PCHG_STOP_MV                 0U
+#define BMS_PDSG_TIMEOUT                 0x32U /* ~500 ms */
+#define BMS_PDSG_STOP_DELTA              50U   /* 500 mV */
 
 #endif /* BMS_BOARD_H */
