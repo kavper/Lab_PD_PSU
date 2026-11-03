@@ -44,6 +44,10 @@
 #define PM_AUTO_SRC_FAIL_WINDOW_MS    6000U
 #define PM_AUTO_TRY_SNK_MS           15000U
 #define PM_RESET_AC_POLL_MS             50U
+/* The BQ VBUS node decays with tau ~2.9 s: ~1.2 s after a 5 V sink session,
+ * ~5 s after 20 V.  Restoring earlier makes every Attached.SRC collapse,
+ * and after a few of those a laptop disables its port for ~30 s. */
+#define PM_RESET_AC_GIVEUP_MS        8000U
 #define BQ25731_CHGSTATUS_AC_STAT   0x8000U
 #define PM_COHERENT_TELEMETRY_PHASE     8U
 /* AUTO: Type-C attach role + fresh caps + Dual-Role Power + user mode.
@@ -87,6 +91,7 @@ typedef enum {
     PM_JOB_MODE_SWAP,
     PM_JOB_BQ_WATCH_OPTION3,
     PM_JOB_BQ_POLL_ACSTAT,
+    PM_JOB_REFRESH_SOURCE_CAPS,
     PM_JOB_BQ_TRACE_IIN_HOST,
     PM_JOB_BQ_READ_OPTION0,
     PM_JOB_BQ_WRITE_STARTUP_OPTION0,
@@ -204,6 +209,12 @@ typedef struct {
     bool reset_bq_ac_valid;
     bool reset_bq_ac;
     uint32_t reset_bq_ac_next_ms;
+    /* HIZ released once OTG is verified off, so the BQ drains its own VBUS
+     * node into the pack instead of holding it for many seconds. */
+    bool reset_hiz_released;
+    /* GSrC once per session when a SINK contract has no partner PDO list
+     * (G4 restarted under a live contract, or the caps event was lost). */
+    uint32_t caps_refresh_gen;
     uint8_t mode_swap_task_rc;
     bool port_write_pending;
     bool port_config_valid;
@@ -331,7 +342,7 @@ static PowerManager_Context_t g_pm;
 typedef struct {
     uint32_t ms;
     uint8_t kind;   /* 1 STATUS 2 POWER_PATH 3 VBUS 4 INT_EVENT 5 G4 Option3
-                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK 12 INT_MASK lost */
+                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK 12 INT_MASK lost 13 GSrC refresh */
     uint8_t a;
     uint16_t b;
     uint32_t c;
@@ -443,6 +454,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_MODE_SWAP: return "MODE_SWAP";
         case PM_JOB_BQ_WATCH_OPTION3: return "BQ_WATCH_OPTION3";
         case PM_JOB_BQ_POLL_ACSTAT: return "BQ_POLL_ACSTAT";
+        case PM_JOB_REFRESH_SOURCE_CAPS: return "REFRESH_SOURCE_CAPS";
         case PM_JOB_BQ_TRACE_IIN_HOST: return "BQ_TRACE_IIN_HOST";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION0: return "BQ_WRITE_QUIET_OPTION0";
@@ -594,6 +606,7 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms,
     g_pm.session_reset_busy = true;
     g_pm.session_reset_wait_vsafe0 = false;
     g_pm.reset_bq_ac_valid = false;
+    g_pm.reset_hiz_released = false;
     g_pm.session_reset_seq++;
     g_pm.status.pd_reset_seq = g_pm.session_reset_seq;
     g_pm.status.pd_reset_busy = true;
@@ -1245,6 +1258,21 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
         !g_pm.session_bq_stop_verified) {
         return;
     }
+    if (!g_pm.reset_hiz_released && g_pm.bq_option3_valid &&
+        (g_pm.bq_init == PM_BQ_INIT_DONE)) {
+        /* OTG is verified off and Type-C is Disabled, so leaving HIZ cannot
+         * source VBUS.  In HIZ the BQ draws nothing from its VBUS node,
+         * which then stays above VVBUS_CONVENZ for >8 s after a 20 V sink
+         * session and blocks the next OTG start. */
+        g_pm.reset_hiz_released = true;
+        g_pm.bq_option3_target =
+            (uint16_t)((g_pm.status.bq.charge_option3 |
+                        BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) &
+                       (uint16_t)~(BQ25731_CHARGE_OPTION3_EN_HIZ |
+                                   BQ25731_CHARGE_OPTION3_EN_OTG));
+        g_pm.bq_option3_write_pending = true;
+        return;
+    }
 
     elapsed = now_ms - g_pm.session_reset_disable_ms;
     vsafe0 = (g_pm.status.tps.vbus_mv < PM_SESSION_VSAFE0_MV) ||
@@ -1294,7 +1322,7 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
     if ((g_pm.status.requested_mode != POWER_MANAGER_USER_SINK_ONLY) &&
         (g_pm.bq_init == PM_BQ_INIT_DONE) &&
         (!g_pm.reset_bq_ac_valid || g_pm.reset_bq_ac) &&
-        (elapsed < PM_SESSION_VSAFE0_GIVEUP_MS)) {
+        (elapsed < PM_RESET_AC_GIVEUP_MS)) {
         return;
     }
 
@@ -2044,6 +2072,13 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
     g_pm.job = PM_JOB_NONE;
     g_pm.last_job = completed_job;
     data = TPS25751_GetResult(&g_pm.tps, &length);
+    if (completed_job == PM_JOB_REFRESH_SOURCE_CAPS) {
+        /* Source_Capabilities arrive as INT_EVENT bit 14 if the partner
+         * answers; a reject only means no list for this session. */
+        PowerManager_Log(13U, (uint8_t)operation_status,
+                         g_pm.tps.task_return_code, g_pm.attach_generation);
+        return;
+    }
     if (completed_job == PM_JOB_BQ_POLL_ACSTAT) {
         bool valid = false;
         const uint16_t raw16 = (operation_status == TPS25751_OK) ?
@@ -3243,6 +3278,10 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_REFRESH_SOURCE_CAPS:
+            status = TPS25751_StartCommand(&g_pm.tps, "GSrC", NULL, 0U, 1U);
+            break;
+
         case PM_JOB_BQ_POLL_ACSTAT:
             bq_status = BQ25731_StartRead16(&g_pm.bq,
                                             BQ25731_REG_CHARGER_STATUS);
@@ -3456,6 +3495,7 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         PowerManager_TickReached(now_ms, g_pm.event_mask_check_ms)) {
         return PM_JOB_READ_INT_MASK;
     }
+
     if (g_pm.event_clear_pending) {
         return PM_JOB_CLEAR_EVENT;
     }
@@ -3464,6 +3504,16 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         PowerManager_TickReached(now_ms, s_watch_next_ms)) {
         s_watch_next_ms = now_ms + g_pm_debug_bq_watch_ms;
         return PM_JOB_BQ_WATCH_OPTION3;
+    }
+    if (PowerManager_HasTypecPowerConnection() &&
+        (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+        !g_pm.status.pd_reset_busy && !g_pm.session_reset_busy &&
+        !g_pm.partner_source_caps_current && !g_pm.session_caps_event_this_gen &&
+        g_pm.coherent_snapshot_valid &&
+        ((uint32_t)(now_ms - g_pm.snap_captured_ms) > 1000U) &&
+        (g_pm.caps_refresh_gen != g_pm.attach_generation + 1U)) {
+        g_pm.caps_refresh_gen = g_pm.attach_generation + 1U;
+        return PM_JOB_REFRESH_SOURCE_CAPS;
     }
     if (g_pm.local_source_caps_pending && PowerManager_HasTypecPowerConnection() &&
         !g_pm.status.pd_reset_busy && !g_pm.session_reset_busy &&
@@ -3683,6 +3733,23 @@ void PowerManager_GetStatus(PowerManager_Status_t *out)
     }
 }
 
+/* AUTO on a fresh attach keeps SINK only from a partner that offers more
+ * than 5 V/15 W, or that cannot sink at all.  A live SINK session may
+ * enter AUTO without a reset only in that case. */
+static bool PowerManager_AutoKeepsLiveSink(void)
+{
+    const TPS25751_Capabilities_t *c = &g_pm.partner_source_caps;
+
+    if ((g_pm.status.tps.role != TPS25751_ROLE_SINK) ||
+        !g_pm.partner_source_caps_current || !g_pm.partner_source_caps_fresh ||
+        (c->count == 0U)) {
+        return false;
+    }
+    return (c->max_voltage_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+           (c->max_power_mw > PM_AUTO_WEAK_SRC_MAX_MW) ||
+           !c->first_pdo_dual_role_power;
+}
+
 bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
 {
     const uint32_t now_ms = HAL_GetTick();
@@ -3709,6 +3776,9 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
     if ((mode != POWER_MANAGER_USER_OFF) &&
         !((mode == POWER_MANAGER_USER_SOURCE_ONLY) &&
           (g_pm.status.tps.role != TPS25751_ROLE_SOURCE)) &&
+        !((mode == POWER_MANAGER_USER_AUTO) &&
+          (g_pm.status.tps.role == TPS25751_ROLE_SINK) &&
+          !PowerManager_AutoKeepsLiveSink()) &&
         PowerManager_HasTypecPowerConnection() &&
         g_pm.status.tps.active_rdo.valid &&
         !g_pm.session_reset_busy && !g_pm.status.pd_reset_busy &&
@@ -3717,6 +3787,18 @@ bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
         /* The PD policy applies now; only the Type-C mode waits for detach. */
         g_pm.status.applied_mode = mode;
         g_pm.status.applied_mode_valid = true;
+        if ((mode == POWER_MANAGER_USER_AUTO) &&
+            (g_pm.status.tps.role == TPS25751_ROLE_SINK)) {
+            /* Strong or source-only partner: AUTO would sink anyway.  Keep
+             * the session and its PDO list (ResetPolicy would wipe it). */
+            g_pm.policy_desired_role = TPS25751_ROLE_SINK;
+            g_pm.policy_decided = true;
+            g_pm.policy_phase = PM_POLICY_LOCKED;
+            PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
+            g_pm.port_mode_deferred = true;
+            g_pm.mode_change_path = 3U;
+            return true;
+        }
         if (mode == POWER_MANAGER_USER_AUTO) {
             /* AUTO picks the role from the partner's Source PDOs. */
             PowerManager_ResetPolicy(now_ms, true);
