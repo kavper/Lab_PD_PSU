@@ -22,7 +22,8 @@ typedef enum {POWER_MANAGER_USER_AUTO=0,POWER_MANAGER_USER_SINK_ONLY,POWER_MANAG
 enum {PM_POLICY_IDLE=0,PM_POLICY_WAIT_SETTLE=1,PM_POLICY_LOCKED=11};
 #define PM_AUTO_WEAK_SRC_MAX_MW 15000U
 #define PM_AUTO_WEAK_SRC_MAX_MV 5000U
-typedef struct {uint8_t count;uint32_t max_voltage_mv,max_power_mw;bool first_pdo_dual_role_power;} TPS25751_Capabilities_t;
+typedef struct {uint32_t raw;} TPS25751_Pdo_t;
+typedef struct {uint8_t count;uint32_t max_voltage_mv,max_power_mw;bool first_pdo_dual_role_power;TPS25751_Pdo_t pdo[7];} TPS25751_Capabilities_t;
 static struct {
  struct {struct {bool attached;TPS25751_PowerRole_t role;uint8_t connection_state;
   struct {bool valid;} active_rdo;} tps;
@@ -69,7 +70,7 @@ int main(void){
  assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));
  assert(!resets&&policy_resets==1&&g_pm.mode_swap_target==TPS25751_ROLE_UNKNOWN);
  /* SINK -> AUTO must end like a fresh AUTO attach. */
- #define CAPS(mv,mw,drp) do{g_pm.partner_source_caps=(TPS25751_Capabilities_t){1,mv,mw,drp};\
+ #define CAPS(mv,mw,drp) do{g_pm.partner_source_caps=(TPS25751_Capabilities_t){1,mv,mw,drp,{{0}}};\
   g_pm.partner_source_caps_current=g_pm.partner_source_caps_fresh=true;}while(0)
  live(TPS25751_ROLE_SINK);g_pm.status.requested_mode=POWER_MANAGER_USER_SINK_ONLY;CAPS(20000,100000,true); /* monitor */
  assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));
@@ -79,6 +80,9 @@ int main(void){
  assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));assert(!resets);
  live(TPS25751_ROLE_SINK);g_pm.status.requested_mode=POWER_MANAGER_USER_SINK_ONLY;CAPS(5000,15000,true); /* laptop on battery, iPad */
  assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));assert(resets==1&&!g_pm.status.applied_mode_valid);
+ live(TPS25751_ROLE_SINK);g_pm.status.requested_mode=POWER_MANAGER_USER_SINK_ONLY;CAPS(5000,15000,true);
+ assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));assert(resets==1);
+ resets=0;
  live(TPS25751_ROLE_SINK);g_pm.status.requested_mode=POWER_MANAGER_USER_SINK_ONLY; /* caps unknown */
  assert(PowerManager_SetUserMode(POWER_MANAGER_USER_AUTO));assert(resets==1);
  /* OFF, no PD contract, cable only: full port reset as before. */

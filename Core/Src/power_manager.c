@@ -205,6 +205,12 @@ typedef struct {
     uint8_t auto_src_fail_count;
     uint32_t auto_try_snk_until_ms;
     bool auto_try_snk;
+    /* AUTO: a dual-role partner asked while we source may answer with a
+     * 5 V-only list (a laptop does).  Probe once with Try.SNK so it sources
+     * and shows its real offer.  0 none, 1 probing, 2 verified 5 V only.
+     * Cleared after 5 s without a partner outside our own resets. */
+    uint8_t auto_probe;
+    uint32_t auto_no_partner_since_ms;
     /* BQ ChargerStatus AC_STAT polled while the port is Disabled. */
     bool reset_bq_ac_valid;
     bool reset_bq_ac;
@@ -342,7 +348,7 @@ static PowerManager_Context_t g_pm;
 typedef struct {
     uint32_t ms;
     uint8_t kind;   /* 1 STATUS 2 POWER_PATH 3 VBUS 4 INT_EVENT 5 G4 Option3
-                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK 12 INT_MASK lost 13 GSrC refresh */
+                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK 12 INT_MASK lost 13 GSrC refresh 15 AUTO re-decide on new caps 16 AUTO probe/charge */
     uint8_t a;
     uint16_t b;
     uint32_t c;
@@ -1701,10 +1707,20 @@ static TPS25751_PowerRole_t PowerManager_AutoRoleFromPartnerSourceCaps(void)
     typec_role = g_pm.typec_initial_role_latched ?
                  g_pm.typec_initial_role : g_pm.status.tps.role;
 
-    /* Already sinking (incl. 5 V powerbank) → stay SINK / charge pack. */
+    /* The partner is the source, so its list is its real offer: charge
+     * from a charger or from a dual-role partner above 5 V/15 W; a
+     * dual-role partner at 5 V only gets charged by us instead. */
     if (PowerManager_IsAttachedAsSink() ||
         PowerManager_HasLiveSinkContract()) {
-        return TPS25751_ROLE_SINK;
+        const TPS25751_Capabilities_t *c = &g_pm.partner_source_caps;
+        if (!g_pm.partner_source_caps_fresh ||
+            !g_pm.partner_source_caps_current || (c->count == 0U) ||
+            !c->first_pdo_dual_role_power ||
+            (c->max_voltage_mv > PM_AUTO_WEAK_SRC_MAX_MV) ||
+            (c->max_power_mw > PM_AUTO_WEAK_SRC_MAX_MW)) {
+            return TPS25751_ROLE_SINK;
+        }
+        return TPS25751_ROLE_SOURCE;
     }
 
     if (!PowerManager_IsAttachedAsSource()) {
@@ -1807,6 +1823,35 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
                  PowerManager_RoleToString(desired),
                  reason);
 
+    if ((desired == TPS25751_ROLE_SOURCE) &&
+        (current == TPS25751_ROLE_SOURCE) &&
+        g_pm.partner_source_caps.first_pdo_dual_role_power &&
+        g_pm.partner_source_caps_fresh && (g_pm.partner_source_caps.count > 0U)) {
+        if (g_pm.auto_probe == 0U) {
+            /* 5 V-only answer while we source: see what it offers as source. */
+            g_pm.auto_probe = 1U;
+            g_pm.auto_try_snk = true;
+            g_pm.auto_try_snk_until_ms = now_ms + PM_AUTO_TRY_SNK_MS;
+            g_pm.policy_phase = PM_POLICY_LOCKED;
+            PowerManager_Log(16U, 1U, g_pm.partner_source_caps.count, max_mv);
+            PowerManager_BeginSessionReset(now_ms, "AUTO probe partner as source", true);
+            return;
+        }
+        /* It would not source, or sourced 5 V only: keep charging it. */
+        g_pm.auto_probe = 2U;
+    }
+    if ((desired == TPS25751_ROLE_SOURCE) &&
+        (current == TPS25751_ROLE_SINK)) {
+        /* Dual-role partner at 5 V only: charge it.  PR_Swap to source
+         * cannot work (BQ OTG start), so re-attach with Try.SRC. */
+        g_pm.auto_probe = 2U;
+        g_pm.auto_try_snk = false;
+        g_pm.policy_phase = PM_POLICY_LOCKED;
+        PowerManager_Log(16U, 2U, g_pm.partner_source_caps.count, max_mv);
+        PowerManager_BeginSessionReset(now_ms, "AUTO charge 5 V partner", true);
+        return;
+    }
+
     /* Exactly one software PR_SWAP initiation path: SWSk when we must
      * yield Source→Sink.  If already at the desired role, do nothing. */
     if ((desired == TPS25751_ROLE_SINK) &&
@@ -1819,6 +1864,26 @@ static void PowerManager_DecidePolicy(uint32_t now_ms)
     }
 }
 
+/* A DRP partner on external power (laptop) may answer first with a 5 V-only
+ * list and send its full one a moment later.  AUTO must not stay on a
+ * SOURCE decision taken from the short list. */
+static void PowerManager_AutoRecheckSource(uint32_t now_ms)
+{
+    if ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
+        !g_pm.policy_decided ||
+        (g_pm.policy_desired_role != TPS25751_ROLE_SOURCE) ||
+        !PowerManager_IsAttachedAsSource() ||
+        (PowerManager_AutoRoleFromPartnerSourceCaps() != TPS25751_ROLE_SINK)) {
+        return;
+    }
+    g_pm.policy_decided = false;
+    g_pm.policy_swap_attempted = false;
+    g_pm.auto_swap_command_sent = false;
+    g_pm.policy_phase = PM_POLICY_DECIDE;
+    g_pm.policy_next_ms = now_ms;
+    PowerManager_Log(15U, 0U, g_pm.partner_source_caps.count,
+                     g_pm.partner_source_caps.max_voltage_mv);
+}
 
 static void PowerManager_MaintainPolicy(uint32_t now_ms)
 {
@@ -2218,6 +2283,19 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                          (unsigned long)PM_POLICY_SWAP_RETRY_MS);
             if (operation_status != TPS25751_COMMAND_ERROR) {
                 PowerManager_HandleTpsError(operation_status, now_ms);
+            }
+            if ((completed_job == PM_JOB_SWAP_TO_SINK) &&
+                (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+                (g_pm.policy_desired_role == TPS25751_ROLE_SINK) &&
+                !g_pm.auto_try_snk) {
+                /* The partner offers more than 5 V/15 W but refuses to swap
+                 * (a laptop on its charger).  Re-attach with Try.SNK so it
+                 * becomes the source, as on a fresh plug where it wins. */
+                g_pm.auto_try_snk = true;
+                g_pm.auto_try_snk_until_ms = now_ms + PM_AUTO_TRY_SNK_MS;
+                PowerManager_Log(11U, 2U, 0U, now_ms);
+                PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
+                PowerManager_BeginSessionReset(now_ms, "AUTO yield to sink", true);
             }
         } else if ((completed_job == PM_JOB_BQ_READ_CONFIG_BLOCK) ||
                    (completed_job == PM_JOB_BQ_READ_STATUS_BLOCK) ||
@@ -2720,6 +2798,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_TryLogContractPdos();
             g_pm.policy_phase = PM_POLICY_DECIDE;
             g_pm.policy_next_ms = now_ms + PM_POLICY_STEP_MS;
+            PowerManager_AutoRecheckSource(now_ms);
             break;
 
         case PM_JOB_READ_LOCAL_SOURCE_CAPS:
@@ -2769,6 +2848,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             PowerManager_LogCapabilities("SOURCE",
                                          &g_pm.partner_source_caps);
             PowerManager_TryLogContractPdos();
+            PowerManager_AutoRecheckSource(now_ms);
             break;
 
         case PM_JOB_SWAP_TO_SOURCE:
@@ -3697,6 +3777,15 @@ void PowerManager_Task(void)
             g_pm.mode_update_pending = true;
         }
         PowerManager_Log(11U, 0U, 0U, now_ms);
+    }
+    if (PowerManager_HasTypecPowerConnection() || g_pm.session_reset_busy ||
+        g_pm.session_reset_wait_vsafe0) {
+        g_pm.auto_no_partner_since_ms = 0U;
+    } else if (g_pm.auto_no_partner_since_ms == 0U) {
+        g_pm.auto_no_partner_since_ms = now_ms;
+    } else if ((g_pm.auto_probe != 0U) &&
+               ((uint32_t)(now_ms - g_pm.auto_no_partner_since_ms) > 5000U)) {
+        g_pm.auto_probe = 0U;
     }
     if (g_pm_debug_mode_request <= (uint8_t)POWER_MANAGER_USER_OFF) {
         const uint8_t req = g_pm_debug_mode_request;
