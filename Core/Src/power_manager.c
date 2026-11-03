@@ -2,6 +2,8 @@
 
 #include "debug_uart.h"
 #include "tps_int_event.h"
+#include "pd_source_readiness.h"
+#include "charge_balance_limits.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -84,12 +86,17 @@ typedef enum {
     PM_JOB_BQ_WRITE_STARTUP_OPTION3,
     PM_JOB_BQ_READ_OPTION3,
     PM_JOB_BQ_WRITE_OPTION3,
+    PM_JOB_BQ_VERIFY_STOP_OPTION3,
     PM_JOB_BQ_WRITE_ADC,
     PM_JOB_BQ_VERIFY_ADC,
     PM_JOB_BQ_READ_ID,
     PM_JOB_BQ_READ_CONFIG_BLOCK,
     PM_JOB_BQ_READ_STATUS_BLOCK,
-    PM_JOB_BQ_READ_ADC_BLOCK
+    PM_JOB_BQ_READ_ADC_BLOCK,
+    PM_JOB_CHARGE_CAP_READ,
+    PM_JOB_CHARGE_CAP_WRITE_I,
+    PM_JOB_CHARGE_CAP_WRITE_V,
+    PM_JOB_CHARGE_CAP_VERIFY
 } PowerManager_Job_t;
 
 typedef enum {
@@ -192,6 +199,9 @@ typedef struct {
     bool bq_emergency_readback_pending;
     uint16_t bq_emergency_option3_target;
     bool coherent_snapshot_valid;
+    uint32_t snap_captured_ms;
+    uint32_t snap_pdo_raw;
+    uint32_t snap_rdo_raw;
     bool snap_attached;
     uint8_t snap_connection_state;
     uint8_t snap_typec_port_state;
@@ -211,6 +221,15 @@ typedef struct {
     bool bq_option3_read_pending;
     bool bq_option3_write_pending;
     bool bq_option3_valid;
+    uint8_t charge_cap_phase; /* 0=read,1=write I,2=write V,3=verify */
+    bool charge_cap_voltage_pending;
+    bool charge_cap_verified;
+    bool charge_cap_fault;
+    uint32_t charge_cap_next_ms;
+    uint32_t charge_cap_applied_count;
+
+    bool bq_option3_verify_pending;
+    bool session_bq_stop_verified;
     uint16_t bq_option3_target;
     bool event_mask_ready;
     bool event_mask_write_pending;
@@ -351,6 +370,7 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_BQ_WRITE_STARTUP_OPTION3: return "BQ_WRITE_BIGCAP_OPTION3";
         case PM_JOB_BQ_READ_OPTION3: return "BQ_READ_OPTION3";
         case PM_JOB_BQ_WRITE_OPTION3: return "BQ_WRITE_OPTION3";
+        case PM_JOB_BQ_VERIFY_STOP_OPTION3: return "BQ_VERIFY_STOP_OPTION3";
         case PM_JOB_BQ_WRITE_ADC: return "BQ_WRITE_ADC_ONLY";
         case PM_JOB_BQ_VERIFY_ADC: return "BQ_VERIFY_ADC";
         case PM_JOB_BQ_READ_ID: return "BQ_READ_ID";
@@ -423,6 +443,51 @@ static void PowerManager_ForceOtgOff(void)
     g_pm.status.otg_pin_high = false;
 }
 
+static void PowerManager_FailBqStop(void)
+{
+    g_pm.bq_option3_read_pending = false;
+    g_pm.bq_option3_write_pending = false;
+    g_pm.bq_option3_verify_pending = false;
+    g_pm.session_bq_stop_verified = false;
+    g_pm.session_reset_busy = false;
+    g_pm.session_reset_wait_vsafe0 = false;
+    g_pm.session_reset_restore_config = false;
+    g_pm.session_reset_faulted = true;
+    g_pm.status.session_reset_faulted = true;
+    g_pm.status.pd_reset_busy = false;
+    g_pm.status.source_fault_latched = true;
+    g_pm.status.applied_mode_valid = false;
+    g_pm.status.state = POWER_MANAGER_FAULT;
+    g_pm.mode_update_pending = false;
+    g_pm.bq_owner = PM_BQ_OWNER_STM_EMERGENCY;
+    PowerManager_ForceOtgOff();
+    if (g_pm.port_config_valid) {
+        TPS25751_SetPortStateMachine(g_pm.port_config, TPS25751_PORT_DISABLED);
+        g_pm.port_write_pending = true;
+    }
+    Debug_Printf("[PD-RESET] FAULT BQ stop not verified; Type-C stays Disabled");
+}
+
+static bool PowerManager_ChargeCapEligible(void)
+{
+    return g_pm.bq_init==PM_BQ_INIT_DONE && g_pm.status.bq.id_valid &&
+        g_pm.status.tps.attached && g_pm.status.tps.role==TPS25751_ROLE_SINK &&
+        g_pm.status.requested_mode!=POWER_MANAGER_USER_SOURCE_ONLY &&
+        g_pm.status.requested_mode!=POWER_MANAGER_USER_OFF &&
+        !g_pm.session_reset_busy && !g_pm.session_reset_faulted;
+}
+
+static void PowerManager_ChargeCapFailed(uint32_t now_ms)
+{
+    g_pm.charge_cap_verified=false;
+    g_pm.charge_cap_fault=true;
+    g_pm.charge_cap_phase=0U;
+    PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,TPS25751_COMMAND_ERROR,0x02U,now_ms);
+    /* Do not continue charging with unverified higher EEPROM defaults. */
+    (void)PowerManager_SetUserMode(POWER_MANAGER_USER_OFF);
+    Debug_Printf("[CHARGE-CAP] FAULT: limits unverified; USB OFF requested");
+}
+
 static void PowerManager_ClearContractTelemetry(void)
 {
     g_pm.status.tps.active_pdo_raw = 0U;
@@ -478,8 +543,9 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms,
         g_pm.port_control_read_pending = true;
     }
 
-    /* BQ25731: OTG needs EN_OTG and the pin.  PA4 is already low; force
-     * EN_HIZ so converter VBUS can fall to vSafe0V (datasheet 9.3.8). */
+    /* Pulled-high OTG input: PA4 LOW is not proof of converter OFF. */
+    g_pm.bq_option3_verify_pending = false;
+    g_pm.session_bq_stop_verified = (g_pm.bq_init != PM_BQ_INIT_DONE);
     if (g_pm.bq_init == PM_BQ_INIT_DONE) {
         g_pm.bq_option3_read_pending = true;
     }
@@ -1066,6 +1132,8 @@ static void PowerManager_FinishSessionResetIfIdle(uint32_t now_ms)
         g_pm.port_control_write_pending ||
         g_pm.bq_option3_read_pending ||
         g_pm.bq_option3_write_pending ||
+        g_pm.bq_option3_verify_pending ||
+        !g_pm.session_bq_stop_verified ||
         g_pm.dbfg_pending ||
         g_pm.mode_update_pending) {
         return;
@@ -1099,7 +1167,8 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
         return;
     }
     if (g_pm.port_write_pending || g_pm.bq_option3_write_pending ||
-        g_pm.bq_option3_read_pending) {
+        g_pm.bq_option3_read_pending || g_pm.bq_option3_verify_pending ||
+        !g_pm.session_bq_stop_verified) {
         return;
     }
 
@@ -1159,7 +1228,8 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
         g_pm.bq_option3_target =
             (uint16_t)((g_pm.status.bq.charge_option3 |
                         BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP) &
-                       (uint16_t)~BQ25731_CHARGE_OPTION3_EN_HIZ);
+                       (uint16_t)~(BQ25731_CHARGE_OPTION3_EN_HIZ |
+                                   BQ25731_CHARGE_OPTION3_EN_OTG));
         g_pm.bq_option3_write_pending = true;
         g_pm.bq_owner = PM_BQ_OWNER_STM_EMERGENCY;
     }
@@ -1266,6 +1336,9 @@ static void PowerManager_CaptureCoherentSnapshot(void)
 {
     const TPS25751_Telemetry_t *t = &g_pm.status.tps;
 
+    g_pm.snap_captured_ms = HAL_GetTick();
+    g_pm.snap_pdo_raw = t->active_pdo_raw;
+    g_pm.snap_rdo_raw = t->active_rdo_raw;
     g_pm.snap_attached = t->attached;
     g_pm.snap_connection_state = t->connection_state;
     g_pm.snap_typec_port_state = t->typec_port_state;
@@ -1296,7 +1369,6 @@ static void PowerManager_TickSourcePath(uint32_t now_ms)
     bool contract_ok;
     uint16_t bq_vbus;
 
-    (void)now_ms;
     source_role =
         g_pm.status.tps.attached &&
         (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
@@ -1327,9 +1399,20 @@ static void PowerManager_TickSourcePath(uint32_t now_ms)
                 PM_SRC_PATH_WAIT_BQ_VBUS : PM_SRC_PATH_WAIT_CONTRACT;
             break;
         case PM_SRC_PATH_WAIT_BQ_VBUS:
-            if (contract_ok &&
-                (bq_vbus >= PM_SRC_PATH_BQ_VBUS_MIN_MV) &&
-                (bq_vbus <= PM_SRC_PATH_BQ_VBUS_MAX_MV)) {
+            /* TPS can finish the initial 5V ramp and negotiate a higher PDO
+             * between our slow BQ samples. Recognize an already-running,
+             * fault-free source only with matching fresh TPS/BQ evidence. */
+            if (contract_ok && PdSource_BqReady(
+                    now_ms-g_pm.status.bq.updated_ms,
+                    g_pm.status.bq.online && g_pm.status.bq.adc_sample_valid,
+                    bq_vbus, g_pm.status.bq.in_otg, g_pm.status.bq.fault_flags,
+                    g_pm.coherent_snapshot_valid && g_pm.snap_attached &&
+                    g_pm.snap_role==TPS25751_ROLE_SOURCE &&
+                    g_pm.snap_pdo_valid && g_pm.snap_rdo_valid &&
+                    g_pm.snap_pdo_raw==g_pm.status.tps.active_pdo_raw &&
+                    g_pm.snap_rdo_raw==g_pm.status.tps.active_rdo_raw,
+                    now_ms-g_pm.snap_captured_ms, g_pm.snap_tps_vbus_mv,
+                    g_pm.status.pd_snapshot.contract_voltage_mv)) {
                 g_pm.source_path_phase = PM_SRC_PATH_READY;
                 g_pm.bq_owner = PM_BQ_OWNER_TPS_RUNTIME;
                 Debug_Printf("[PD-SRC] BQ VBUS ready %u mV gen=%lu — TPS owns runtime Option3",
@@ -1356,6 +1439,8 @@ static void PowerManager_InvalidateSessionOnDetach(uint32_t now_ms)
     g_pm.partner_source_caps_fresh = false;
     g_pm.partner_sink_observed = false;
     g_pm.session_caps_event_this_gen = false;
+    g_pm.source_caps_trace_pending = false;
+    g_pm.pdo_report_pending = false;
     g_pm.session_gsrc_ok_this_gen = false;
     g_pm.session_gsrc_failed_this_gen = false;
     g_pm.policy_swap_attempted = false;
@@ -1745,6 +1830,9 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
         g_pm.plug_change_count++;
     }
     if (event.new_contract_consumer || event.new_contract_provider) {
+        g_pm.charge_cap_phase=0U;
+        g_pm.charge_cap_verified=false;
+        g_pm.charge_cap_next_ms=now_ms;
         g_pm.contract_count++;
     }
     if (event.power_swap_complete) {
@@ -1790,7 +1878,7 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  TPS25751_REG_INT_EVENT,
                                  now_ms);
     }
-    if (event.source_caps_received) {
+    if (event.source_caps_received && PowerManager_HasTypecPowerConnection()) {
         /* Caps arrived for this attach_generation.  TRACE may decode;
          * never treat a cold RX_SOURCE_CAPS read as fresh without this. */
         g_pm.session_caps_event_this_gen = true;
@@ -1823,6 +1911,44 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
     g_pm.last_job = completed_job;
     data = TPS25751_GetResult(&g_pm.tps, &length);
 
+    if (completed_job>=PM_JOB_CHARGE_CAP_READ &&
+        completed_job<=PM_JOB_CHARGE_CAP_VERIFY) {
+        if (!PowerManager_ChargeCapEligible()) {
+            g_pm.charge_cap_phase=0U; g_pm.charge_cap_verified=false;
+            return;
+        }
+        if (operation_status!=TPS25751_OK) {
+            PowerManager_ChargeCapFailed(now_ms);
+            return;
+        }
+        if (completed_job==PM_JOB_CHARGE_CAP_WRITE_I) {
+            g_pm.charge_cap_phase=g_pm.charge_cap_voltage_pending?2U:3U;
+        } else if (completed_job==PM_JOB_CHARGE_CAP_WRITE_V) {
+            g_pm.charge_cap_phase=3U;
+        } else {
+            if (!BQ25731_DecodeConfigBlock(&g_pm.status.bq,data,length)) {
+                PowerManager_ChargeCapFailed(now_ms); return;
+            }
+            bool high_i=ChargeBalance_CurrentTooHigh(g_pm.status.bq.charge_current);
+            bool high_v=ChargeBalance_VoltageTooHigh(g_pm.status.bq.charge_voltage);
+            if (completed_job==PM_JOB_CHARGE_CAP_VERIFY && (high_i||high_v)) {
+                PowerManager_ChargeCapFailed(now_ms); return;
+            }
+            g_pm.charge_cap_voltage_pending=high_v;
+            if (high_i||high_v) g_pm.charge_cap_verified=false;
+            if (high_i) g_pm.charge_cap_phase=1U;
+            else if (high_v) g_pm.charge_cap_phase=2U;
+            else {
+                g_pm.charge_cap_phase=0U;
+                g_pm.charge_cap_verified=true;
+                g_pm.charge_cap_fault=false;
+                g_pm.charge_cap_next_ms=now_ms+1000U;
+                if (completed_job==PM_JOB_CHARGE_CAP_VERIFY)
+                    g_pm.charge_cap_applied_count++;
+            }
+        }
+        return;
+    }
     if (operation_status != TPS25751_OK) {
         if (completed_job == PM_JOB_READ_BOOT_FLAGS) {
             g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
@@ -1912,13 +2038,12 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                          TPS25751_StatusToString(operation_status),
                          g_pm.tps.task_return_code);
         } else if ((completed_job == PM_JOB_BQ_READ_OPTION3) ||
-                   (completed_job == PM_JOB_BQ_WRITE_OPTION3)) {
+                   (completed_job == PM_JOB_BQ_WRITE_OPTION3) ||
+                   (completed_job == PM_JOB_BQ_VERIFY_STOP_OPTION3)) {
             g_pm.bq_option3_read_pending = false;
             g_pm.bq_option3_write_pending = false;
-            Debug_Printf("[PD-RESET] BQ Option3 %s status=%s — continue TPS vSafe0V wait",
-                         PowerManager_JobToString(completed_job),
-                         TPS25751_StatusToString(operation_status));
-            PowerManager_FinishSessionResetIfIdle(now_ms);
+            Debug_Printf("[PD-RESET] BQ stop command failed");
+            PowerManager_FailBqStop();
         } else if ((completed_job == PM_JOB_READ_PORT_CONTROL) ||
                    (completed_job == PM_JOB_WRITE_PORT_CONTROL)) {
             g_pm.port_control_read_pending = false;
@@ -2135,8 +2260,28 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         case PM_JOB_READ_STATUS:
         {
             TPS25751_PowerRole_t old_role = g_pm.status.tps.role;
+            uint8_t old_connection = g_pm.status.tps.connection_state;
             TPS25751_DecodeStatus(&g_pm.status.tps, data);
             g_pm.status.tps.updated_ms = now_ms;
+            if (g_pm.status.tps.connection_state == 4U && old_connection != 4U) {
+                /* The partner can leave while its e-marked cable stays in.
+                 * PlugPresent remains set, so ordinary detach never runs.
+                 * Expire capability data without touching the power policy. */
+                memset(&g_pm.partner_source_caps, 0, sizeof(g_pm.partner_source_caps));
+                memset(&g_pm.partner_sink_caps, 0, sizeof(g_pm.partner_sink_caps));
+                g_pm.partner_source_caps_current = false;
+                g_pm.partner_source_caps_fresh = false;
+                g_pm.session_caps_event_this_gen = false;
+                g_pm.source_caps_trace_pending = false;
+                g_pm.local_source_caps_valid = false;
+                g_pm.local_source_caps_pending = true;
+                g_pm.coherent_snapshot_valid = false;
+                g_pm.pdo_report_pending = false;
+                if (old_connection >= 6U) {
+                    ++g_pm.attach_generation;
+                    g_pm.status.attach_generation = g_pm.attach_generation;
+                }
+            }
             if (g_pm.status.tps.attached &&
                 (g_pm.status.tps.role != old_role) &&
                 (old_role != TPS25751_ROLE_UNKNOWN)) {
@@ -2566,6 +2711,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.bq_option3_read_pending = false;
             if (!valid) {
                 Debug_Printf("[PD-RESET] BQ Option3 read short");
+                PowerManager_FailBqStop();
                 break;
             }
             g_pm.status.bq.charge_option3 = raw16;
@@ -2586,11 +2732,24 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_BQ_WRITE_OPTION3:
             g_pm.bq_option3_write_pending = false;
-            g_pm.status.bq.charge_option3 = g_pm.bq_option3_target;
-            Debug_Printf("[PD-RESET] BQ Option3 APPLIED 0x%04X EN_OTG=%u EN_HIZ=%u",
-                         g_pm.bq_option3_target,
-                         (g_pm.bq_option3_target & BQ25731_CHARGE_OPTION3_EN_OTG) != 0U ? 1U : 0U,
-                         (g_pm.bq_option3_target & BQ25731_CHARGE_OPTION3_EN_HIZ) != 0U ? 1U : 0U);
+            g_pm.bq_option3_verify_pending = true;
+            /* Target is not hardware readback. */
+            break;
+        case PM_JOB_BQ_VERIFY_STOP_OPTION3:
+            raw16 = PowerManager_ResultLe16(&valid);
+            g_pm.bq_option3_verify_pending = false;
+            if (!valid ||
+                (raw16 & BQ25731_CHARGE_OPTION3_EN_OTG) != 0U ||
+                ((raw16 ^ g_pm.bq_option3_target) &
+                 (BQ25731_CHARGE_OPTION3_EN_HIZ |
+                  BQ25731_CHARGE_OPTION3_EN_OTG_BIGCAP)) != 0U) {
+                PowerManager_FailBqStop();
+                break;
+            }
+            g_pm.status.bq.charge_option3 = raw16;
+            g_pm.bq_option3_valid = true;
+            if ((raw16 & BQ25731_CHARGE_OPTION3_EN_HIZ) != 0U)
+                g_pm.session_bq_stop_verified = true;
             PowerManager_FinishSessionResetIfIdle(now_ms);
             break;
 
@@ -2857,7 +3016,21 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
+        case PM_JOB_CHARGE_CAP_READ:
+        case PM_JOB_CHARGE_CAP_VERIFY:
+            bq_status=BQ25731_StartReadConfigBlock(&g_pm.bq);
+            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
+            break;
+        case PM_JOB_CHARGE_CAP_WRITE_I:
+            bq_status=BQ25731_StartWriteBalanceCurrent(&g_pm.bq);
+            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
+            break;
+        case PM_JOB_CHARGE_CAP_WRITE_V:
+            bq_status=BQ25731_StartWriteBalanceVoltage(&g_pm.bq);
+            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
+            break;
         case PM_JOB_BQ_READ_OPTION3:
+        case PM_JOB_BQ_VERIFY_STOP_OPTION3:
             bq_status = BQ25731_StartReadOption3(&g_pm.bq);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
@@ -2933,8 +3106,15 @@ static PowerManager_Job_t PowerManager_SelectTelemetryJob(void)
         case 3U: return PM_JOB_READ_POWER_STATUS;
         case 4U: return PM_JOB_READ_PD_STATUS;
         case 5U: return PM_JOB_READ_ADC;
-        case 6U: return PM_JOB_READ_ACTIVE_PDO;
-        case 7U: return PM_JOB_READ_ACTIVE_RDO;
+        case 6U:
+        case 7U:
+            /* Retained TPS registers are not a live cable session. Avoid
+             * reading them at all until a power connection is established. */
+            if (!g_pm.status.tps.attached || g_pm.status.pd_reset_busy ||
+                g_pm.session_reset_busy || g_pm.status.tps.connection_state < 6U)
+                return PM_JOB_READ_EVENT;
+            return g_pm.telemetry_phase == 6U ?
+                   PM_JOB_READ_ACTIVE_PDO : PM_JOB_READ_ACTIVE_RDO;
         default: return PM_JOB_READ_EVENT;
     }
 }
@@ -3002,10 +3182,15 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (PowerManager_TickReached(now_ms, g_pm.next_mode_ms)) {
         return PM_JOB_READ_MODE;
     }
+    /* Isolate Type-C before stopping BQ so TPS does not restore OTG. */
+    if (g_pm.session_reset_restore_config && g_pm.port_write_pending)
+        return PM_JOB_WRITE_PORT_CONFIG;
     if (g_pm.bq_emergency_shutdown_pending ||
         g_pm.bq_emergency_readback_pending ||
         g_pm.session_reset_busy ||
         (g_pm.bq_owner != PM_BQ_OWNER_TPS_RUNTIME)) {
+        if (g_pm.bq_option3_verify_pending)
+            return PM_JOB_BQ_VERIFY_STOP_OPTION3;
         if (g_pm.bq_option3_write_pending) {
             return PM_JOB_BQ_WRITE_OPTION3;
         }
@@ -3037,10 +3222,27 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.event_clear_pending) {
         return PM_JOB_CLEAR_EVENT;
     }
-    if (g_pm.local_source_caps_pending) {
+    /* Limit reductions have priority over optional monitoring/caps queries,
+     * but not over role shutdown, event service or the shared BMS bus hold. */
+    if (PowerManager_ChargeCapEligible() &&
+        PowerManager_TickReached(now_ms,g_pm.bq_monitor_holdoff_until_ms) &&
+        (g_pm.charge_cap_phase!=0U ||
+         PowerManager_TickReached(now_ms,g_pm.charge_cap_next_ms))) {
+        switch (g_pm.charge_cap_phase) {
+            case 1U: return PM_JOB_CHARGE_CAP_WRITE_I;
+            case 2U: return PM_JOB_CHARGE_CAP_WRITE_V;
+            case 3U: return PM_JOB_CHARGE_CAP_VERIFY;
+            default: return PM_JOB_CHARGE_CAP_READ;
+        }
+    }
+    if (g_pm.local_source_caps_pending && PowerManager_HasTypecPowerConnection() &&
+        !g_pm.status.pd_reset_busy && !g_pm.session_reset_busy &&
+        g_pm.status.tps.role == TPS25751_ROLE_SOURCE) {
         return PM_JOB_READ_LOCAL_SOURCE_CAPS;
     }
-    if (g_pm.source_caps_trace_pending) {
+    if (g_pm.source_caps_trace_pending && PowerManager_HasTypecPowerConnection() &&
+        !g_pm.status.pd_reset_busy && !g_pm.session_reset_busy &&
+        g_pm.session_caps_event_this_gen) {
         return PM_JOB_TRACE_SOURCE_CAPS;
     }
     if (g_pm.bq_iin_trace_pending) {
@@ -3272,8 +3474,9 @@ void PowerManager_GetPdCapabilities(PowerManager_PdCapabilities_t *out)
     if (out == NULL) return;
     memset(out, 0, sizeof(*out));
     out->attach_generation = g_pm.attach_generation;
+    if (!PowerManager_HasTypecPowerConnection() || g_pm.status.pd_reset_busy ||
+        g_pm.session_reset_busy) return;
     out->role = (uint8_t)g_pm.status.tps.role;
-    if (!g_pm.status.tps.attached || g_pm.status.pd_reset_busy) return;
     out->flags = 1U;
     const TPS25751_Capabilities_t *caps = NULL;
     if (g_pm.status.tps.role == TPS25751_ROLE_SINK &&

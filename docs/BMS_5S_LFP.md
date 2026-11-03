@@ -10,7 +10,7 @@ Pakiet: **5S1P LiFePO4, 6,7 Ah**, układ BQ76922 (HW rev2), bocznik 5 mΩ.
 | Konfiguracja AFE | ~25 osobnych kroków init + osobna lista dla OTP | **jedna tabela** `Core/Src/bms_golden.c` dla RAM, OTP i weryfikacji |
 | VCell Mode | 0x0017 (pominięte VC4) | **0x001F** (5 ogniw) |
 | COV / CUV | 4,25 V / 2,80 V | **3,694 V / 2,479 V** (kody 73 / 49) |
-| Temperatura | wyłączona | TS1 = NTC 103AT: **ładowanie 0…45 °C**, rozładowanie −20…60 °C, die 85 °C |
+| Temperatura | wyłączona | TS1 = NTC 103AT: **ładowanie 0…55 °C**, rozładowanie −20…60 °C, die 85 °C |
 | Balansowanie | ręczne z MCU (1 ogniwo, RAM) | **autonomiczne w BQ**, tylko góra krzywej (min. ogniwo ≥ 3,35 V, start 20 mV, stop 8 mV) |
 | Głęboki rozład | brak | **SHUTDOWN przy 2,30 V/ogniwo** (ładowarka na PACK/LD to przerywa) |
 | SOC | sesyjny, tylko RAM | **gauge LFP** (licznik BQ + kotwice napięciowe), **0,1 %**, uczona pojemność, SOH, cykle |
@@ -24,7 +24,7 @@ LFP ma płaski środek krzywej (≈3,27–3,33 V), więc napięcie mówi coś o 
 
 | Poziom | Wartość / ogniwo | Kto pilnuje |
 |---|---|---|
-| Ładowanie (CV) | **3,50 V** (17,50 V pakiet) | ładowarka BQ25731 — *do zrobienia, patrz §9* |
+| Ładowanie (CV) | **3,60 V** (18,00 V pakiet) | ładowarka BQ25731 — *do zrobienia, patrz §9* |
 | Ostrzeżenie górne | 3,60 V | G4 (stan WARN) |
 | COV (odcięcie CHG) | **3,694 V**, powrót ≈3,59 V | BQ76922, autonomicznie (OTP) |
 | Ostrzeżenie dolne | 3,00 V | G4 + gauge (flaga LOW) |
@@ -32,7 +32,7 @@ LFP ma płaski środek krzywej (≈3,27–3,33 V), więc napięcie mówi coś o 
 | CUV (odcięcie DSG) | **2,479 V**, powrót ≈2,68 V | BQ76922 |
 | SHUTDOWN | **2,30 V** lub stos < 10,0 V | BQ76922 |
 
-3,50 V zamiast 3,65 V: ogniwo jest w ~99 % pełne, a nie stoi przy maksimum — mniejsze zużycie.
+Cel CV: 3,60 V/ogniwo (18,00 V dla 5S). Próg wykrywania pełnego naładowania podąża za celem CV; rzeczywista pojemność zależy od ogniw i zakończenia ładowania.
 Domyślne napięcie ładowarki z pinu CELL (4S → 16,8 V = 3,36 V/ogn.) jest dla 5S LFP bezpieczne;
 **nie przestawiać rezystora CELL na 5S** (21 V = 4,2 V/ogn.).
 
@@ -67,7 +67,7 @@ Generowane narzędziem `tools/print_golden.c` z tej samej tabeli, którą wykonu
 | 0x9288 | OCC Recovery Threshold | U2 | 100 (0x0064, i16 100) | 64 00 |  |
 | 0x9282 | OCD1 Threshold | U1 | 38 (0x26, i8 38) | 26 |  |
 | 0x9286 | SCD Threshold | U1 | 5 (0x05, i8 5) | 05 |  |
-| 0x929A | OTC Threshold | U1 | 45 (0x2D, i8 45) | 2D |  |
+| 0x929A | OTC Threshold | U1 | 55 (0x37, i8 55) | 37 |  |
 | 0x929C | OTC Recovery | U1 | 40 (0x28, i8 40) | 28 |  |
 | 0x929D | OTD Threshold | U1 | 60 (0x3C, i8 60) | 3C |  |
 | 0x929F | OTD Recovery | U1 | 55 (0x37, i8 55) | 37 |  |
@@ -206,7 +206,72 @@ Zabezpieczenia: BURN robi najpierw RESET i sprawdza, że w OTP są fabryczne war
 ## 9. Otwarte punkty
 
 - **Ładowarka BQ25731**: napięcie ładowania nadal ustawia TPS (16,8 V z konfiguracji 4S). Do zmiany
-  na **17,50 V**, wyłączenie górnego prechargu i zakończenie ładowania przy C/20. Dopóki ładowarka
+  na **18,00 V**, wyłączenie górnego prechargu i zakończenie ładowania przy C/20. Dopóki ładowarka
   kończy na 16,8 V (3,36 V/ogn.), kotwica FULL się nie pojawi i pojemność uczy się tylko z kotwic
   dolnych/OCV.
 - Tablice OCV są typowe dla LFP; po kilku pełnych cyklach warto je skorygować pomiarem.
+
+
+OTC zmienione na 55 °C na żądanie użytkownika (2026-11-02); recovery pozostaje 40 °C. OTC Threshold i Recovery należą do fingerprintu, więc zmiana wymusza aktualizację RAM na starcie. Poprzedni zapis CRC tabeli w tym dokumencie jest historyczny. OTP nie programowano.
+
+## NTC correction pending (2026-11-02)
+
+User confirmed BQ76922RSNR and Vishay NTCLE100E103JB0A (10k, B3977),
+mounted on PCB. The existing Semitec 103AT polynomial is not a verified
+conversion for this part. TS1 is not a measurement of cell temperature.
+OTP BURN is therefore blocked by BMS_THERMISTOR_MODEL_VALIDATED=0.
+A manufacturer R(T) input archive has been prepared for TI GPC per SLUUCP2.
+Fit/validate the hardware coefficients and resolve cell temperature sensing
+before changing this gate. Current RAM model and thresholds were not changed
+by this audit; the 55 C raw-model threshold is not yet a calibrated 55 C trip.
+
+## Balancing policy update (2026-11-02)
+
+Supersedes autonomous balancing description above. Balancing Configuration
+0x0C disables autonomous charge/relax balancing; host commands remain enabled.
+G4 commands at most two non-adjacent cells only with fresh valid data, no
+reported safety flags, |I| strictly below 1000 mA, SOC>=900/1000, minimum
+cell voltage>=3350mV, and five seconds continuously within those gates.
+Start delta20mV; retain active cells to8mV. Existing BMS thermal gates remain.
+Command watchdog is5s. Current crossing is detected at the next BMS scan;
+TI permits up to about1s for CB_ACTIVE_CELLS writes to take effect.
+Telemetry continues to read CB_ACTIVE_CELLS; requested mask is never used
+as confirmation. Firmware is required for this policy; hostless BMS has
+autonomous balancing disabled. OTP remains blocked pending NTC validation.
+Only imbalance warning changed100->300mV. COV/CUV unchanged.
+
+## Vishay 18K model applied (2026-11-02)
+
+TI GPC report accepted: A=[-16652,29010,-22024,26321,1343], B=[-3958,5551,-4365,4554], Adc0=11703. Reported maximum nominal fitting error0.5C over supplied -40..125C points. These overwrite the18K model (0x91EA..0x91FA,0x91FE), with TS1 still selecting18K. Ten coefficient fields and TS1 configuration are fingerprinted and included in full RAM verification. OTC remains60C, recovery40C. This supersedes the earlier missing-polynomial blocker. Physical measurement validation and PCB-vs-cell placement remain unresolved; OTP gate remains0. Sensor tolerance, pull-up/pad errors and placement are not included in the0.5C fit error.
+
+User confirmed loose cell-terminal screws caused the large current-dependent spread. Imbalance warning restored300->100mV (2026-11-02). Balancing policy remains |I|<1A and SOC>=90%; temperature model remains Vishay TI GPC, OTC60C/recovery40C. This supersedes the earlier300mV warning update.
+
+
+## COV recovery — 2026-11-02
+User-approved host policy: COV remains reported until cleared by AFE hysteresis.
+COV disables CHG autonomously, without a host rail shutdown; monitoring stays alive.
+Balancing during COV requires CHG-off, DSG-on, no other Safety A/B/C, no startup
+guard latch, and all existing current/SOC/freshness/temperature gates.
+Start verification accepts DSG-on/PDSG-off with CHG-off only for COV alone.
+No repeated FET starts, COV overrides or protection threshold changes.
+CUV still requests host shutdown. TI SLUUCG7 sections5.2.4 and10.
+
+## Tymczasowy profil wyrównawczy G4 — 2026-11-03
+G4 obniża w SINK ustawienia BQ do maksymalnie17,496V (17,50V zaokrąglone
+w dół do8mV) i512mA. Jest to profil całego ładowania na czas wyrównania,
+nie automatycznie wybierana końcówka. Zachowuje niższe ustawienia TPS.
+Kontrola przez istniejący scheduler I2Cc co około1s, zapis prądu przed napięciem,
+potwierdzenie odczytem; niezgodność/błąd powoduje żądanie USB OFF.
+Po kontrakcie następuje ponowne sprawdzenie. W SOURCE i podczas resetu portu
+ogranicznik nie zapisuje nastaw ładowania.
+
+EEPROM nadal ma18V/8,064A. G4 nie gwarantuje niższych limitów przed uruchomieniem
+kontroli ani przy braku działania MCU; krótkie okno po samodzielnych zapisach TPS
+jest możliwe. COV i inne zabezpieczenia pozostają aktywne.
+
+Balansowanie zachowuje |I|<1A, SOC>=90%, min3350mV, temperatury i ważność danych.
+Obecny pakiet maSOC100%, więc profil512mA spełnia bramkę prądową.17,496V to
+średnio3,499V/ogniwo; nie gwarantuje minimalnego napięcia każdego nierównego ogniwa.
+Nie obniżano kotwicyFULL: nadal wymaga średnio3550mV.
+Ten tymczasowy profil nie służy do kalibracji pełnej pojemności/SOH. Należy go
+usunąć/zastąpić docelowym sterowaniem po wyrównaniu, przed normalnym testem pojemności.

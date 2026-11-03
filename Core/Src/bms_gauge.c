@@ -1,4 +1,5 @@
 #include "bms_gauge.h"
+#include "bms_board.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -272,7 +273,7 @@ void BmsGauge_DefaultConfig(BmsGauge_Config_t *cfg)
     cfg->design_mah = 6700;
     cfg->series = 5U;
     cfg->taper_ma = 335;            /* C/20 */
-    cfg->full_cell_mv = 3450;       /* CV target 3.50 V/cell */
+    cfg->full_cell_mv = (int16_t)(BMS_CHARGE_TARGET_CELL_MV - 50U);
     cfg->full_hold_ms = 60000U;
     cfg->rest_ma = 400;             /* board standby draw is a few 100 mA */
     cfg->relax_ms = 30U * 60U * 1000U;

@@ -23,13 +23,27 @@ const BmsDmEntry_t g_bms_golden[] = {
     U2(0x9304, BMS_VCELL_MODE,             "Vcell Mode", FP),
     U1(0x92FA, BMS_CFETOFF_PIN_CONFIG,     "CFETOFF Pin Config", 0),
     U1(0x92FB, BMS_DFETOFF_PIN_CONFIG,     "DFETOFF Pin Config", 0),
-    U1(0x92FD, BMS_TS1_CONFIG,             "TS1 Config", 0),
+    U1(0x92FD, BMS_TS1_CONFIG,             "TS1 Config", FP),
     U1(0x92FE, BMS_TS2_CONFIG,             "TS2 Config", 0),
     U2(0x9343, BMS_MFG_STATUS_INIT,        "Mfg Status Init", FP),
 
     /* Current sense */
     F4(0x91A8, BMS_CC_GAIN,                "CC Gain", 0),
     F4(0x91AC, BMS_CAPACITY_GAIN,          "Capacity Gain", 0),
+
+    /* Vishay NTCLE100E103JB0A, 18k model: TI GPC report 2026-11-02.
+     * Reported nominal maximum fit error 0.5 C, range -40..125 C.
+     * All coefficients are fingerprinted so old RAM forces a full update. */
+    I2(0x91EA,  -16652, "Vishay 18K a1", FP),
+    I2(0x91EC,   29010, "Vishay 18K a2", FP),
+    I2(0x91EE,  -22024, "Vishay 18K a3", FP),
+    I2(0x91F0,   26321, "Vishay 18K a4", FP),
+    I2(0x91F2,    1343, "Vishay 18K a5", FP),
+    I2(0x91F4,   -3958, "Vishay 18K b1", FP),
+    I2(0x91F6,    5551, "Vishay 18K b2", FP),
+    I2(0x91F8,   -4365, "Vishay 18K b3", FP),
+    I2(0x91FA,    4554, "Vishay 18K b4", FP),
+    I2(0x91FE,   11703, "Vishay 18K Adc0", FP),
 
     /* Protections enable / FET mapping */
     U1(0x9261, BMS_ENABLED_PROTECTIONS_A,  "Enabled Protections A", FP),
@@ -53,8 +67,8 @@ const BmsDmEntry_t g_bms_golden[] = {
     U1(0x9286, BMS_SCD_THRESHOLD,          "SCD Threshold", 0),
 
     /* Temperature (TS1 NTC = cell, internal die) */
-    I1(0x929A, BMS_OTC_C,                  "OTC Threshold", 0),
-    I1(0x929C, BMS_OTC_RECOVERY_C,         "OTC Recovery", 0),
+    I1(0x929A, BMS_OTC_C,                  "OTC Threshold", FP),
+    I1(0x929C, BMS_OTC_RECOVERY_C,         "OTC Recovery", FP),
     I1(0x929D, BMS_OTD_C,                  "OTD Threshold", 0),
     I1(0x929F, BMS_OTD_RECOVERY_C,         "OTD Recovery", 0),
     I1(0x92A3, BMS_OTINT_C,                "OTINT Threshold", 0),

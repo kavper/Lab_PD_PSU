@@ -2,6 +2,8 @@
 
 #include "bms_board.h"
 #include "bms_golden.h"
+#include "bms_balance_policy.h"
+#include "bms_gauge.h"
 #include "board_mx.h"
 #include "power_manager.h"
 
@@ -463,11 +465,8 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
     bool real_cov;
     bool real_cuv;
 
-    /* Only treat COV/CUV as cell faults when voltages agree — a capacitive
-     * ALL_FETS_ON transient can latch safety bits without a real OV/UV. */
-    real_cov = ((sa & BQ76922_SAFETY_A_COV) != 0U) &&
-               dev->snapshot.sample_valid &&
-               (dev->snapshot.max_cell_mv >= (int16_t)(BMS_COV_EFFECTIVE_MV - 20U));
+    /* Report COV until the AFE itself clears its recovery hysteresis. */
+    real_cov = ((sa & BQ76922_SAFETY_A_COV) != 0U);
     real_cuv = ((sa & BQ76922_SAFETY_A_CUV) != 0U) &&
                dev->snapshot.sample_valid &&
                (dev->snapshot.min_cell_mv > 0) &&
@@ -490,9 +489,9 @@ static void BQ76922_DecodeSafetyFaults(BQ76922_Device_t *dev)
 
     dev->snapshot.fault_flags = flags;
 
-    /* SCD/OCD/OCC and false COV are recoverable — clear + ALL_FETS_ON.
-     * Only confirmed cell UV/OV may request a host rail shutdown. */
-    if ((flags & (BQ76922_FAULT_CELL_OV | BQ76922_FAULT_CELL_UV)) != 0U) {
+    /* COV keeps CHG protected by the AFE; retain host monitoring/balancing.
+     * Confirmed CUV still requests host shutdown. No FET override here. */
+    if ((flags & BQ76922_FAULT_CELL_UV) != 0U) {
         if (dev->snapshot.configured) {
             dev->snapshot.shutdown_request = true;
             dev->snapshot.state = BQ76922_STATE_FAULT;
@@ -515,6 +514,7 @@ static void BQ76922_UpdateWarnState(BQ76922_Device_t *dev)
         dev->snapshot.fault_flags |= BQ76922_FAULT_IMBALANCE;
     }
 
+    if ((dev->snapshot.fault_flags & BQ76922_FAULT_CELL_OV) != 0U) warn = true;
     if ((dev->snapshot.min_cell_mv <= (int16_t)BMS_WARN_CELL_LOW_MV) ||
         (dev->snapshot.max_cell_mv >= (int16_t)BMS_WARN_CELL_HIGH_MV)) {
         warn = true;
@@ -897,7 +897,8 @@ static bool BQ76922_RunInitStep(BQ76922_Device_t *dev)
                     ((fet & BQ76922_FET_STATUS_DSG) != 0U);
                 dev->snapshot.fets_enabled = (chg_on || path_on);
                 (void)BQ76922_ReadSafetyStatus(dev);
-                if (chg_on && path_on) {
+                if (BmsFetGuard_StartComplete(fet, dev->snapshot.safety_status_a,
+                        dev->snapshot.safety_status_b, dev->snapshot.safety_status_c)) {
                     dev->fet_verify_attempts = 0U;
                     dev->fet_recover_fails = 0U;
                     break;
@@ -1519,6 +1520,11 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
         return BQ76922_NOT_READY;
     }
 
+#if (BMS_THERMISTOR_MODEL_VALIDATED == 0U)
+    /* Await physical thermal validation and resolution of PCB-vs-cell sensing. */
+    return BQ76922_NOT_READY;
+#endif
+
     PowerManager_SetBmsBusHold(true);
     held = true;
 
@@ -1589,6 +1595,9 @@ BQ76922_Status_t BQ76922_OtpBurn(BQ76922_Device_t *dev,
         goto out_exit_cfg;
     }
 
+    /* A failed response does not prove that OTP_WRITE never reached the AFE.
+     * Refuse all further attempts this MCU boot, including transport errors. */
+    s_otp_burned_this_boot = true;
     status = BQ76922_CallOtpStatus(dev, BQ76922_SUBCMD_OTP_WRITE,
                                    &result, &fail);
     if (wr_result != NULL) {
@@ -2027,7 +2036,35 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
     } else if (dev->scan_index == (BQ76922_CELL_COUNT + 9U)) {
         uint16_t mask = 0U;
 
-        /* Autonomous balancing runs inside the AFE; this only reports it. */
+        static BmsBalancePolicy balance_policy;
+        BmsGauge_Output_t gauge;
+        uint8_t desired;
+        uint8_t payload[2];
+        BmsGauge_GetOutput(&gauge);
+        bool valid = dev->snapshot.configured && dev->snapshot.sample_valid &&
+            (uint32_t)(now_ms-dev->snapshot.sample_tick_ms)<3000U &&
+            BmsBalance_SafetyAllows(dev->snapshot.safety_status_a,
+                dev->snapshot.safety_status_b,dev->snapshot.safety_status_c,
+                dev->snapshot.chg_fet_on,dev->snapshot.dsg_fet_on) &&
+            !dev->snapshot.shutdown_request && !dev->fet_guard.latched &&
+            dev->snapshot.ts1_temp_dk>=2732 && dev->snapshot.ts1_temp_dk<=3232 &&
+            dev->snapshot.int_temp_dk>0 && dev->snapshot.int_temp_dk<=3432;
+        desired=BmsBalance_Select(&balance_policy,now_ms,valid,
+            dev->snapshot.cc2_ma,gauge.soc_permille,dev->snapshot.cell_mv,
+            dev->snapshot.balance_mask);
+        payload[0]=desired; payload[1]=0;
+        /* Renew host timeout; readback below, never report the requested mask. */
+        status=BQ76922_WriteRamBlock(dev,BQ76922_SUBCMD_CB_ACTIVE_CELLS,payload,2U);
+        /* BUSY is arbitration, not a failed command. Preserve eligibility
+         * and retry this scan step when the shared bus becomes available. */
+        if (status==BQ76922_BUSY) return;
+        if (status!=BQ76922_OK) {
+            balance_policy.waiting=false;
+            dev->snapshot.balance_mask=0;
+            if (BQ76922_NoteCommsResult(dev,status)) return;
+            if (status==BQ76922_BUSY) return;
+        }
+
         status = BQ76922_ReadSubcmdU2(dev, BQ76922_SUBCMD_CB_ACTIVE_CELLS, &mask);
         if (BQ76922_NoteCommsResult(dev, status)) {
             return;

@@ -192,3 +192,35 @@ BMS protection numbers after CFGUPDATE:
 | Body diode | 2000 mA | After CC Gain fix = real ~2 A |
 | COV / CUV | 4250 / 2800 mV/cell | Unchanged |
 | Safety Status A | TI bits 7..2 | SCD=0x80 … OCC=0x10 COV=0x08 CUV=0x04 |
+
+
+## Verified USB role reset (2026-11-02)
+The populated OTG input is held HIGH; PA4 LOW alone does not prove BQ OFF.
+Explicit role reset isolates Type-C (Disabled), writes Option3 EN_OTG=0/HIZ=1,
+then reads Option3 back. Invalid/mismatched/failed reads or writes keep the port
+Disabled/FAULT. The HIZ release write is also read back with EN_OTG still0 before
+TPS regains the runtime role. Cached Option3 is updated from readback, not target.
+OVP and the existing VBUS/timing checks remain enabled. Bench validation pending.
+
+
+## USB partner presence and PDO publication (2026-11-03)
+
+For H7, `plug` means a power partner is present: TPS PlugPresent is set and
+ConnectionState is 6 or 7. State 4 is an e-marked cable with Ra but no Rd;
+it must not expose a partner capability list. The raw `conn` field remains
+available so H7 can display `CABLE ONLY`. Internal TPS PlugPresent semantics
+and role-swap power control are unchanged.
+
+ACTIVE_PDO/RDO reads are skipped without a power connection and during reset.
+Local SOURCE capabilities are queried only with a SOURCE partner attached.
+On transition from a partner to cable-only, capability caches are invalidated
+and the session generation changes even though the plug remains inserted.
+PD_CAPS sends an empty invalidation on session loss; unchanged disconnected
+frames are not repeated. Connected sessions publish on change and every 1 s
+for H7 freshness and recovery after an H7 restart. Both legacy and FIELDS
+telemetry use the same capability publisher.
+
+The current G4 charging cap is a temporary balancing profile, 17.496 V /
+512 mA at the populated 5 mOhm charger shunt. It does not raise lower TPS
+settings. It does not replace the EEPROM startup limits or establish a new
+full-charge/FCC anchor. OTP release remains blocked pending physical validation.

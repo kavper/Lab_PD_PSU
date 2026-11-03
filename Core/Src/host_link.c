@@ -1,4 +1,5 @@
 #include "host_heartbeat.h"
+#include "pd_caps_telemetry.h"
 #include "host_link.h"
 
 #include "app.h"
@@ -31,6 +32,7 @@ static LinkUart s_host_uart;
 static H7LinkParser s_host_parser;
 static uint32_t s_meter_ms;
 static uint32_t s_slow_ms;
+static PdCapsTelemetry s_pd_caps_tx;
 static uint8_t s_host_tx_seq;
 static bool s_on_wait;
 static uint8_t s_on_seq;
@@ -732,12 +734,35 @@ static void HostLink_QueueMeter(void)
     }
 }
 
+static void HostLink_QueuePdCapabilities(void)
+{
+    /* PD_CAPS stays a fixed frame (raw PDO array). */
+    uint8_t caps_payload[H7_LINK_PD_CAPS_BYTES] = {0};
+    PowerManager_PdCapabilities_t caps;
+
+    PowerManager_GetPdCapabilities(&caps);
+    caps_payload[0] = 1U;
+    caps_payload[1] = caps.flags;
+    caps_payload[2] = caps.role;
+    caps_payload[3] = caps.count;
+    H7Link_PutU32(caps_payload + 4, caps.attach_generation);
+    H7Link_PutU32(caps_payload + 8, caps.rdo);
+    H7Link_PutU32(caps_payload + 12, caps.active_pdo);
+    for (unsigned i = 0; i < 7U; ++i) H7Link_PutU32(caps_payload + 16 + 4U*i, caps.pdo[i]);
+    _Static_assert(H7_LINK_PD_CAPS_BYTES == PD_CAPS_PAYLOAD_BYTES,
+                   "PD capabilities payload size mismatch");
+    const uint32_t now = HAL_GetTick();
+    if (PdCapsTelemetry_Due(&s_pd_caps_tx, caps_payload, now) &&
+        HostLink_QueueFrame(H7_LINK_PD_CAPS, s_host_tx_seq++, caps_payload,
+                           H7_LINK_PD_CAPS_BYTES, LINK_UART_PRI_SLOW, 3U)) {
+        PdCapsTelemetry_Sent(&s_pd_caps_tx, caps_payload, now);
+    }
+}
+
 static void HostLink_QueueLegacySlow(void)
 {
     uint8_t bms_payload[H7_LINK_BMS_BYTES];
     uint8_t pd_payload[H7_LINK_PD_BYTES];
-    uint8_t caps_payload[H7_LINK_PD_CAPS_BYTES] = {0};
-    PowerManager_PdCapabilities_t caps;
     BQ76922_Snapshot_t bms;
     PowerManager_Status_t pm;
     int16_t dV;
@@ -749,7 +774,6 @@ static void HostLink_QueueLegacySlow(void)
     memset(pd_payload, 0, sizeof(pd_payload));
     BQ76922_GetSnapshot(&g_bq76922, &bms);
     PowerManager_GetStatus(&pm);
-    PowerManager_GetPdCapabilities(&caps);
     (void)PSU_GuiGetPdContract(&pd_v, &pd_a, NULL, NULL);
     dV = (int16_t)(bms.max_cell_mv - bms.min_cell_mv);
     bms_payload[0] = (BQ76922_IsEnabled() && bms.present) ? 1U : 0U;
@@ -811,7 +835,8 @@ static void HostLink_QueueLegacySlow(void)
     if (pm.bq.in_iin_dpm) flags |= 0x10U;
     if (pm.bq.in_vindpm) flags |= 0x20U;
     if (pm.pd_reset_busy) flags |= 0x40U;
-    if (pm.tps.attached) flags |= 0x80U;
+    /* PlugPresent alone includes an e-marked cable with no partner (state 4). */
+    if (pm.tps.attached && pm.tps.connection_state >= 6U) flags |= 0x80U;
     pd_payload[0] = (pm.bq.online && pm.bq.adc_sample_valid) ? 1U : 0U;
     pd_payload[1] = flags;
     H7Link_PutU16(&pd_payload[2], pm.bq.charger_status);
@@ -822,7 +847,7 @@ static void HostLink_QueueLegacySlow(void)
     pd_payload[8] = pm.tps.connection_state;
     pd_payload[9] = pm.tps.typec_port_state;
     pd_payload[10] = pm.pd_snapshot.power_role;
-    pd_payload[11] = (uint8_t)caps.attach_generation;
+    pd_payload[11] = (uint8_t)pm.attach_generation;
     H7Link_PutU32(&pd_payload[12], pm.bq.adc_vbat_mv);
     H7Link_PutU32(&pd_payload[16], pm.bq.adc_vsys_mv);
     H7Link_PutI32(&pd_payload[20], pm.bq.battery_current_ma);
@@ -840,16 +865,6 @@ static void HostLink_QueueLegacySlow(void)
                               H7_LINK_BMS_BYTES, LINK_UART_PRI_SLOW, 0U);
     (void)HostLink_QueueFrame(H7_LINK_PD_TLM, s_host_tx_seq++, pd_payload,
                               H7_LINK_PD_BYTES, LINK_UART_PRI_SLOW, 1U);
-    caps_payload[0] = 1U;
-    caps_payload[1] = caps.flags;
-    caps_payload[2] = caps.role;
-    caps_payload[3] = caps.count;
-    H7Link_PutU32(caps_payload + 4, caps.attach_generation);
-    H7Link_PutU32(caps_payload + 8, caps.rdo);
-    H7Link_PutU32(caps_payload + 12, caps.active_pdo);
-    for (unsigned i = 0; i < 7U; ++i) H7Link_PutU32(caps_payload + 16 + 4U*i, caps.pdo[i]);
-    (void)HostLink_QueueFrame(H7_LINK_PD_CAPS, s_host_tx_seq++, caps_payload,
-                              H7_LINK_PD_CAPS_BYTES, LINK_UART_PRI_SLOW, 3U);
     {
         uint8_t aux_payload[H7_LINK_AUX_BYTES];
         LdoLink_Status_t ldo;
@@ -915,7 +930,8 @@ static void HostLink_FillPd(TlmBuilder_t *b)
     Tlm_Put(b, TLM_PD_BQ_IINDPM, pm.bq.in_iin_dpm ? 1 : 0);
     Tlm_Put(b, TLM_PD_BQ_VINDPM, pm.bq.in_vindpm ? 1 : 0);
     Tlm_Put(b, TLM_PD_RST_BUSY, pm.pd_reset_busy ? 1 : 0);
-    Tlm_Put(b, TLM_PD_PLUG, pm.tps.attached ? 1 : 0);
+    Tlm_Put(b, TLM_PD_PLUG,
+            (pm.tps.attached && pm.tps.connection_state >= 6U) ? 1 : 0);
     Tlm_Put(b, TLM_PD_BQ_ST, pm.bq.charger_status);
     Tlm_Put(b, TLM_PD_BQ_FAULT, pm.bq.fault_flags);
     Tlm_Put(b, TLM_PD_CC1, pm.tps.cc1_state);
@@ -1033,25 +1049,8 @@ static void HostLink_QueueSlow(void)
 {
 #if (H7_LINK_LEGACY_SLOW != 0U)
     HostLink_QueueLegacySlow();
-#else
-    {
-        /* PD_CAPS stays a fixed frame (raw PDO array). */
-        uint8_t caps_payload[H7_LINK_PD_CAPS_BYTES] = {0};
-        PowerManager_PdCapabilities_t caps;
-
-        PowerManager_GetPdCapabilities(&caps);
-        caps_payload[0] = 1U;
-        caps_payload[1] = caps.flags;
-        caps_payload[2] = caps.role;
-        caps_payload[3] = caps.count;
-        H7Link_PutU32(caps_payload + 4, caps.attach_generation);
-        H7Link_PutU32(caps_payload + 8, caps.rdo);
-        H7Link_PutU32(caps_payload + 12, caps.active_pdo);
-        for (unsigned i = 0; i < 7U; ++i) H7Link_PutU32(caps_payload + 16 + 4U*i, caps.pdo[i]);
-        (void)HostLink_QueueFrame(H7_LINK_PD_CAPS, s_host_tx_seq++, caps_payload,
-                                  H7_LINK_PD_CAPS_BYTES, LINK_UART_PRI_SLOW, 3U);
-    }
 #endif
+    HostLink_QueuePdCapabilities();
     HostLink_QueueFields();
 }
 
@@ -1251,6 +1250,7 @@ void HostLink_Init(UART_HandleTypeDef *huart)
 
     s_huart = huart;
     s_on_wait = false;
+    memset(&s_pd_caps_tx, 0, sizeof(s_pd_caps_tx));
     s_on_qn = 0U;
     memset(s_replay_valid, 0, sizeof(s_replay_valid));
     H7Link_ParserInit(&s_host_parser);

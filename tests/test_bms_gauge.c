@@ -103,6 +103,8 @@ int main(void)
     int16_t c[5]; int32_t i;
 
     BmsGauge_DefaultConfig(&cfg);
+    /* This fixture models a 3.50 V CV charger; production uses the board target. */
+    cfg.full_cell_mv = 3450;
     BmsGauge_Init(&cfg);
 
     /* 1: first sample, plateau voltage → estimate, uncertain */

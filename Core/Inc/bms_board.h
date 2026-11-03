@@ -50,14 +50,14 @@
 /* ------------------------------------------------- LFP voltage window -- */
 /*
  * Hardware limits (AFE, autonomous, burned into OTP):
- *   COV 3.70 V   — backstop above the 3.50 V charge target, below the cell
+ *   COV 3.70 V   — backstop above the 3.60 V charge target, below the cell
  *                  absolute maximum region. Recovery 2 × 50.6 mV ≈ 3.59 V.
  *   CUV 2.50 V   — hard floor. Software stops the load at 2.80 V first.
  *   Shutdown 2.30 V/cell — BQ enters SHUTDOWN (nA drain) on a flat pack;
  *                  a charger on PACK/LD aborts that, so the pack can be
  *                  recovered by charging.
  * Software window (G4):
- *   charge target 3.50 V/cell (17.50 V pack), low warning 3.00 V,
+ *   charge target 3.60 V/cell (18.00 V pack), low warning 3.00 V,
  *   load cut-off 2.80 V (under load, filtered).
  */
 #define BMS_COV_THRESHOLD_MV             3700U
@@ -67,7 +67,7 @@
 #define BMS_SHUTDOWN_CELL_MV             2300U
 #define BMS_SHUTDOWN_STACK_10MV          1000U /* 10.0 V stack */
 
-#define BMS_CHARGE_TARGET_CELL_MV        3500U
+#define BMS_CHARGE_TARGET_CELL_MV        3600U
 #define BMS_CHARGE_TARGET_PACK_MV        (BMS_CHARGE_TARGET_CELL_MV * BMS_SERIES_COUNT)
 #define BMS_WARN_CELL_LOW_MV             3000U
 #define BMS_CUTOFF_CELL_MV               2800U
@@ -86,12 +86,17 @@
 
 /* ------------------------------------------------------- temperature -- */
 /*
- * TS1 = 10 k NTC 103AT (R68) on the 18 k pull-up model: TI default TS1 Config
- * 0x07 (thermistor, 18 k model, used for cell protections).
- * LiFePO4 must not be charged below 0 °C.
+ * Actual fitted part: Vishay NTCLE100E103JB0A, 10 kOhm at 25 C,
+ * B25/85=3977 K, located on PCB (not on the cells).
+ * 18K polynomial coefficients are from the TI GPC report (2026-11-02).
+ * Nominal curve fitting is complete; physical thermal validation and
+ * actual cell temperature sensing are still required before OTP.
  */
+/* Deliberate OTP release gate: do not set to 1 before fitting and verifying
+ * the exact NTC polynomial and resolving actual cell temperature sensing. */
+#define BMS_THERMISTOR_MODEL_VALIDATED   0U
 #define BMS_TS1_CONFIG                   0x07U
-#define BMS_OTC_C                        45
+#define BMS_OTC_C                        60
 #define BMS_OTC_RECOVERY_C               40
 #define BMS_UTC_C                        0
 #define BMS_UTC_RECOVERY_C               5
@@ -119,16 +124,17 @@
 
 /* ---------------------------------------------------------- balancing -- */
 /*
- * Autonomous AFE balancing, top of charge only (LFP plateau voltages say
+ * G4-controlled balancing, |I|<1 A and SOC>=90%. Autonomous CHG/RLX off.
+ * Voltage gate remains (LFP plateau voltages say
  * nothing about SOC, so no balancing there).  Internal FETs through the
  * 100 Ω series resistors: ≈15 mA per cell.
- * CB_CHG|CB_RLX|CB_SLEEP|CB_NOSLEEP = 0x0F.
+ * CB_SLEEP|CB_NOSLEEP=0x0C; host command timeout 5 s.
  */
-#define BMS_BALANCING_CONFIG             0x0FU
+#define BMS_BALANCING_CONFIG             0x0CU
 #define BMS_CB_MIN_CELL_TEMP_C           0
 #define BMS_CB_MAX_CELL_TEMP_C           50
 #define BMS_CB_MAX_INTERNAL_TEMP_C       70
-#define BMS_CB_INTERVAL_S                20U
+#define BMS_CB_INTERVAL_S                5U
 #define BMS_CB_MAX_CELLS                 2U
 #define BMS_CB_MIN_CELL_MV_CHG           3350U
 #define BMS_CB_MIN_DELTA_CHG_MV          20U
