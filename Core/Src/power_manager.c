@@ -1899,7 +1899,19 @@ static void PowerManager_MaintainPolicy(uint32_t now_ms)
 
     current = g_pm.status.tps.role;
 
-    /* Partner already powering us → lock SINK, never enforce SOURCE/OTG. */
+    /* Partner already powering us → lock SINK, unless the voltage rule says
+     * to charge it (dual-role partner at 5 V only); DecidePolicy does that. */
+    if ((PowerManager_IsAttachedAsSink() ||
+         PowerManager_HasLiveSinkContract()) &&
+        (PowerManager_AutoRoleFromPartnerSourceCaps() == TPS25751_ROLE_SOURCE)) {
+        if (!g_pm.policy_decided && (g_pm.policy_phase != PM_POLICY_DECIDE) &&
+            !g_pm.session_reset_busy) {
+            g_pm.policy_phase = PM_POLICY_DECIDE;
+            g_pm.policy_next_ms = now_ms;
+        }
+        g_pm.policy_role_mismatch_since_ms = 0U;
+        return;
+    }
     if (PowerManager_IsAttachedAsSink() ||
         PowerManager_HasLiveSinkContract()) {
         if (g_pm.policy_desired_role != TPS25751_ROLE_SINK) {
@@ -2568,7 +2580,7 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                        !PowerManager_HasTypecPowerConnection() &&
                        (g_pm.auto_src_attach_ms != 0U)) {
                 if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
-                    !g_pm.auto_try_snk &&
+                    !g_pm.auto_try_snk && (g_pm.auto_probe != 2U) &&
                     ((uint32_t)(now_ms - g_pm.auto_src_attach_ms) <
                      PM_AUTO_SRC_FAIL_MS)) {
                     if ((g_pm.auto_src_fail_count == 0U) ||

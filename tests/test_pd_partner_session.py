@@ -41,7 +41,7 @@ static struct {
  bool session_gsrc_failed_this_gen,auto_swap_command_sent;
  TPS25751_PowerRole_t typec_initial_role,mode_swap_target;
  bool mode_swap_command_pending,mode_update_pending,port_mode_deferred;uint8_t mode_change_path;
- uint32_t auto_src_attach_ms,auto_src_fail_ms,auto_try_snk_until_ms;uint8_t auto_src_fail_count;bool auto_try_snk;
+ uint32_t auto_src_attach_ms,auto_src_fail_ms,auto_try_snk_until_ms;uint8_t auto_src_fail_count,auto_probe;bool auto_try_snk;
  int source_path_phase;uint8_t telemetry_phase,stuck_confirm_count;
  uint32_t attach_generation,attach_count,detach_count,stuck_debounce_until_ms;
 } g_pm;
