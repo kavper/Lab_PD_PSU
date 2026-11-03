@@ -12,6 +12,7 @@
 #define TPS25751_TYPEC_OPTIONS_MASK    0x03U
 #define TPS25751_TYPEC_TRY_SRC         0x01U
 #define TPS25751_TYPEC_TRY_SNK         0x02U
+#define TPS25751_TYPEC_TRY_SNK         0x02U
 
 enum {
     TPS_OP_STATE_START = 0,
@@ -771,6 +772,13 @@ TPS25751_Rdo_t TPS25751_DecodeRdo(
 bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode)
 {
+    return TPS25751_PatchPortModeTry(port_config, mode, false);
+}
+
+bool TPS25751_PatchPortModeTry(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
+                               TPS25751_PortMode_t mode,
+                               bool prefer_sink)
+{
     uint8_t old_state;
     uint8_t old_options;
     uint8_t typec_options;
@@ -790,8 +798,9 @@ bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
      * Sink-only iPhone still attaches from Unattached.SRC (Rd) as Source.
      * A dedicated adapter (Rp) takes Try.SRC then TryWait.SNK → Attached.SNK.
      * Optional Try states do not apply to the single-role modes. */
-    typec_options = (mode == TPS25751_PORT_DRP) ?
-                    TPS25751_TYPEC_TRY_SRC : 0U;
+    typec_options = (mode != TPS25751_PORT_DRP) ? 0U :
+                    prefer_sink ? TPS25751_TYPEC_TRY_SNK :
+                    TPS25751_TYPEC_TRY_SRC;
     port_config[0] = (uint8_t)(
         (old_state & (uint8_t)~TPS25751_PORT_STATE_MASK) | (uint8_t)mode);
     port_config[1] = (uint8_t)(

@@ -37,6 +37,11 @@
 #define PM_POLICY_SETTLE_MS            300U
 /* PR_Swap completes in well under a second; past this, reset the port. */
 #define PM_MODE_SWAP_TIMEOUT_MS       1500U
+#define PM_AUTO_INSIST_WINDOW_MS      1500U
+#define PM_AUTO_ACCEPT_SINK_MS       10000U
+#define PM_AUTO_SRC_FAIL_MS           1500U
+#define PM_AUTO_SRC_FAIL_WINDOW_MS    6000U
+#define PM_AUTO_TRY_SNK_MS           15000U
 #define PM_RESET_AC_POLL_MS             50U
 #define BQ25731_CHGSTATUS_AC_STAT   0x8000U
 #define PM_COHERENT_TELEMETRY_PHASE     8U
@@ -181,6 +186,19 @@ typedef struct {
     /* Writing PORT_CONFIG (0x28) restarts Type-C and drops the partner, so
      * on a live session the new port mode is written after detach. */
     bool port_mode_deferred;
+    /* AUTO: a partner that answered our PR_Swap reject with Hard Reset
+     * (a monitor/charger insisting on sourcing) may swap us to sink. */
+    uint32_t auto_swap_request_ms;
+    uint32_t auto_accept_sink_until_ms;
+    /* AUTO: source sessions that collapse right after attach (a monitor's
+     * input capacitance pulls PP5V down) switch DRP to Try.SNK for a while
+     * so that partner powers us instead.  Try.SRC stays the default: two
+     * Try.SNK ports (iPad) never attach. */
+    uint32_t auto_src_attach_ms;
+    uint32_t auto_src_fail_ms;
+    uint8_t auto_src_fail_count;
+    uint32_t auto_try_snk_until_ms;
+    bool auto_try_snk;
     /* BQ ChargerStatus AC_STAT polled while the port is Disabled. */
     bool reset_bq_ac_valid;
     bool reset_bq_ac;
@@ -309,7 +327,7 @@ static PowerManager_Context_t g_pm;
 typedef struct {
     uint32_t ms;
     uint8_t kind;   /* 1 STATUS 2 POWER_PATH 3 VBUS 4 INT_EVENT 5 G4 Option3
-                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT */
+                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK */
     uint8_t a;
     uint16_t b;
     uint32_t c;
@@ -1130,6 +1148,10 @@ static void PowerManager_NeutralizeAutoPortControl(void)
                                   TPS25751_PORT_DRP)) {
         g_pm.port_control_write_pending = true;
     }
+    if (!PowerManager_TickReached(HAL_GetTick(),
+                                  g_pm.auto_accept_sink_until_ms)) {
+        PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
+    }
 }
 
 static void PowerManager_ResetPolicy(uint32_t now_ms, bool attached)
@@ -1197,9 +1219,10 @@ static void PowerManager_FinishSessionResetIfIdle(uint32_t now_ms)
 
 static void PowerManager_QueuePolicyPortConfig(void)
 {
-    (void)TPS25751_PatchPortMode(
+    (void)TPS25751_PatchPortModeTry(
         g_pm.port_config,
-        PowerManager_MapPortMode(g_pm.status.requested_mode));
+        PowerManager_MapPortMode(g_pm.status.requested_mode),
+        g_pm.auto_try_snk);
     g_pm.port_write_pending = true;
     g_pm.session_reset_restore_config = false;
     g_pm.session_reset_wait_vsafe0 = false;
@@ -1921,6 +1944,22 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     if (event.power_swap_complete) {
         g_pm.power_swap_count++;
     }
+    if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+        !g_pm.policy_decided) {
+        if (event.power_swap_requested) {
+            g_pm.auto_swap_request_ms = now_ms;
+        }
+        if (event.hard_reset && (g_pm.auto_swap_request_ms != 0U) &&
+            ((uint32_t)(now_ms - g_pm.auto_swap_request_ms) <=
+             PM_AUTO_INSIST_WINDOW_MS)) {
+            /* Rejected PR_Swap answered by Hard Reset: the partner will
+             * only source.  Accept its swap on the re-attach. */
+            g_pm.auto_accept_sink_until_ms = now_ms + PM_AUTO_ACCEPT_SINK_MS;
+            g_pm.auto_swap_request_ms = 0U;
+            PowerManager_QueueAutoSwapControl(TPS25751_ROLE_SINK);
+            PowerManager_Log(10U, 0U, 0U, now_ms);
+        }
+    }
     if (event.hard_reset) {
         g_pm.hard_reset_count++;
     }
@@ -2229,9 +2268,10 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                 g_pm.port_write_pending = true;
                 g_pm.session_reset_restore_config = true;
             } else {
-                g_pm.port_write_pending = TPS25751_PatchPortMode(
+                g_pm.port_write_pending = TPS25751_PatchPortModeTry(
                     g_pm.port_config,
-                    PowerManager_MapPortMode(g_pm.status.requested_mode));
+                    PowerManager_MapPortMode(g_pm.status.requested_mode),
+                    g_pm.auto_try_snk);
             }
             if (!g_pm.port_write_pending) {
                 g_pm.status.applied_mode = g_pm.status.requested_mode;
@@ -2393,6 +2433,32 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                              g_pm.status.tps.connection_state);
             } else if (live_role_change) {
                 g_pm.pdo_report_pending = true;
+            }
+            if ((old_connection < 6U) && PowerManager_HasTypecPowerConnection() &&
+                (g_pm.status.tps.role == TPS25751_ROLE_SOURCE)) {
+                g_pm.auto_src_attach_ms = now_ms;
+            } else if ((old_connection >= 6U) && (old_role == TPS25751_ROLE_SOURCE) &&
+                       !PowerManager_HasTypecPowerConnection() &&
+                       (g_pm.auto_src_attach_ms != 0U)) {
+                if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+                    !g_pm.auto_try_snk &&
+                    ((uint32_t)(now_ms - g_pm.auto_src_attach_ms) <
+                     PM_AUTO_SRC_FAIL_MS)) {
+                    if ((g_pm.auto_src_fail_count == 0U) ||
+                        ((uint32_t)(now_ms - g_pm.auto_src_fail_ms) >
+                         PM_AUTO_SRC_FAIL_WINDOW_MS)) {
+                        g_pm.auto_src_fail_count = 0U;
+                        g_pm.auto_src_fail_ms = now_ms;
+                    }
+                    if (++g_pm.auto_src_fail_count >= 2U) {
+                        g_pm.auto_src_fail_count = 0U;
+                        g_pm.auto_try_snk = true;
+                        g_pm.auto_try_snk_until_ms = now_ms + PM_AUTO_TRY_SNK_MS;
+                        g_pm.mode_update_pending = true;
+                        PowerManager_Log(11U, 1U, 0U, now_ms);
+                    }
+                }
+                g_pm.auto_src_attach_ms = 0U;
             }
             PowerManager_UpdateAttachPolicy(now_ms);
             if ((g_pm.mode_swap_target != TPS25751_ROLE_UNKNOWN) &&
@@ -3555,6 +3621,17 @@ void PowerManager_Task(void)
         g_pm.mode_change_path =
             PowerManager_HasTypecPowerConnection() ? 7U : 6U;
         PowerManager_FailModeSwap(now_ms, "timeout/detach");
+    }
+    if (g_pm.auto_try_snk &&
+        ((g_pm.status.requested_mode != POWER_MANAGER_USER_AUTO) ||
+         (PowerManager_TickReached(now_ms, g_pm.auto_try_snk_until_ms) &&
+          !PowerManager_HasTypecPowerConnection()))) {
+        /* Back to Try.SRC once the partner that needed it is gone. */
+        g_pm.auto_try_snk = false;
+        if (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) {
+            g_pm.mode_update_pending = true;
+        }
+        PowerManager_Log(11U, 0U, 0U, now_ms);
     }
     if (g_pm_debug_mode_request <= (uint8_t)POWER_MANAGER_USER_OFF) {
         const uint8_t req = g_pm_debug_mode_request;

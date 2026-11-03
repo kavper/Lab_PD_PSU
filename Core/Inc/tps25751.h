@@ -254,6 +254,10 @@ bool TPS25751_DecodeTxSourceCapabilities(
     uint8_t length);
 bool TPS25751_PatchPortMode(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
                             TPS25751_PortMode_t mode);
+/* DRP with Try.SNK instead of Try.SRC when prefer_sink is set. */
+bool TPS25751_PatchPortModeTry(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
+                               TPS25751_PortMode_t mode,
+                               bool prefer_sink);
 bool TPS25751_PatchPortControl(
     uint8_t port_control[TPS25751_PORT_CONTROL_LEN],
     TPS25751_PortMode_t mode);
