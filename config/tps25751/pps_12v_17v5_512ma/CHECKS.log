@@ -1,0 +1,10 @@
+PASS source identity / fixed image size
+PASS exact archived PPS APDO in both regions
+PASS fixed 12 V / 3 A; ascending fixed voltages; seven slots
+PASS two CRC regions, independent bitwise algorithm and archived reference
+PASS charger operands unchanged 17496 mV / raw 0x0100 = 512 mA at 5 mOhm
+PASS only source list/count and configuration CRCs changed
+PASS other settings and boot patch preserved byte-for-byte
+PASS unknown/corrupt input refused
+PASS full.h equals binary
+PASS actual H7 decoder: five fixed profiles including 12 V, preserved AVS type, restored PPS 5..21 V / 5 A
