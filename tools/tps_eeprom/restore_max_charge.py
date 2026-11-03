@@ -1,4 +1,4 @@
-"""Restore the earlier TPS charging ceiling: 18 V / 8.064 A at 5 mOhm.
+"""Restore the earlier TPS charging ceiling: 17.496 V / 8.064 A at 5 mOhm.
 
 Does not change SOURCE/SINK capabilities or any BMS protection. Offline only.
 """
@@ -24,7 +24,7 @@ def patch(source):
         start, end = h+16, h+0x32E
         for off in (0x315, 0x356):
             assert source[base+off-1:base+off+2] == bytes.fromhex('04 58 44')
-            struct.pack_into('<H', result, base+off, 18000)
+            struct.pack_into('<H', result, base+off, 17496)
             allowed.update((base+off, base+off+1))
         for off in (0x31B, 0x35C):
             assert source[base+off-1:base+off+2] == bytes.fromhex('02 00 01')

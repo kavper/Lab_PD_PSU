@@ -222,8 +222,8 @@ telemetry use the same capability publisher.
 
 The previous temporary 17.496 V / 512 mA charging cap is now disabled in
 production (CHARGE_BALANCE_LIMITS_ENABLED=0). TPS owns the normal charge
-settings. The current EEPROM candidate in config/tps25751/MAX_CHARGE restores
-18 V / 8.064 A at the populated 5 mOhm shunt. Firmware alone does not raise a
+settings. The current EEPROM candidate in config/tps25751/17v5_FULL_CURRENT restores
+17.496 V / 8.064 A at the populated 5 mOhm shunt. Firmware alone does not raise a
 512 mA value in an older EEPROM; both versions must agree. Source capability
 profiles and BMS protections remain separate from this charging ceiling.
 OTP release remains blocked pending physical validation.

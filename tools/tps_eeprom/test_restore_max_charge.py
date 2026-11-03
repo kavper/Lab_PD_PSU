@@ -2,7 +2,7 @@ from pathlib import Path
 import struct,sys,unittest
 sys.path.insert(0,str(Path(__file__).parent))
 import restore_max_charge as m
-root=Path(__file__).resolve().parents[2]/'config/tps25751/MAX_CHARGE'
+root=Path(__file__).resolve().parents[2]/'config/tps25751/17v5_FULL_CURRENT'
 
 def delta(a,b):
     crc=0
@@ -20,7 +20,7 @@ class MaxChargeTests(unittest.TestCase):
                 h=base+0x80;start=h+16;end=h+0x32E
                 expected=struct.unpack_from('<I',before,h+4)[0]^delta(before[start:end],after[start:end])
                 self.assertEqual(struct.unpack_from('<I',after,h+4)[0],expected)
-                for off in (0x315,0x356):self.assertEqual(struct.unpack_from('<H',after,base+off)[0],18000)
+                for off in (0x315,0x356):self.assertEqual(struct.unpack_from('<H',after,base+off)[0],17496)
                 for off in (0x31B,0x35C):self.assertEqual(struct.unpack_from('<H',after,base+off)[0],0xFC0)
                 self.assertEqual(before[base+0xF9:base+0x1A0],after[base+0xF9:base+0x1A0])
     def test_unknown_image_rejected(self):

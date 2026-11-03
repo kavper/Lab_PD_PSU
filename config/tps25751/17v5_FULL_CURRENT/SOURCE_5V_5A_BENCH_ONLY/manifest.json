@@ -1,0 +1,11 @@
+{
+  "status": "offline validated; EEPROM not programmed",
+  "charge_voltage_mV": 17496,
+  "charge_current_limit_mA_at5mOhm": 8064,
+  "SOURCE_profiles": "5/9/12/15/20 V + existing AVS + PPS 5..21 V / 5 A",
+  "SINK_profiles": "5/9/12/15/20 V; maximum available power, higher-voltage tie-break",
+  "source_5V_current_mA": 5000,
+  "source_5A_status": "bench-only; load validation pending",
+  "sha256": "2e2ef51d35767dacc562016bb9fe542aa7e9530e1d19923f052e80d2d7b40746",
+  "CRC": "both regions independently verified"
+}

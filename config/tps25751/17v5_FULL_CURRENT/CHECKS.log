@@ -1,0 +1,5 @@
+PASS 17496mV / 8064mA in both configuration regions and both charger startup write sequences
+PASS SOURCE PPS/12V, SINK12V and selection policy unchanged
+PASS only voltage operands and CRC changed versus prior full-current candidate
+PASS independent bitwise CRC cross-check both regions
+PASS header equals binary
