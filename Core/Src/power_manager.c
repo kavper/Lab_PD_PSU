@@ -37,6 +37,7 @@
 #define PM_POLICY_SETTLE_MS            300U
 /* PR_Swap completes in well under a second; past this, reset the port. */
 #define PM_MODE_SWAP_TIMEOUT_MS       1500U
+#define PM_INT_MASK_CHECK_MS          2000U
 #define PM_AUTO_INSIST_WINDOW_MS      1500U
 #define PM_AUTO_ACCEPT_SINK_MS       10000U
 #define PM_AUTO_SRC_FAIL_MS           1500U
@@ -264,6 +265,9 @@ typedef struct {
     bool session_bq_stop_verified;
     uint16_t bq_option3_target;
     bool event_mask_ready;
+    /* TPS can come out of a power-up after the mask was written and lose
+     * it; then no INT_EVENT ever latches (no attach, caps or contract). */
+    uint32_t event_mask_check_ms;
     bool event_mask_write_pending;
     bool event_clear_pending;
 
@@ -327,7 +331,7 @@ static PowerManager_Context_t g_pm;
 typedef struct {
     uint32_t ms;
     uint8_t kind;   /* 1 STATUS 2 POWER_PATH 3 VBUS 4 INT_EVENT 5 G4 Option3
-                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK */
+                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT 10 AUTO accept sink 11 AUTO Try.SNK 12 INT_MASK lost */
     uint8_t a;
     uint16_t b;
     uint32_t c;
@@ -2368,12 +2372,22 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             }
             memcpy(g_pm.int_mask, data, sizeof(g_pm.int_mask));
             TPS_IntEventEnableRequiredBits(g_pm.int_mask);
-            g_pm.event_mask_write_pending = true;
+            /* Rewrite only when the TPS lost bits we need. */
+            g_pm.event_mask_write_pending =
+                memcmp(g_pm.int_mask, data, sizeof(g_pm.int_mask)) != 0;
+            if (g_pm.event_mask_write_pending && g_pm.event_mask_ready) {
+                PowerManager_Log(12U, 0U, 0U, now_ms);
+            }
+            if (!g_pm.event_mask_write_pending) {
+                g_pm.event_mask_ready = true;
+            }
+            g_pm.event_mask_check_ms = now_ms + PM_INT_MASK_CHECK_MS;
             break;
 
         case PM_JOB_WRITE_INT_MASK:
             g_pm.event_mask_write_pending = false;
             g_pm.event_mask_ready = true;
+            g_pm.event_mask_check_ms = now_ms + PM_INT_MASK_CHECK_MS;
             break;
 
         case PM_JOB_READ_STATUS:
@@ -3438,7 +3452,8 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.event_mask_write_pending) {
         return PM_JOB_WRITE_INT_MASK;
     }
-    if (!g_pm.event_mask_ready) {
+    if (!g_pm.event_mask_ready ||
+        PowerManager_TickReached(now_ms, g_pm.event_mask_check_ms)) {
         return PM_JOB_READ_INT_MASK;
     }
     if (g_pm.event_clear_pending) {
