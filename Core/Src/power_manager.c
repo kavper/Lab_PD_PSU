@@ -3796,7 +3796,12 @@ void PowerManager_GetPdCapabilities(PowerManager_PdCapabilities_t *out)
     if (g_pm.status.tps.role == TPS25751_ROLE_SINK &&
         g_pm.partner_source_caps_current && g_pm.partner_source_caps_fresh) {
         caps = &g_pm.partner_source_caps;
-    } else if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE && g_pm.local_source_caps_valid) {
+    } else if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE && g_pm.local_source_caps_valid &&
+               g_pm.status.tps.active_rdo.valid &&
+               (g_pm.source_path_phase == PM_SRC_PATH_READY)) {
+        /* Only for a source contract that holds: a source attach that
+         * collapses within ~0.2 s (before the AUTO Try.SNK fallback) must
+         * not flash our own PDO list between the partner's. */
         caps = &g_pm.local_source_caps;
         out->flags |= 8U;
     }
