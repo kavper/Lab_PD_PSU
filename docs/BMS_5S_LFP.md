@@ -256,22 +256,9 @@ Start verification accepts DSG-on/PDSG-off with CHG-off only for COV alone.
 No repeated FET starts, COV overrides or protection threshold changes.
 CUV still requests host shutdown. TI SLUUCG7 sections5.2.4 and10.
 
-## Tymczasowy profil wyrównawczy G4 — 2026-11-03
-G4 obniża w SINK ustawienia BQ do maksymalnie17,496V (17,50V zaokrąglone
-w dół do8mV) i512mA. Jest to profil całego ładowania na czas wyrównania,
-nie automatycznie wybierana końcówka. Zachowuje niższe ustawienia TPS.
-Kontrola przez istniejący scheduler I2Cc co około1s, zapis prądu przed napięciem,
-potwierdzenie odczytem; niezgodność/błąd powoduje żądanie USB OFF.
-Po kontrakcie następuje ponowne sprawdzenie. W SOURCE i podczas resetu portu
-ogranicznik nie zapisuje nastaw ładowania.
-
-EEPROM nadal ma18V/8,064A. G4 nie gwarantuje niższych limitów przed uruchomieniem
-kontroli ani przy braku działania MCU; krótkie okno po samodzielnych zapisach TPS
-jest możliwe. COV i inne zabezpieczenia pozostają aktywne.
-
-Balansowanie zachowuje |I|<1A, SOC>=90%, min3350mV, temperatury i ważność danych.
-Obecny pakiet maSOC100%, więc profil512mA spełnia bramkę prądową.17,496V to
-średnio3,499V/ogniwo; nie gwarantuje minimalnego napięcia każdego nierównego ogniwa.
-Nie obniżano kotwicyFULL: nadal wymaga średnio3550mV.
-Ten tymczasowy profil nie służy do kalibracji pełnej pojemności/SOH. Należy go
-usunąć/zastąpić docelowym sterowaniem po wyrównaniu, przed normalnym testem pojemności.
+## Profil ładowania G4 — 2026-11-03
+Tymczasowy profil 17,496 V / 512 mA usunięto. Obowiązują limity z EEPROM TPS:
+18 V / 8,064 A (średnio 3,6 V/ogniwo). COV i pozostałe zabezpieczenia BMS
+pozostają aktywne. Balansowanie nadal wymaga |I|<1A, SOC>=90%, min 3350 mV,
+poprawnych temperatur i danych, więc przy pełnym prądzie rusza dopiero przy
+końcu ładowania.

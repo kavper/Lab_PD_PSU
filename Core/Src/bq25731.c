@@ -1,5 +1,4 @@
 #include "bq25731.h"
-#include "charge_balance_limits.h"
 
 #include <string.h>
 
@@ -154,15 +153,6 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption3(
 {
     return BQ25731_StartWriteFixed16(
         dev, BQ25731_REG_CHARGE_OPTION3, value);
-}
-
-BQ25731_Status_t BQ25731_StartWriteBalanceCurrent(BQ25731_Device_t *dev)
-{
-    return BQ25731_StartWriteFixed16(dev, 0x02U, CHARGE_BALANCE_CURRENT_RAW);
-}
-BQ25731_Status_t BQ25731_StartWriteBalanceVoltage(BQ25731_Device_t *dev)
-{
-    return BQ25731_StartWriteFixed16(dev, 0x04U, CHARGE_BALANCE_VOLTAGE_RAW);
 }
 
 BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev)

@@ -11,8 +11,9 @@ for test_source in tests/*.c; do
   "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ICore/Inc "${sources[@]}" -lm -o "$output/test"
   "$output/test"
 done
-python3 tests/test_charge_cap_manager.py
 python3 tests/test_pd_otg_stop.py
+python3 tests/test_pd_partner_session.py
+python3 tests/test_pd_mode_swap.py
 python3 tests/test_bms_cov_recovery.py
 python3 tests/test_bms_shutdown.py
 python3 tests/test_clear_recovery.py

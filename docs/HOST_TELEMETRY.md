@@ -220,7 +220,14 @@ frames are not repeated. Connected sessions publish on change and every 1 s
 for H7 freshness and recovery after an H7 restart. Both legacy and FIELDS
 telemetry use the same capability publisher.
 
-The current G4 charging cap is a temporary balancing profile, 17.496 V /
-512 mA at the populated 5 mOhm charger shunt. It does not raise lower TPS
-settings. It does not replace the EEPROM startup limits or establish a new
-full-charge/FCC anchor. OTP release remains blocked pending physical validation.
+A partner joining an e-marked cable that is already inserted (state 4 to
+6/7) starts a new session like a plug-in. A SourceCapsReceived event read
+before STATUS shows the connection is held until the next STATUS read.
+
+User mode changes on a live PD contract use PR_Swap (SWSk/SWSr) with the
+port kept DRP until the role is in place; OFF, no contract or a failed or
+timed-out swap (1.5 s) use the full disable/vSafe0V/enable reset. AUTO
+re-runs the partner Source PDO decision.
+
+The temporary 17.496 V / 512 mA G4 charging cap was removed; the TPS
+EEPROM limits apply. OTP release remains blocked pending physical validation.

@@ -130,8 +130,6 @@ BQ25731_Status_t BQ25731_StartWriteStartupOption1(
     BQ25731_Device_t *dev, uint16_t value);
 BQ25731_Status_t BQ25731_StartWriteStartupOption3(
     BQ25731_Device_t *dev, uint16_t value);
-BQ25731_Status_t BQ25731_StartWriteBalanceCurrent(BQ25731_Device_t *dev);
-BQ25731_Status_t BQ25731_StartWriteBalanceVoltage(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartReadOption3(BQ25731_Device_t *dev);
 BQ25731_Status_t BQ25731_StartWriteOption3(
     BQ25731_Device_t *dev, uint16_t value);

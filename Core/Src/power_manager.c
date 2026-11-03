@@ -3,7 +3,6 @@
 #include "debug_uart.h"
 #include "tps_int_event.h"
 #include "pd_source_readiness.h"
-#include "charge_balance_limits.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +35,10 @@
 #define PM_STUCK_CONFIRM_SAMPLES        3U
 #define PM_STUCK_DEBOUNCE_MS          250U
 #define PM_POLICY_SETTLE_MS            300U
+/* PR_Swap completes in well under a second; past this, reset the port. */
+#define PM_MODE_SWAP_TIMEOUT_MS       1500U
+#define PM_RESET_AC_POLL_MS             50U
+#define BQ25731_CHGSTATUS_AC_STAT   0x8000U
 #define PM_COHERENT_TELEMETRY_PHASE     8U
 /* AUTO: Type-C attach role + fresh caps + Dual-Role Power + user mode.
  * 5 V/15 W is only a strong-charger yield hint, never the sole rule.
@@ -75,6 +78,9 @@ typedef enum {
     PM_JOB_TRACE_SOURCE_CAPS,
     PM_JOB_SWAP_TO_SOURCE,
     PM_JOB_SWAP_TO_SINK,
+    PM_JOB_MODE_SWAP,
+    PM_JOB_BQ_WATCH_OPTION3,
+    PM_JOB_BQ_POLL_ACSTAT,
     PM_JOB_BQ_TRACE_IIN_HOST,
     PM_JOB_BQ_READ_OPTION0,
     PM_JOB_BQ_WRITE_STARTUP_OPTION0,
@@ -92,11 +98,7 @@ typedef enum {
     PM_JOB_BQ_READ_ID,
     PM_JOB_BQ_READ_CONFIG_BLOCK,
     PM_JOB_BQ_READ_STATUS_BLOCK,
-    PM_JOB_BQ_READ_ADC_BLOCK,
-    PM_JOB_CHARGE_CAP_READ,
-    PM_JOB_CHARGE_CAP_WRITE_I,
-    PM_JOB_CHARGE_CAP_WRITE_V,
-    PM_JOB_CHARGE_CAP_VERIFY
+    PM_JOB_BQ_READ_ADC_BLOCK
 } PowerManager_Job_t;
 
 typedef enum {
@@ -168,6 +170,22 @@ typedef struct {
 
     bool initialized;
     bool mode_update_pending;
+    /* User mode change done by PR_Swap on a live PD session. */
+    TPS25751_PowerRole_t mode_swap_target;
+    bool mode_swap_command_pending;
+    uint32_t mode_swap_deadline_ms;
+    /* Last user mode change, read over SWD: 1 PR_Swap started, 2 policy
+     * only, 3 AUTO re-decide, 4 port reset, 5 swap rejected (rc in
+     * mode_swap_task_rc), 6 session lost, 7 timeout, 8 swap done. */
+    uint8_t mode_change_path;
+    /* Writing PORT_CONFIG (0x28) restarts Type-C and drops the partner, so
+     * on a live session the new port mode is written after detach. */
+    bool port_mode_deferred;
+    /* BQ ChargerStatus AC_STAT polled while the port is Disabled. */
+    bool reset_bq_ac_valid;
+    bool reset_bq_ac;
+    uint32_t reset_bq_ac_next_ms;
+    uint8_t mode_swap_task_rc;
     bool port_write_pending;
     bool port_config_valid;
     bool port_control_valid;
@@ -186,6 +204,8 @@ typedef struct {
     uint32_t attach_generation;
     uint32_t job_attach_generation;
     bool session_caps_event_this_gen;
+    /* SourceCapsReceived seen before STATUS showed the power connection. */
+    bool source_caps_event_pending;
     bool session_gsrc_ok_this_gen;
     bool session_gsrc_failed_this_gen;
     bool session_reset_faulted;
@@ -221,12 +241,6 @@ typedef struct {
     bool bq_option3_read_pending;
     bool bq_option3_write_pending;
     bool bq_option3_valid;
-    uint8_t charge_cap_phase; /* 0=read,1=write I,2=write V,3=verify */
-    bool charge_cap_voltage_pending;
-    bool charge_cap_verified;
-    bool charge_cap_fault;
-    uint32_t charge_cap_next_ms;
-    uint32_t charge_cap_applied_count;
 
     bool bq_option3_verify_pending;
     bool session_bq_stop_verified;
@@ -287,6 +301,51 @@ typedef struct {
 } PowerManager_Context_t;
 
 static PowerManager_Context_t g_pm;
+
+/* Bench diagnostics over SWD.  The ring records role/VBUS hand-over events
+ * with HAL ticks; writing a PowerManager_UserMode_t value to
+ * g_pm_debug_mode_request requests that mode (0xFF = idle). */
+#define PM_EVLOG_LEN 256U
+typedef struct {
+    uint32_t ms;
+    uint8_t kind;   /* 1 STATUS 2 POWER_PATH 3 VBUS 4 INT_EVENT 5 G4 Option3
+                       write 6 BQ Option3 read 7 mode path 9 reset AC_STAT */
+    uint8_t a;
+    uint16_t b;
+    uint32_t c;
+} PowerManager_Event_t;
+volatile PowerManager_Event_t g_pm_evlog[PM_EVLOG_LEN];
+volatile uint32_t g_pm_evlog_count;
+volatile uint8_t g_pm_debug_mode_request = 0xFFU;
+/* BQ Option3/status/VBUS sampling period in a role change window,
+ * 0 = off.  Set over SWD for bench captures (30 ms works). */
+volatile uint16_t g_pm_debug_bq_watch_ms = 0U;
+static uint32_t s_watch_until_ms;
+static uint32_t s_watch_next_ms;
+static uint8_t s_watch_step;
+static const uint8_t s_watch_regs[3] = {
+    BQ25731_REG_CHARGE_OPTION3, BQ25731_REG_CHARGER_STATUS,
+    BQ25731_REG_ADC_VBUS_PSYS
+};
+static uint8_t s_logged_path;
+static uint32_t s_logged_vbus_mv;
+
+static void PowerManager_Log(uint8_t kind, uint8_t a, uint16_t b, uint32_t c)
+{
+    const uint32_t i = g_pm_evlog_count % PM_EVLOG_LEN;
+    g_pm_evlog[i].ms = HAL_GetTick();
+    g_pm_evlog[i].kind = kind;
+    g_pm_evlog[i].a = a;
+    g_pm_evlog[i].b = b;
+    g_pm_evlog[i].c = c;
+    g_pm_evlog_count = g_pm_evlog_count + 1U;
+}
+
+static void PowerManager_WatchRoleChange(uint32_t now_ms)
+{
+    s_watch_until_ms = now_ms + 3000U;
+    s_watch_next_ms = now_ms;
+}
 
 static const char *PowerManager_RoleToString(TPS25751_PowerRole_t role);
 static const char *PowerManager_TypecStateToString(uint8_t state);
@@ -359,6 +418,9 @@ static const char *PowerManager_JobToString(PowerManager_Job_t job)
         case PM_JOB_TRACE_SOURCE_CAPS: return "TRACE_SOURCE_CAPS";
         case PM_JOB_SWAP_TO_SOURCE: return "SWAP_TO_SOURCE";
         case PM_JOB_SWAP_TO_SINK: return "SWAP_TO_SINK";
+        case PM_JOB_MODE_SWAP: return "MODE_SWAP";
+        case PM_JOB_BQ_WATCH_OPTION3: return "BQ_WATCH_OPTION3";
+        case PM_JOB_BQ_POLL_ACSTAT: return "BQ_POLL_ACSTAT";
         case PM_JOB_BQ_TRACE_IIN_HOST: return "BQ_TRACE_IIN_HOST";
         case PM_JOB_BQ_READ_OPTION0: return "BQ_READ_OPTION0";
         case PM_JOB_BQ_WRITE_STARTUP_OPTION0: return "BQ_WRITE_QUIET_OPTION0";
@@ -468,26 +530,6 @@ static void PowerManager_FailBqStop(void)
     Debug_Printf("[PD-RESET] FAULT BQ stop not verified; Type-C stays Disabled");
 }
 
-static bool PowerManager_ChargeCapEligible(void)
-{
-    return g_pm.bq_init==PM_BQ_INIT_DONE && g_pm.status.bq.id_valid &&
-        g_pm.status.tps.attached && g_pm.status.tps.role==TPS25751_ROLE_SINK &&
-        g_pm.status.requested_mode!=POWER_MANAGER_USER_SOURCE_ONLY &&
-        g_pm.status.requested_mode!=POWER_MANAGER_USER_OFF &&
-        !g_pm.session_reset_busy && !g_pm.session_reset_faulted;
-}
-
-static void PowerManager_ChargeCapFailed(uint32_t now_ms)
-{
-    g_pm.charge_cap_verified=false;
-    g_pm.charge_cap_fault=true;
-    g_pm.charge_cap_phase=0U;
-    PowerManager_RecordError(POWER_MANAGER_ERROR_BQ,TPS25751_COMMAND_ERROR,0x02U,now_ms);
-    /* Do not continue charging with unverified higher EEPROM defaults. */
-    (void)PowerManager_SetUserMode(POWER_MANAGER_USER_OFF);
-    Debug_Printf("[CHARGE-CAP] FAULT: limits unverified; USB OFF requested");
-}
-
 static void PowerManager_ClearContractTelemetry(void)
 {
     g_pm.status.tps.active_pdo_raw = 0U;
@@ -529,6 +571,7 @@ static void PowerManager_BeginSessionReset(uint32_t now_ms,
 
     g_pm.session_reset_busy = true;
     g_pm.session_reset_wait_vsafe0 = false;
+    g_pm.reset_bq_ac_valid = false;
     g_pm.session_reset_seq++;
     g_pm.status.pd_reset_seq = g_pm.session_reset_seq;
     g_pm.status.pd_reset_busy = true;
@@ -595,10 +638,14 @@ static void PowerManager_SetOtgPin(bool high)
 static void PowerManager_MaintainOtgPermissionPin(void)
 {
     bool allow_otg;
+    /* During a user PR_Swap the live role decides; the TPS hands VBUS over. */
+    const PowerManager_UserMode_t mode =
+        (g_pm.mode_swap_target == TPS25751_ROLE_UNKNOWN) ?
+        g_pm.status.requested_mode : POWER_MANAGER_USER_SOURCE_ONLY;
 
     if (g_pm.session_reset_busy ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF) ||
+        (mode == POWER_MANAGER_USER_SINK_ONLY) ||
+        (mode == POWER_MANAGER_USER_OFF) ||
         (!g_pm.status.tps.attached) ||
         (g_pm.status.tps.role != TPS25751_ROLE_SOURCE)) {
         g_pm.status.source_fault_latched = false;
@@ -610,12 +657,12 @@ static void PowerManager_MaintainOtgPermissionPin(void)
      * so iPad never reached Attached.SRC (conn=0, VBUS 5↔0). */
     if (g_pm.session_reset_busy ||
         g_pm.session_reset_faulted ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_SINK_ONLY) ||
-        (g_pm.status.requested_mode == POWER_MANAGER_USER_OFF) ||
+        (mode == POWER_MANAGER_USER_SINK_ONLY) ||
+        (mode == POWER_MANAGER_USER_OFF) ||
         g_pm.status.source_fault_latched) {
         allow_otg = false;
-    } else if ((g_pm.status.requested_mode == POWER_MANAGER_USER_SOURCE_ONLY) ||
-               (g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO)) {
+    } else if ((mode == POWER_MANAGER_USER_SOURCE_ONLY) ||
+               (mode == POWER_MANAGER_USER_AUTO)) {
         bool source_contract =
             g_pm.status.tps.attached &&
             (g_pm.status.tps.role == TPS25751_ROLE_SOURCE) &&
@@ -623,7 +670,7 @@ static void PowerManager_MaintainOtgPermissionPin(void)
             g_pm.status.tps.active_pdo.valid &&
             g_pm.status.tps.active_rdo.valid &&
             (g_pm.source_path_phase == PM_SRC_PATH_READY);
-        if ((g_pm.status.requested_mode == POWER_MANAGER_USER_AUTO) &&
+        if ((mode == POWER_MANAGER_USER_AUTO) &&
             (g_pm.policy_desired_role == TPS25751_ROLE_SINK)) {
             source_contract = false;
         }
@@ -1213,6 +1260,17 @@ static void PowerManager_TickSessionResetWait(uint32_t now_ms)
         return;
     }
 
+    /* BQ25731 starts OTG only with its VBUS below VVBUS_CONVENZ (3.2 V,
+     * AC_STAT=0; SLUSE66 9.3.9).  After a sink session the PP_EXT-side
+     * capacitance holds that node up for ~1 s, so restoring Type-C sooner
+     * makes the first Attached.SRC fail and the partner re-attach. */
+    if ((g_pm.status.requested_mode != POWER_MANAGER_USER_SINK_ONLY) &&
+        (g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        (!g_pm.reset_bq_ac_valid || g_pm.reset_bq_ac) &&
+        (elapsed < PM_SESSION_VSAFE0_GIVEUP_MS)) {
+        return;
+    }
+
     Debug_Printf("[PD-RESET t=%lu seq=%lu] vSafe0V ok tps_vbus=%lu STATUS.VBUS=%u elapsed=%lu; restore 0x28 %s sm=%u",
                  (unsigned long)now_ms,
                  (unsigned long)g_pm.session_reset_seq,
@@ -1439,6 +1497,7 @@ static void PowerManager_InvalidateSessionOnDetach(uint32_t now_ms)
     g_pm.partner_source_caps_fresh = false;
     g_pm.partner_sink_observed = false;
     g_pm.session_caps_event_this_gen = false;
+    g_pm.source_caps_event_pending = false;
     g_pm.source_caps_trace_pending = false;
     g_pm.pdo_report_pending = false;
     g_pm.session_gsrc_ok_this_gen = false;
@@ -1462,29 +1521,35 @@ static void PowerManager_InvalidateSessionOnDetach(uint32_t now_ms)
     PowerManager_ForceOtgOff();
 }
 
+static void PowerManager_StartSession(const char *why)
+{
+    g_pm.attach_count++;
+    g_pm.attach_generation++;
+    g_pm.status.attach_generation = g_pm.attach_generation;
+    g_pm.typec_initial_role = g_pm.status.tps.role;
+    g_pm.typec_initial_role_latched = false;
+    g_pm.session_caps_event_this_gen = false;
+    g_pm.session_gsrc_ok_this_gen = false;
+    g_pm.session_gsrc_failed_this_gen = false;
+    g_pm.auto_swap_command_sent = false;
+    g_pm.source_path_phase = PM_SRC_PATH_WAIT_CONTRACT;
+    g_pm.coherent_snapshot_valid = false;
+    g_pm.stuck_confirm_count = 0U;
+    g_pm.stuck_debounce_until_ms = 0U;
+    Debug_Printf("[PD-SESSION] %s gen=%lu role=%s conn=%u typec=0x%02X",
+                 why,
+                 (unsigned long)g_pm.attach_generation,
+                 PowerManager_RoleToString(g_pm.status.tps.role),
+                 g_pm.status.tps.connection_state,
+                 g_pm.status.tps.typec_port_state);
+}
+
 static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
 {
     if (g_pm.status.tps.attached != g_pm.previous_attached) {
         g_pm.previous_attached = g_pm.status.tps.attached;
         if (g_pm.status.tps.attached) {
-            g_pm.attach_count++;
-            g_pm.attach_generation++;
-            g_pm.status.attach_generation = g_pm.attach_generation;
-            g_pm.typec_initial_role = g_pm.status.tps.role;
-            g_pm.typec_initial_role_latched = false;
-            g_pm.session_caps_event_this_gen = false;
-            g_pm.session_gsrc_ok_this_gen = false;
-            g_pm.session_gsrc_failed_this_gen = false;
-            g_pm.auto_swap_command_sent = false;
-            g_pm.source_path_phase = PM_SRC_PATH_WAIT_CONTRACT;
-            g_pm.coherent_snapshot_valid = false;
-            g_pm.stuck_confirm_count = 0U;
-            g_pm.stuck_debounce_until_ms = 0U;
-            Debug_Printf("[PD-SESSION] attach gen=%lu role=%s conn=%u typec=0x%02X",
-                         (unsigned long)g_pm.attach_generation,
-                         PowerManager_RoleToString(g_pm.status.tps.role),
-                         g_pm.status.tps.connection_state,
-                         g_pm.status.tps.typec_port_state);
+            PowerManager_StartSession("attach");
         } else {
             g_pm.detach_count++;
             g_pm.attach_generation++;
@@ -1492,6 +1557,10 @@ static void PowerManager_UpdateAttachPolicy(uint32_t now_ms)
              * BeginSessionReset — TPS Type-C SM handles unplug; a forced
              * Disabled→vSafe0V→800 ms window blacks out fast replugs. */
             PowerManager_InvalidateSessionOnDetach(now_ms);
+            if (g_pm.port_mode_deferred) {
+                g_pm.port_mode_deferred = false;
+                g_pm.mode_update_pending = true;
+            }
             Debug_Printf("[PD-SESSION] detach gen=%lu (soft invalidate, no 0x28 reset)",
                          (unsigned long)g_pm.attach_generation);
         }
@@ -1523,6 +1592,20 @@ static void PowerManager_QueueAutoSwapControl(TPS25751_PowerRole_t desired)
     }
 }
 
+
+static void PowerManager_FailModeSwap(uint32_t now_ms, const char *why)
+{
+    Debug_Printf("[PD-MODE] PR_Swap to %s %s; port reset",
+                 PowerManager_RoleToString(g_pm.mode_swap_target), why);
+    g_pm.mode_swap_target = TPS25751_ROLE_UNKNOWN;
+    g_pm.mode_swap_command_pending = false;
+    g_pm.port_mode_deferred = false;
+    PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
+    PowerManager_BeginSessionReset(now_ms, "mode swap failed", true);
+    if (!g_pm.session_reset_busy) {
+        g_pm.mode_update_pending = true;
+    }
+}
 
 static bool PowerManager_IsAttachedAsSink(void)
 {
@@ -1822,6 +1905,9 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
     if (!event.any) {
         return;
     }
+    PowerManager_Log(4U, event.raw[10], (uint16_t)(event.raw[4] | (event.raw[5] << 8)),
+                     (uint32_t)event.raw[0] | ((uint32_t)event.raw[1] << 8) |
+                     ((uint32_t)event.raw[2] << 16) | ((uint32_t)event.raw[3] << 24));
 
     memcpy(g_pm.event_to_clear, event.raw, sizeof(g_pm.event_to_clear));
     g_pm.event_clear_pending = true;
@@ -1830,9 +1916,6 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
         g_pm.plug_change_count++;
     }
     if (event.new_contract_consumer || event.new_contract_provider) {
-        g_pm.charge_cap_phase=0U;
-        g_pm.charge_cap_verified=false;
-        g_pm.charge_cap_next_ms=now_ms;
         g_pm.contract_count++;
     }
     if (event.power_swap_complete) {
@@ -1878,11 +1961,19 @@ static void PowerManager_HandleEvent(const uint8_t *data, uint32_t now_ms)
                                  TPS25751_REG_INT_EVENT,
                                  now_ms);
     }
-    if (event.source_caps_received && PowerManager_HasTypecPowerConnection()) {
-        /* Caps arrived for this attach_generation.  TRACE may decode;
-         * never treat a cold RX_SOURCE_CAPS read as fresh without this. */
-        g_pm.session_caps_event_this_gen = true;
-        g_pm.source_caps_trace_pending = true;
+    if (event.source_caps_received) {
+        if (PowerManager_HasTypecPowerConnection()) {
+            /* Caps arrived for this attach_generation.  TRACE may decode;
+             * never treat a cold RX_SOURCE_CAPS read as fresh without this. */
+            g_pm.session_caps_event_this_gen = true;
+            g_pm.source_caps_trace_pending = true;
+        } else {
+            /* STATUS is polled before INT_EVENT, so a partner that attached
+             * in between still looks absent here.  Clearing the event would
+             * lose the only Source_Capabilities of the session; the next
+             * STATUS read decides whether a power connection exists. */
+            g_pm.source_caps_event_pending = true;
+        }
     }
     if (event.plug_changed || event.source_caps_received ||
         event.new_contract_consumer || event.hard_reset) {
@@ -1910,45 +2001,30 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
     g_pm.job = PM_JOB_NONE;
     g_pm.last_job = completed_job;
     data = TPS25751_GetResult(&g_pm.tps, &length);
-
-    if (completed_job>=PM_JOB_CHARGE_CAP_READ &&
-        completed_job<=PM_JOB_CHARGE_CAP_VERIFY) {
-        if (!PowerManager_ChargeCapEligible()) {
-            g_pm.charge_cap_phase=0U; g_pm.charge_cap_verified=false;
-            return;
-        }
-        if (operation_status!=TPS25751_OK) {
-            PowerManager_ChargeCapFailed(now_ms);
-            return;
-        }
-        if (completed_job==PM_JOB_CHARGE_CAP_WRITE_I) {
-            g_pm.charge_cap_phase=g_pm.charge_cap_voltage_pending?2U:3U;
-        } else if (completed_job==PM_JOB_CHARGE_CAP_WRITE_V) {
-            g_pm.charge_cap_phase=3U;
-        } else {
-            if (!BQ25731_DecodeConfigBlock(&g_pm.status.bq,data,length)) {
-                PowerManager_ChargeCapFailed(now_ms); return;
-            }
-            bool high_i=ChargeBalance_CurrentTooHigh(g_pm.status.bq.charge_current);
-            bool high_v=ChargeBalance_VoltageTooHigh(g_pm.status.bq.charge_voltage);
-            if (completed_job==PM_JOB_CHARGE_CAP_VERIFY && (high_i||high_v)) {
-                PowerManager_ChargeCapFailed(now_ms); return;
-            }
-            g_pm.charge_cap_voltage_pending=high_v;
-            if (high_i||high_v) g_pm.charge_cap_verified=false;
-            if (high_i) g_pm.charge_cap_phase=1U;
-            else if (high_v) g_pm.charge_cap_phase=2U;
-            else {
-                g_pm.charge_cap_phase=0U;
-                g_pm.charge_cap_verified=true;
-                g_pm.charge_cap_fault=false;
-                g_pm.charge_cap_next_ms=now_ms+1000U;
-                if (completed_job==PM_JOB_CHARGE_CAP_VERIFY)
-                    g_pm.charge_cap_applied_count++;
-            }
+    if (completed_job == PM_JOB_BQ_POLL_ACSTAT) {
+        bool valid = false;
+        const uint16_t raw16 = (operation_status == TPS25751_OK) ?
+                               PowerManager_ResultLe16(&valid) : 0U;
+        /* A failed read keeps waiting; the vSafe0V give-up still bounds it. */
+        if (valid) {
+            g_pm.reset_bq_ac = (raw16 & BQ25731_CHGSTATUS_AC_STAT) != 0U;
+            g_pm.reset_bq_ac_valid = true;
+            PowerManager_Log(9U, g_pm.reset_bq_ac ? 1U : 0U, raw16,
+                             g_pm.status.tps.vbus_mv);
         }
         return;
     }
+    if (completed_job == PM_JOB_BQ_WATCH_OPTION3) {
+        bool valid = false;
+        const uint16_t raw16 = (operation_status == TPS25751_OK) ?
+                               PowerManager_ResultLe16(&valid) : 0U;
+        PowerManager_Log(6U, valid ? s_watch_regs[s_watch_step] :
+                                     (uint8_t)(0x80U | operation_status),
+                         raw16, g_pm.status.tps.vbus_mv);
+        s_watch_step = (uint8_t)((s_watch_step + 1U) % 3U);
+        return;
+    }
+
     if (operation_status != TPS25751_OK) {
         if (completed_job == PM_JOB_READ_BOOT_FLAGS) {
             g_pm.next_boot_flags_ms = now_ms + PM_BOOT_FLAGS_POLL_MS;
@@ -2049,7 +2125,10 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.port_control_read_pending = false;
             g_pm.port_control_write_pending = false;
             PowerManager_FinishSessionResetIfIdle(now_ms);
-            PowerManager_HandleTpsError(operation_status, now_ms);
+        } else if (completed_job == PM_JOB_MODE_SWAP) {
+            g_pm.mode_swap_task_rc = g_pm.tps.task_return_code;
+            g_pm.mode_change_path = 5U;
+            PowerManager_FailModeSwap(now_ms, "rejected");
         } else if ((completed_job == PM_JOB_SWAP_TO_SOURCE) ||
                    (completed_job == PM_JOB_SWAP_TO_SINK)) {
             g_pm.policy_phase = PM_POLICY_DONE;
@@ -2261,8 +2340,19 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         {
             TPS25751_PowerRole_t old_role = g_pm.status.tps.role;
             uint8_t old_connection = g_pm.status.tps.connection_state;
+            const bool old_attached = g_pm.status.tps.attached;
             TPS25751_DecodeStatus(&g_pm.status.tps, data);
             g_pm.status.tps.updated_ms = now_ms;
+            if ((old_connection != g_pm.status.tps.connection_state) ||
+                (old_role != g_pm.status.tps.role) ||
+                (old_attached != g_pm.status.tps.attached)) {
+                PowerManager_Log(1U, g_pm.status.tps.connection_state,
+                                 (uint16_t)(g_pm.status.tps.role |
+                                            (g_pm.status.tps.attached ? 0x100U : 0U)),
+                                 (uint32_t)g_pm.status.tps.status_raw);
+                if (g_pm.status.tps.role == TPS25751_ROLE_SOURCE)
+                    PowerManager_WatchRoleChange(now_ms);
+            }
             if (g_pm.status.tps.connection_state == 4U && old_connection != 4U) {
                 /* The partner can leave while its e-marked cable stays in.
                  * PlugPresent remains set, so ordinary detach never runs.
@@ -2282,20 +2372,51 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     g_pm.status.attach_generation = g_pm.attach_generation;
                 }
             }
-            if (g_pm.status.tps.attached &&
-                (g_pm.status.tps.role != old_role) &&
-                (old_role != TPS25751_ROLE_UNKNOWN)) {
+            /* A partner joining a cable that is already inserted never
+             * changes PlugPresent, so UpdateAttachPolicy sees no attach.
+             * Start the session (generation, policy, caps discovery) here. */
+            const bool partner_joined_cable =
+                g_pm.previous_attached && g_pm.status.tps.attached &&
+                (old_connection < 6U) &&
+                PowerManager_HasTypecPowerConnection();
+            /* While the TPS toggles DRP without a partner, PresentRole flips
+             * every few hundred ms; that is not a role change. */
+            const bool live_role_change =
+                PowerManager_HasTypecPowerConnection() && (old_connection >= 6U) &&
+                (g_pm.status.tps.role != old_role);
+            if (live_role_change && (old_role != TPS25751_ROLE_UNKNOWN)) {
                 PowerManager_ClearContractTelemetry();
                 g_pm.pdo_report_pending = true;
                 Debug_Printf("[PD-ROLE] %s -> %s conn=%u; contract telemetry cleared",
                              PowerManager_RoleToString(old_role),
                              PowerManager_RoleToString(g_pm.status.tps.role),
                              g_pm.status.tps.connection_state);
-            } else if (g_pm.status.tps.attached &&
-                       (g_pm.status.tps.role != old_role)) {
+            } else if (live_role_change) {
                 g_pm.pdo_report_pending = true;
             }
             PowerManager_UpdateAttachPolicy(now_ms);
+            if ((g_pm.mode_swap_target != TPS25751_ROLE_UNKNOWN) &&
+                !g_pm.mode_swap_command_pending &&
+                PowerManager_HasTypecPowerConnection() &&
+                (g_pm.status.tps.role == g_pm.mode_swap_target)) {
+                /* Role is in place; the port mode follows at detach. */
+                Debug_Printf("[PD-MODE] PR_Swap done role=%s",
+                             PowerManager_RoleToString(g_pm.status.tps.role));
+                g_pm.mode_swap_target = TPS25751_ROLE_UNKNOWN;
+                g_pm.mode_change_path = 8U;
+            }
+            if (partner_joined_cable) {
+                PowerManager_StartSession("partner on cable");
+                PowerManager_ResetPolicy(now_ms, true);
+            }
+            if (g_pm.source_caps_event_pending) {
+                g_pm.source_caps_event_pending = false;
+                if (PowerManager_HasTypecPowerConnection()) {
+                    g_pm.session_caps_event_this_gen = true;
+                    g_pm.source_caps_trace_pending = true;
+                    g_pm.pdo_report_pending = true;
+                }
+            }
             g_pm.telemetry_phase = 1U;
             break;
         }
@@ -2331,7 +2452,14 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
         }
 
         case PM_JOB_READ_POWER_PATH:
+        {
+            const uint64_t old_path = g_pm.status.tps.power_path_raw;
             TPS25751_DecodePowerPath(&g_pm.status.tps, data);
+            if (old_path != g_pm.status.tps.power_path_raw)
+                PowerManager_Log(2U, 0U,
+                                 (uint16_t)(g_pm.status.tps.power_path_raw >> 32),
+                                 (uint32_t)g_pm.status.tps.power_path_raw);
+        }
             if (g_pm.status.tps.pp5v_overcurrent ||
                 g_pm.status.tps.ppcable_overcurrent) {
                 g_pm.status.source_fault_latched = true;
@@ -2351,6 +2479,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
 
         case PM_JOB_READ_ADC:
             TPS25751_DecodeAdcResults(&g_pm.status.tps, data);
+            if ((g_pm.status.tps.vbus_mv + 400U < s_logged_vbus_mv) ||
+                (g_pm.status.tps.vbus_mv > s_logged_vbus_mv + 400U)) {
+                s_logged_vbus_mv = g_pm.status.tps.vbus_mv;
+                PowerManager_Log(3U, 0U, 0U, g_pm.status.tps.vbus_mv);
+            }
             PowerManager_TickSessionResetWait(now_ms);
             g_pm.telemetry_phase = 6U;
             break;
@@ -2527,6 +2660,13 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
             g_pm.policy_phase = PM_POLICY_LOCKED;
             g_pm.policy_next_ms = now_ms + PM_POLICY_SWAP_RETRY_MS;
             Debug_Printf("[PD-POLICY] unexpected SWSr ignored for AUTO gen=%lu",
+                         (unsigned long)g_pm.attach_generation);
+            break;
+            break;
+        case PM_JOB_MODE_SWAP:
+            g_pm.mode_swap_command_pending = false;
+            Debug_Printf("[PD-MODE] PR_Swap to %s accepted gen=%lu",
+                         PowerManager_RoleToString(g_pm.mode_swap_target),
                          (unsigned long)g_pm.attach_generation);
             break;
         case PM_JOB_SWAP_TO_SINK:
@@ -2963,6 +3103,12 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
             status = TPS25751_StartCommand(&g_pm.tps, "SWSk",
                                            NULL, 0U, 1U);
             break;
+        case PM_JOB_MODE_SWAP:
+            status = TPS25751_StartCommand(
+                &g_pm.tps,
+                (g_pm.mode_swap_target == TPS25751_ROLE_SOURCE) ? "SWSr" : "SWSk",
+                NULL, 0U, 1U);
+            break;
         case PM_JOB_BQ_TRACE_IIN_HOST:
             bq_status = BQ25731_StartRead16(&g_pm.bq,
                                             BQ25731_REG_IIN_HOST);
@@ -3011,23 +3157,23 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                                                 TPS25751_BUSY;
             break;
         case PM_JOB_BQ_WRITE_STARTUP_OPTION3:
+            PowerManager_Log(5U, 1U, g_pm.bq_startup_option3_target, 0U);
             bq_status = BQ25731_StartWriteStartupOption3(
                 &g_pm.bq, g_pm.bq_startup_option3_target);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
                                                 TPS25751_BUSY;
             break;
-        case PM_JOB_CHARGE_CAP_READ:
-        case PM_JOB_CHARGE_CAP_VERIFY:
-            bq_status=BQ25731_StartReadConfigBlock(&g_pm.bq);
-            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
+        case PM_JOB_BQ_POLL_ACSTAT:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            BQ25731_REG_CHARGER_STATUS);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
             break;
-        case PM_JOB_CHARGE_CAP_WRITE_I:
-            bq_status=BQ25731_StartWriteBalanceCurrent(&g_pm.bq);
-            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
-            break;
-        case PM_JOB_CHARGE_CAP_WRITE_V:
-            bq_status=BQ25731_StartWriteBalanceVoltage(&g_pm.bq);
-            status=(bq_status==BQ25731_OK)?TPS25751_OK:TPS25751_BUSY;
+        case PM_JOB_BQ_WATCH_OPTION3:
+            bq_status = BQ25731_StartRead16(&g_pm.bq,
+                                            s_watch_regs[s_watch_step]);
+            status = (bq_status == BQ25731_OK) ? TPS25751_OK :
+                                                TPS25751_BUSY;
             break;
         case PM_JOB_BQ_READ_OPTION3:
         case PM_JOB_BQ_VERIFY_STOP_OPTION3:
@@ -3036,6 +3182,7 @@ static TPS25751_Status_t PowerManager_StartJob(PowerManager_Job_t job)
                                                 TPS25751_BUSY;
             break;
         case PM_JOB_BQ_WRITE_OPTION3:
+            PowerManager_Log(5U, 0U, g_pm.bq_option3_target, 0U);
             bq_status = BQ25731_StartWriteOption3(
                 &g_pm.bq, g_pm.bq_option3_target);
             status = (bq_status == BQ25731_OK) ? TPS25751_OK :
@@ -3197,6 +3344,12 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
         if (g_pm.bq_option3_read_pending) {
             return PM_JOB_BQ_READ_OPTION3;
         }
+        if (g_pm.session_reset_wait_vsafe0 &&
+            (g_pm.bq_init == PM_BQ_INIT_DONE) &&
+            PowerManager_TickReached(now_ms, g_pm.reset_bq_ac_next_ms)) {
+            g_pm.reset_bq_ac_next_ms = now_ms + PM_RESET_AC_POLL_MS;
+            return PM_JOB_BQ_POLL_ACSTAT;
+        }
     }
     if (g_pm.port_write_pending) {
         return PM_JOB_WRITE_PORT_CONFIG;
@@ -3210,6 +3363,9 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.port_control_read_pending) {
         return PM_JOB_READ_PORT_CONTROL;
     }
+    if (g_pm.mode_swap_command_pending) {
+        return PM_JOB_MODE_SWAP;
+    }
     if (g_pm.dbfg_pending) {
         return PM_JOB_CLEAR_DBFG;
     }
@@ -3222,18 +3378,11 @@ static PowerManager_Job_t PowerManager_SelectJob(uint32_t now_ms)
     if (g_pm.event_clear_pending) {
         return PM_JOB_CLEAR_EVENT;
     }
-    /* Limit reductions have priority over optional monitoring/caps queries,
-     * but not over role shutdown, event service or the shared BMS bus hold. */
-    if (PowerManager_ChargeCapEligible() &&
-        PowerManager_TickReached(now_ms,g_pm.bq_monitor_holdoff_until_ms) &&
-        (g_pm.charge_cap_phase!=0U ||
-         PowerManager_TickReached(now_ms,g_pm.charge_cap_next_ms))) {
-        switch (g_pm.charge_cap_phase) {
-            case 1U: return PM_JOB_CHARGE_CAP_WRITE_I;
-            case 2U: return PM_JOB_CHARGE_CAP_WRITE_V;
-            case 3U: return PM_JOB_CHARGE_CAP_VERIFY;
-            default: return PM_JOB_CHARGE_CAP_READ;
-        }
+    if ((g_pm_debug_bq_watch_ms != 0U) && (g_pm.bq_init == PM_BQ_INIT_DONE) &&
+        !PowerManager_TickReached(now_ms, s_watch_until_ms) &&
+        PowerManager_TickReached(now_ms, s_watch_next_ms)) {
+        s_watch_next_ms = now_ms + g_pm_debug_bq_watch_ms;
+        return PM_JOB_BQ_WATCH_OPTION3;
     }
     if (g_pm.local_source_caps_pending && PowerManager_HasTypecPowerConnection() &&
         !g_pm.status.pd_reset_busy && !g_pm.session_reset_busy &&
@@ -3400,6 +3549,24 @@ void PowerManager_Task(void)
         return;
     }
 
+    if ((g_pm.mode_swap_target != TPS25751_ROLE_UNKNOWN) &&
+        (!PowerManager_HasTypecPowerConnection() ||
+         PowerManager_TickReached(now_ms, g_pm.mode_swap_deadline_ms))) {
+        g_pm.mode_change_path =
+            PowerManager_HasTypecPowerConnection() ? 7U : 6U;
+        PowerManager_FailModeSwap(now_ms, "timeout/detach");
+    }
+    if (g_pm_debug_mode_request <= (uint8_t)POWER_MANAGER_USER_OFF) {
+        const uint8_t req = g_pm_debug_mode_request;
+        g_pm_debug_mode_request = 0xFFU;
+        PowerManager_WatchRoleChange(now_ms);
+        (void)PowerManager_SetUserMode((PowerManager_UserMode_t)req);
+    }
+    if (g_pm.mode_change_path != s_logged_path) {
+        s_logged_path = g_pm.mode_change_path;
+        PowerManager_Log(7U, s_logged_path, g_pm.mode_swap_task_rc,
+                         (uint32_t)g_pm.status.requested_mode);
+    }
     PowerManager_MaintainPolicy(now_ms);
     next_job = PowerManager_SelectJob(now_ms);
     if (next_job == PM_JOB_NONE) {
@@ -3426,24 +3593,79 @@ void PowerManager_GetStatus(PowerManager_Status_t *out)
 
 bool PowerManager_SetUserMode(PowerManager_UserMode_t mode)
 {
+    const uint32_t now_ms = HAL_GetTick();
+    TPS25751_PowerRole_t target;
+
     if (mode > POWER_MANAGER_USER_OFF) {
         return false;
     }
-    if (g_pm.status.requested_mode != mode) {
-        g_pm.status.requested_mode = mode;
-        g_pm.status.applied_mode_valid = false;
-        g_pm.status.source_fault_latched = false;
-        PowerManager_ResetPolicy(HAL_GetTick(),
-                                 g_pm.status.tps.attached);
-        /* SOURCE ONLY / SINK ONLY / AUTO all take the same disable →
-         * vSafe0V → tSrcRecover → enable path.  Previous reset logs and
-         * restore were AUTO-oriented; iPad SOURCE ONLY never presented a
-         * clean Rp after leftover VBUS. */
-        PowerManager_BeginSessionReset(HAL_GetTick(), "user mode", true);
-        if (!g_pm.session_reset_busy) {
-            g_pm.mode_update_pending = true;
-            g_pm.port_write_pending = false;
+    if (g_pm.status.requested_mode == mode) {
+        return true;
+    }
+    g_pm.status.requested_mode = mode;
+    g_pm.status.applied_mode_valid = false;
+    g_pm.status.source_fault_latched = false;
+    g_pm.mode_swap_target = TPS25751_ROLE_UNKNOWN;
+    g_pm.mode_swap_command_pending = false;
+
+    /* With a live PD partner the role changes by PR_Swap: VBUS hands over
+     * without a disconnect.  OFF, no contract or a failed swap fall back
+     * to the full disable -> vSafe0V -> enable reset below. */
+    /* PR_Swap gives a new source ~0.4 s, but the BQ cannot enter OTG until
+     * its VBUS node drops below 3.2 V (~1 s after a sink session), so a
+     * change to SOURCE takes the reset, which waits for that. */
+    if ((mode != POWER_MANAGER_USER_OFF) &&
+        !((mode == POWER_MANAGER_USER_SOURCE_ONLY) &&
+          (g_pm.status.tps.role != TPS25751_ROLE_SOURCE)) &&
+        PowerManager_HasTypecPowerConnection() &&
+        g_pm.status.tps.active_rdo.valid &&
+        !g_pm.session_reset_busy && !g_pm.status.pd_reset_busy &&
+        !g_pm.session_reset_faulted &&
+        g_pm.port_config_valid && g_pm.port_control_valid) {
+        /* The PD policy applies now; only the Type-C mode waits for detach. */
+        g_pm.status.applied_mode = mode;
+        g_pm.status.applied_mode_valid = true;
+        if (mode == POWER_MANAGER_USER_AUTO) {
+            /* AUTO picks the role from the partner's Source PDOs. */
+            PowerManager_ResetPolicy(now_ms, true);
+            g_pm.port_mode_deferred = true;
+            g_pm.mode_change_path = 3U;
+            return true;
         }
+        target = (mode == POWER_MANAGER_USER_SINK_ONLY) ?
+                 TPS25751_ROLE_SINK : TPS25751_ROLE_SOURCE;
+        g_pm.policy_phase = PM_POLICY_IDLE;
+        g_pm.policy_decided = false;
+        g_pm.policy_desired_role = TPS25751_ROLE_UNKNOWN;
+        /* Accept PR_Swap only toward the selected role. */
+        PowerManager_QueueAutoSwapControl(target);
+        if (g_pm.status.tps.role != target) {
+            g_pm.mode_swap_target = target;
+            g_pm.mode_swap_command_pending = true;
+            g_pm.mode_swap_deadline_ms = now_ms + PM_MODE_SWAP_TIMEOUT_MS;
+        }
+        g_pm.port_mode_deferred = true;
+        g_pm.mode_change_path =
+            (g_pm.mode_swap_target != TPS25751_ROLE_UNKNOWN) ? 1U : 2U;
+        Debug_Printf("[PD-MODE] %s by %s",
+                     PowerManager_UserModeToString(mode),
+                     (g_pm.mode_swap_target != TPS25751_ROLE_UNKNOWN) ?
+                         "PR_Swap" : "port policy only");
+        return true;
+    }
+
+    g_pm.status.applied_mode_valid = false;
+    g_pm.mode_change_path = 4U;
+    g_pm.port_mode_deferred = false;
+    PowerManager_ResetPolicy(now_ms, g_pm.status.tps.attached);
+    /* SOURCE ONLY / SINK ONLY / AUTO all take the same disable →
+     * vSafe0V → tSrcRecover → enable path.  Previous reset logs and
+     * restore were AUTO-oriented; iPad SOURCE ONLY never presented a
+     * clean Rp after leftover VBUS. */
+    PowerManager_BeginSessionReset(now_ms, "user mode", true);
+    if (!g_pm.session_reset_busy) {
+        g_pm.mode_update_pending = true;
+        g_pm.port_write_pending = false;
     }
     return true;
 }
