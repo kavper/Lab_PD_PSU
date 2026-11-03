@@ -2,6 +2,11 @@
 #define CHARGE_BALANCE_LIMITS_H
 #include <stdbool.h>
 #include <stdint.h>
+/* Disabled in production: TPS EEPROM owns the normal charging limits.
+ * Retained only for explicit bench builds; never re-enable by accident. */
+#ifndef CHARGE_BALANCE_LIMITS_ENABLED
+#define CHARGE_BALANCE_LIMITS_ENABLED 0U
+#endif
 /* Temporary balancing profile: round voltage DOWN to the 8mV register step.
  * RSR=5mOhm: charge current uses 128mA/LSB in register bits12:6. */
 #define CHARGE_BALANCE_VOLTAGE_MV 17496U

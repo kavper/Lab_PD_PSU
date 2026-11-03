@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 int main(void){
+ assert(CHARGE_BALANCE_LIMITS_ENABLED==0U);
  assert(CHARGE_BALANCE_VOLTAGE_RAW%8==0);
  assert(CHARGE_BALANCE_VOLTAGE_MV<=17500U);
  assert(CHARGE_BALANCE_CURRENT_RAW==(512U/128U)*64U);
@@ -16,5 +17,5 @@ int main(void){
  assert(ChargeBalance_ReadbackSafe(0x100,17496));
  assert(!ChargeBalance_ReadbackSafe(0xfc0,17496));
  assert(!ChargeBalance_ReadbackSafe(0x100,18000));
- puts("PASS: balancing charge caps, 5mOhm current units, voltage rounded down, lower limits preserved");
+ puts("PASS: production charge clamp disabled; optional bench caps, 5mOhm current units, voltage rounded down, lower limits preserved");
 }

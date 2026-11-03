@@ -470,7 +470,8 @@ static void PowerManager_FailBqStop(void)
 
 static bool PowerManager_ChargeCapEligible(void)
 {
-    return g_pm.bq_init==PM_BQ_INIT_DONE && g_pm.status.bq.id_valid &&
+    return CHARGE_BALANCE_LIMITS_ENABLED &&
+        g_pm.bq_init==PM_BQ_INIT_DONE && g_pm.status.bq.id_valid &&
         g_pm.status.tps.attached && g_pm.status.tps.role==TPS25751_ROLE_SINK &&
         g_pm.status.requested_mode!=POWER_MANAGER_USER_SOURCE_ONLY &&
         g_pm.status.requested_mode!=POWER_MANAGER_USER_OFF &&

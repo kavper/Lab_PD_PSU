@@ -220,7 +220,10 @@ frames are not repeated. Connected sessions publish on change and every 1 s
 for H7 freshness and recovery after an H7 restart. Both legacy and FIELDS
 telemetry use the same capability publisher.
 
-The current G4 charging cap is a temporary balancing profile, 17.496 V /
-512 mA at the populated 5 mOhm charger shunt. It does not raise lower TPS
-settings. It does not replace the EEPROM startup limits or establish a new
-full-charge/FCC anchor. OTP release remains blocked pending physical validation.
+The previous temporary 17.496 V / 512 mA charging cap is now disabled in
+production (CHARGE_BALANCE_LIMITS_ENABLED=0). TPS owns the normal charge
+settings. The current EEPROM candidate in config/tps25751/MAX_CHARGE restores
+18 V / 8.064 A at the populated 5 mOhm shunt. Firmware alone does not raise a
+512 mA value in an older EEPROM; both versions must agree. Source capability
+profiles and BMS protections remain separate from this charging ceiling.
+OTP release remains blocked pending physical validation.

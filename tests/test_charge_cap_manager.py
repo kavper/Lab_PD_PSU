@@ -10,6 +10,7 @@ code=r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#define CHARGE_BALANCE_LIMITS_ENABLED 1U /* exercise optional bench build only */
 #include "charge_balance_limits.h"
 #define PM_BQ_INIT_DONE 1
 #define TPS25751_ROLE_SINK 1
