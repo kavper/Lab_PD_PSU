@@ -25,10 +25,12 @@
 #define PM_POLICY_MAX_CAP_ATTEMPTS      3U
 #define PM_SESSION_RESET_STUCK_MS     400U
 #define PM_SESSION_RESET_COOLDOWN_MS 1500U
-/* USB Type-C tSrcRecover is 660–1000 ms after vSafe0V.  TRM STATUS
- * VBUS Status 0h is <0.8 V.  Destructive Disabled→vSafe0V→restore is
- * ONLY for confirmed stuck states — never for a normal unplug. */
-#define PM_SESSION_TSRC_RECOVER_MS    800U
+/* Port reset = Type-C Disabled, i.e. a detach, not a PD Hard Reset:
+ * tErrorRecovery (>= 25 ms) applies, not tSrcRecover (660–1000 ms).
+ * 300 ms leaves the partner ample time to see the detach; vSafe0V
+ * (TRM STATUS VBUS Status 0h, < 0.8 V) is checked as well.  The reset is
+ * only for AUTO re-attach and confirmed stuck states, never a normal unplug. */
+#define PM_SESSION_TSRC_RECOVER_MS    300U
 #define PM_SESSION_VSAFE0_MV          800U
 #define PM_SESSION_VSAFE0_GIVEUP_MS  2500U
 #define PM_SESSION_ATTACHWAIT_STUCK_MS 1500U
