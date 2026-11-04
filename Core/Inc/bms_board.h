@@ -96,7 +96,7 @@
  * the exact NTC polynomial and resolving actual cell temperature sensing. */
 #define BMS_THERMISTOR_MODEL_VALIDATED   0U
 #define BMS_TS1_CONFIG                   0x07U
-#define BMS_OTC_C                        60
+#define BMS_OTC_C                        55
 #define BMS_OTC_RECOVERY_C               40
 #define BMS_UTC_C                        0
 #define BMS_UTC_RECOVERY_C               5

@@ -37,6 +37,9 @@
 #define BQ76922_SUBCMD_RESET_PASSQ       0x0082U
 #define BQ76922_SUBCMD_DASTATUS5         0x0075U
 #define BQ76922_SUBCMD_DASTATUS6         0x0076U
+#define BQ76922_SUBCMD_DASTATUS1         0x0071U
+#define BQ76922_SUBCMD_DASTATUS2         0x0072U
+#define BQ76922_SUBCMD_READ_CAL1         0xF081U
 #define BQ76922_SUBCMD_CB_ACTIVE_CELLS   0x0083U
 #define BQ76922_SUBCMD_OTP_WR_CHECK      0x00A0U
 #define BQ76922_SUBCMD_OTP_WRITE         0x00A1U
@@ -329,6 +332,69 @@ static BQ76922_Status_t BQ76922_ReadRamBlock(BQ76922_Device_t *dev,
                                              uint16_t address,
                                              uint8_t *data,
                                              uint8_t length);
+
+/* Production-line calibration capture (TI SLUAA32A 2.2/2.6), driven over
+ * SWD: set enable=1 after the reference current/voltages are applied, wait,
+ * read the sums.  CC2 is the middle 16 bits of the 32-bit counts from
+ * READ_CAL1, cells are the 32-bit DASTATUS1/2 voltage counts.  Writes
+ * nothing to the AFE; the computed gains/offsets go into bms_golden.c. */
+typedef struct {
+    uint8_t enable;            /* host: 1 = capture, 0 = stop */
+    uint8_t clear;             /* host: 1 = zero the sums */
+    uint16_t errors;
+    uint32_t samples;
+    int64_t cc2_sum;
+    int64_t cell_sum[5];
+    int32_t cc2_last;
+    int32_t cell_last[5];
+    int16_t current_ma_last;   /* reported CC2 current for comparison */
+} BQ76922_CalCapture_t;
+volatile BQ76922_CalCapture_t g_bms_cal;
+static uint32_t s_cal_next_ms;
+
+static int32_t BQ76922_Le32(const uint8_t *b)
+{
+    return (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                     ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+}
+
+static void BQ76922_CalCaptureStep(BQ76922_Device_t *dev, uint32_t now_ms)
+{
+    uint8_t d1[32];
+    uint8_t d2[8];
+    uint8_t cal[12];
+
+    if (g_bms_cal.clear != 0U) {
+        g_bms_cal.clear = 0U;
+        g_bms_cal.samples = 0U;
+        g_bms_cal.errors = 0U;
+        g_bms_cal.cc2_sum = 0;
+        for (unsigned i = 0U; i < 5U; ++i) g_bms_cal.cell_sum[i] = 0;
+    }
+    if ((g_bms_cal.enable == 0U) || ((int32_t)(now_ms - s_cal_next_ms) < 0)) {
+        return;
+    }
+    s_cal_next_ms = now_ms + 200U;
+    if ((BQ76922_ReadRamBlock(dev, BQ76922_SUBCMD_DASTATUS1, d1, 32U) != BQ76922_OK) ||
+        (BQ76922_ReadRamBlock(dev, BQ76922_SUBCMD_DASTATUS2, d2, 8U) != BQ76922_OK) ||
+        (BQ76922_ReadRamBlock(dev, BQ76922_SUBCMD_READ_CAL1, cal, 12U) != BQ76922_OK)) {
+        g_bms_cal.errors++;
+        return;
+    }
+    /* READ_CAL1: counter U2, CC2 counts I4 at byte 2; middle 16 bits. */
+    const int32_t cc2 = (int16_t)((uint16_t)cal[3] | ((uint16_t)cal[4] << 8));
+    g_bms_cal.cc2_last = cc2;
+    g_bms_cal.cc2_sum += cc2;
+    /* DASTATUS1: cell n voltage counts at 8*(n-1); DASTATUS2: cell 5 at 0. */
+    for (unsigned i = 0U; i < 4U; ++i) {
+        g_bms_cal.cell_last[i] = BQ76922_Le32(&d1[8U * i]);
+        g_bms_cal.cell_sum[i] += g_bms_cal.cell_last[i];
+    }
+    g_bms_cal.cell_last[4] = BQ76922_Le32(&d2[0]);
+    g_bms_cal.cell_sum[4] += g_bms_cal.cell_last[4];
+    g_bms_cal.current_ma_last = dev->snapshot.cc2_ma;
+    g_bms_cal.samples++;
+}
 
 static BQ76922_Status_t BQ76922_WriteGoldenEntry(BQ76922_Device_t *dev,
                                                  const BmsDmEntry_t *e)
@@ -1870,6 +1936,7 @@ void BQ76922_Task(BQ76922_Device_t *dev, uint32_t now_ms)
         BQ76922_UpdateBusHold(dev, now_ms);
         return;
     }
+    BQ76922_CalCaptureStep(dev, now_ms);
 
     if (dev->snapshot.alert_latched) {
         status = BQ76922_HandleAlert(dev);
