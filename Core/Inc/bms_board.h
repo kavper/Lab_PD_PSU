@@ -92,9 +92,10 @@
  * Nominal curve fitting is complete; physical thermal validation and
  * actual cell temperature sensing are still required before OTP.
  */
-/* Deliberate OTP release gate: do not set to 1 before fitting and verifying
- * the exact NTC polynomial and resolving actual cell temperature sensing. */
-#define BMS_THERMISTOR_MODEL_VALIDATED   0U
+/* Deliberate OTP release gate.  2026-11-04: polynomial for the fitted
+ * NTCLE100E103JB0A accepted; TS1 checked against a thermocouple and offset
+ * applied (TS1 Temp Offset below).  TS1 sits on the PCB, not on the cells. */
+#define BMS_THERMISTOR_MODEL_VALIDATED   1U
 #define BMS_TS1_CONFIG                   0x07U
 #define BMS_OTC_C                        55
 /* TS1 Temp Offset (0x91CE, 0.1 C).  2026-11-04: TS1 read 20.35 C against a
