@@ -843,8 +843,12 @@ bool TPS25751_PatchPortControl(
         TPS25751_PORT_STATE_MASK | /* bits 1:0 TypeC Current */
         TPS25751_PC_SWAP_MASK));   /* bits 7:4 PR_Swap initiate/process */
 
-    /* 3.0 A Rp while sourcing (ignored during an explicit PD contract). */
-    v |= 0x02U;
+    /* 1.5 A Rp while sourcing (ignored during an explicit PD contract).
+     * vSafe5V before the contract comes from PP5V, fed by the 2 A
+     * LMR33620 rail; a 3.0 A advertisement let Apple gadgets draw past it,
+     * VBUS collapsed and the TPS dropped the port (Power Event, ILIM).
+     * After the contract the source runs from PP_EXT (BQ25731 OTG). */
+    v |= 0x01U;
 
     switch (mode) {
         case TPS25751_PORT_SINK_ONLY:
