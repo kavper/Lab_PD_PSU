@@ -27,7 +27,6 @@ typedef enum {TPS25751_ROLE_UNKNOWN=0,TPS25751_ROLE_SINK,TPS25751_ROLE_SOURCE} T
 enum {PM_SRC_PATH_IDLE=0,PM_SRC_PATH_WAIT_CONTRACT=1};
 enum {POWER_MANAGER_USER_AUTO=0,POWER_MANAGER_USER_SINK_ONLY=1};
 #define PM_AUTO_SRC_FAIL_MS 1500U
-#define PM_AUTO_SRC_FAIL_WINDOW_MS 6000U
 #define PM_AUTO_TRY_SNK_MS 15000U
 typedef struct {unsigned count;} Caps;
 static struct {
@@ -108,13 +107,11 @@ int main(void){
  caps_event();
  status(true,TPS25751_ROLE_SINK,6);
  assert(g_pm.attach_count==attaches+1&&g_pm.session_caps_event_this_gen);
- /* AUTO: two source sessions that collapse within 1.5 s -> Try.SNK. */
+ /* AUTO: the first source session that collapses within 1.5 s -> Try.SNK. */
  g_pm.status.requested_mode=POWER_MANAGER_USER_AUTO;g_pm.mode_update_pending=false;
  status(true,TPS25751_ROLE_SINK,4);
  clock_ms=1000;status(true,TPS25751_ROLE_SOURCE,7);clock_ms=1200;status(true,TPS25751_ROLE_SINK,0);
- assert(!g_pm.auto_try_snk&&g_pm.auto_src_fail_count==1);
- clock_ms=1800;status(true,TPS25751_ROLE_SOURCE,7);clock_ms=2000;status(true,TPS25751_ROLE_SINK,0);
- assert(g_pm.auto_try_snk&&g_pm.mode_update_pending&&g_pm.auto_try_snk_until_ms==17000);
+ assert(g_pm.auto_try_snk&&g_pm.mode_update_pending&&g_pm.auto_try_snk_until_ms==16200);
  /* A source session that holds is not a failure; nor is SINK ONLY mode. */
  g_pm.auto_try_snk=false;g_pm.auto_src_fail_count=0;
  clock_ms=30000;status(true,TPS25751_ROLE_SOURCE,7);clock_ms=33000;status(true,TPS25751_ROLE_SINK,0);
@@ -123,7 +120,7 @@ int main(void){
  clock_ms=40000;status(true,TPS25751_ROLE_SOURCE,7);clock_ms=40100;status(true,TPS25751_ROLE_SINK,0);
  clock_ms=40500;status(true,TPS25751_ROLE_SOURCE,7);clock_ms=40600;status(true,TPS25751_ROLE_SINK,0);
  assert(!g_pm.auto_try_snk);
- puts("PASS: partner on inserted cable starts a session, early Source_Capabilities kept, DRP toggling ignored, swap/leave/replug, deferred port mode on detach, AUTO Try.SNK after collapsed source attaches");
+ puts("PASS: partner on inserted cable starts a session, early Source_Capabilities kept, DRP toggling ignored, swap/leave/replug, deferred port mode on detach, AUTO Try.SNK after the first collapsed source attach");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

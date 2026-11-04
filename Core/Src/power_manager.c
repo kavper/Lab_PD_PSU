@@ -41,7 +41,6 @@
 #define PM_AUTO_INSIST_WINDOW_MS      1500U
 #define PM_AUTO_ACCEPT_SINK_MS       10000U
 #define PM_AUTO_SRC_FAIL_MS           1500U
-#define PM_AUTO_SRC_FAIL_WINDOW_MS    6000U
 #define PM_AUTO_TRY_SNK_MS           15000U
 #define PM_RESET_AC_POLL_MS             50U
 /* The BQ VBUS node decays with tau ~2.9 s: ~1.2 s after a 5 V sink session,
@@ -2583,13 +2582,11 @@ static void PowerManager_ProcessCompletedJob(TPS25751_Status_t operation_status,
                     !g_pm.auto_try_snk && (g_pm.auto_probe != 2U) &&
                     ((uint32_t)(now_ms - g_pm.auto_src_attach_ms) <
                      PM_AUTO_SRC_FAIL_MS)) {
-                    if ((g_pm.auto_src_fail_count == 0U) ||
-                        ((uint32_t)(now_ms - g_pm.auto_src_fail_ms) >
-                         PM_AUTO_SRC_FAIL_WINDOW_MS)) {
-                        g_pm.auto_src_fail_count = 0U;
-                        g_pm.auto_src_fail_ms = now_ms;
-                    }
-                    if (++g_pm.auto_src_fail_count >= 2U) {
+                    /* One source session that collapses within 1.5 s (VBUS
+                     * OVP/ILIM power event, partner already driving VBUS)
+                     * is enough: retrying Try.SRC only repeats the collision. */
+                    g_pm.auto_src_fail_ms = now_ms;
+                    if (++g_pm.auto_src_fail_count >= 1U) {
                         g_pm.auto_src_fail_count = 0U;
                         g_pm.auto_try_snk = true;
                         g_pm.auto_try_snk_until_ms = now_ms + PM_AUTO_TRY_SNK_MS;
