@@ -31,6 +31,7 @@ const BmsDmEntry_t g_bms_golden[] = {
     F4(0x91A8, BMS_CC_GAIN,                "CC Gain", FP),
     F4(0x91AC, BMS_CAPACITY_GAIN,          "Capacity Gain", FP),
     I2(0x91C8, BMS_BOARD_OFFSET,           "Board Offset", FP),
+    I1(0x91CE, BMS_TS1_TEMP_OFFSET_DC,     "TS1 Temp Offset", FP),
 
     /* Vishay NTCLE100E103JB0A, 18k model: TI GPC report 2026-11-02.
      * Reported nominal maximum fit error 0.5 C, range -40..125 C.

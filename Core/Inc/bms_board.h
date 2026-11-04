@@ -97,6 +97,11 @@
 #define BMS_THERMISTOR_MODEL_VALIDATED   0U
 #define BMS_TS1_CONFIG                   0x07U
 #define BMS_OTC_C                        55
+/* TS1 Temp Offset (0x91CE, 0.1 C).  2026-11-04: TS1 read 20.35 C against a
+ * Fluke thermocouple at 21.9 C on the NTC.  NTCLE100E103JB0A is +-5 % R25;
+ * that and the pull-up error scale as T^2/B, so 1.55 C at 22 C is ~1.9 C at
+ * the 55 C OTC.  +1.8 C keeps the OTC within ~0.3 C. */
+#define BMS_TS1_TEMP_OFFSET_DC           18
 #define BMS_OTC_RECOVERY_C               40
 #define BMS_UTC_C                        0
 #define BMS_UTC_RECOVERY_C               5
