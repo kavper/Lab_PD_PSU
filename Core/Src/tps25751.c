@@ -781,6 +781,7 @@ bool TPS25751_PatchPortModeTry(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
 {
     uint8_t old_state;
     uint8_t old_options;
+    uint8_t old_ovp;
     uint8_t typec_options;
 
     if ((port_config == NULL) || ((uint8_t)mode > 3U)) {
@@ -806,9 +807,15 @@ bool TPS25751_PatchPortModeTry(uint8_t port_config[TPS25751_PORT_CONFIG_LEN],
     port_config[1] = (uint8_t)(
         (old_options & (uint8_t)~TPS25751_TYPEC_OPTIONS_MASK) |
         typec_options);
+    /* Port Config bits 21:20 "OVP for PP5V": highest setting, 6.1 V
+     * (default 2h = 5.8 V).  The 2 A PP5V rail overshoots on a load step
+     * and the board once tripped OVP while sourcing vSafe5V. */
+    old_ovp = port_config[2];
+    port_config[2] = (uint8_t)(old_ovp | 0x30U);
 
     return (port_config[0] != old_state) ||
-           (port_config[1] != old_options);
+           (port_config[1] != old_options) ||
+           (port_config[2] != old_ovp);
 }
 
 void TPS25751_SetPortStateMachine(
