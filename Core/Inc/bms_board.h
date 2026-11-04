@@ -146,10 +146,16 @@
 /* ------------------------------------------------------------ current -- */
 /* BQ76922 SRP/SRN sense resistor (pack current). Not the DCDC INA296 shunt. */
 #define BMS_SENSE_MOHM                   5U
-/* CC Gain = 7.5684 / Rsense_mOhm (BQ76922 TRM, VREF2=1.24 V).
- * Capacity Gain = CC Gain × 298261.6178. */
-#define BMS_CC_GAIN                      (7.5684f / (float)BMS_SENSE_MOHM)
+/* Nominal CC Gain = 7.5684 / Rsense_mOhm (BQ76922 TRM, VREF2=1.24 V) =
+ * 1.51368 read ~5.3 % high on this board.  Calibrated 2026-11-04 against a
+ * Fluke on the 10 A range (TI SLUAA32A 2.6): -303 mA -> -211.40 CC2 counts,
+ * -5290 mA -> -3685.65 counts; +2.25 A charge check within ~2 %.  That is
+ * an effective 5.27 mOhm between SRP and SRN.  Capacity Gain = CC Gain ×
+ * 298261.6178.  The zero-current offset fitted to -0.3 counts (~0.5 mA),
+ * inside the noise, so Board Offset stays 0. */
+#define BMS_CC_GAIN                      1.43542f
 #define BMS_CAPACITY_GAIN                (BMS_CC_GAIN * 298261.6178f)
+#define BMS_BOARD_OFFSET                 0
 
 /* SCD Threshold index — hardware mV on sense. 0x05 ≈ 100 mV → ~20 A @ 5 mΩ. */
 #define BMS_SCD_THRESHOLD                0x05U
