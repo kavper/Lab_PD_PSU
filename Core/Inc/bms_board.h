@@ -58,7 +58,8 @@
  *                  recovered by charging.
  * Software window (G4):
  *   charge target 3.60 V/cell (18.00 V pack), low warning 3.00 V,
- *   load cut-off 2.80 V (under load, filtered).
+ *   load cut-off 2.80 V for 10 s, then AFE SHUTDOWN; no start below 2.95 V
+ *   without charging (bms_lowbatt_policy.h).
  */
 #define BMS_COV_THRESHOLD_MV             3700U
 #define BMS_CUV_THRESHOLD_MV             2500U

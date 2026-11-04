@@ -611,27 +611,14 @@ static void HostLink_HandleLine(char *line)
 
         if (shutdown) {
             BQ76922_Status_t st;
-
-            /* Kill PSU path first so PACK load does not fight FET-off. */
-            LdoLink_RequestOutput(false);
-            LdoPrereg_SetForceDisable(true);
-            LdoPrereg_SetPermitOverrideOff(true);
-            PSU_Stop();
-            /* Converter is stopped: safe to program flash. Clean record =
-             * the pack rests from now on. */
-            {
-                bool saved = BmsMgr_SaveForShutdown();
-
-                HostLink_Tx(saved ? "OK BMS gauge saved\r\n" :
-                                    "WARN BMS gauge save failed\r\n");
-            }
+            bool saved = false;
 
             HostLink_Tx(
                 "OK BMS SHUTDOWN - release TS2 (no hold). "
                 "Wake = short TS2 press only; FETs auto, no command.\r\n");
-            /* Flush UART before AFE drops. */
-            HAL_Delay(20U);
-            st = BQ76922_EnterShutdown(&g_bq76922);
+            st = BmsMgr_OrderlyShutdown(&saved);
+            HostLink_Tx(saved ? "OK BMS gauge saved\r\n" :
+                                "WARN BMS gauge save failed\r\n");
             if (st != BQ76922_OK) {
                 HostLink_Tx("ERR BMS SHUTDOWN I2C failed (AFE may still be awake)\r\n");
             }
@@ -800,7 +787,7 @@ static void HostLink_QueueLegacySlow(void)
     bms_payload[1] = (BQ76922_IsEnabled() && bms.configured) ? 1U : 0U;
     bms_payload[2] = BQ76922_IsEnabled() ? (uint8_t)bms.state : 0U;
     bms_payload[3] = (bms.alert_latched || bms.alert_pin) ? 1U : 0U;
-    H7Link_PutU32(&bms_payload[4], bms.fault_flags);
+    H7Link_PutU32(&bms_payload[4], bms.fault_flags | BmsMgr_LowBattFlags());
     H7Link_PutU16(&bms_payload[8], bms.alarm_status);
     bms_payload[10] = bms.safety_status_a;
     bms_payload[11] = bms.safety_status_b;

@@ -2,6 +2,7 @@
 #define BMS_MANAGER_H
 
 #include "bms_gauge.h"
+#include "bq76922.h"
 #include "tlm_fields.h"
 
 #include <stdbool.h>
@@ -26,6 +27,11 @@ void BmsMgr_Init(void);
 void BmsMgr_Task(uint32_t now_ms);
 /* Orderly shutdown: store a clean record. Returns true when written. */
 bool BmsMgr_SaveForShutdown(void);
+/* Stop the PSU output, save a clean gauge record, then AFE SHUTDOWN.
+ * Used by BMS SHUTDOWN and by the low-battery cut-off. */
+BQ76922_Status_t BmsMgr_OrderlyShutdown(bool *saved);
+/* BMS_LOWBATT_FLAG_LOW / _EMPTY (bms_lowbatt_policy.h) for the H7 link. */
+uint32_t BmsMgr_LowBattFlags(void);
 /* Manual save (BMS SAVE); refused while the output is on. */
 bool BmsMgr_SaveNow(bool *refused_output_on);
 void BmsMgr_ResetPack(void);

@@ -3,8 +3,12 @@
 #include "app.h"
 #include "bms_board.h"
 #include "bms_store.h"
+#include "bms_lowbatt_policy.h"
 #include "bq76922.h"
+#include "ldo_link.h"
+#include "ldo_prereg.h"
 #include "power_stage.h"
+#include "psu_gui_api.h"
 
 #include <limits.h>
 #include <string.h>
@@ -26,6 +30,8 @@ static bool s_last_save_ok = true;
 static uint32_t s_last_sample_ms;
 static uint32_t s_last_save_ms;
 static bool s_pack_seen;
+static BmsLowBatt_Config_t s_lb_cfg;
+static BmsLowBatt_State_t s_lb;
 
 static int16_t dk_to_dc(int16_t dk)
 {
@@ -47,6 +53,9 @@ void BmsMgr_Init(void)
     BmsGauge_Config_t cfg;
     BmsStore_Record_t rec;
 
+    BmsLowBatt_DefaultConfig(&s_lb_cfg);
+    s_lb_cfg.warn_mv = (int16_t)BMS_WARN_CELL_LOW_MV;
+    s_lb_cfg.cutoff_mv = (int16_t)BMS_CUTOFF_CELL_MV;
     BmsGauge_DefaultConfig(&cfg);
     cfg.design_mah = BMS_DESIGN_CAPACITY_MAH;
     cfg.series = (uint8_t)BMS_SERIES_COUNT;
@@ -79,6 +88,7 @@ void BmsMgr_Task(uint32_t now_ms)
     if (!s.present) {
         if (s_pack_seen) {
             BmsGauge_NotePackLost();
+            BmsLowBatt_PackLost(&s_lb);
             s_pack_seen = false;
         }
         return;
@@ -99,6 +109,13 @@ void BmsMgr_Task(uint32_t now_ms)
         in.cell_mv = s.cell_mv;
         in.temp_dc = dk_to_dc(s.ts1_temp_dk);
         BmsGauge_Update(&in);
+        if (BmsLowBatt_Step(&s_lb_cfg, &s_lb, s.sample_tick_ms,
+                            s.min_cell_mv, s.cc2_ma)) {
+            bool saved;
+
+            (void)BmsMgr_OrderlyShutdown(&saved);
+            return;
+        }
     }
 
     {
@@ -148,6 +165,31 @@ void BmsMgr_Task(uint32_t now_ms)
 bool BmsMgr_SaveForShutdown(void)
 {
     return do_save(true);
+}
+
+BQ76922_Status_t BmsMgr_OrderlyShutdown(bool *saved)
+{
+    bool ok;
+
+    /* Kill the PSU path first so the PACK load does not fight FET-off. */
+    LdoLink_RequestOutput(false);
+    LdoPrereg_SetForceDisable(true);
+    LdoPrereg_SetPermitOverrideOff(true);
+    PSU_Stop();
+    /* Converter is stopped: safe to program flash.  Clean record = the pack
+     * rests from now on. */
+    ok = do_save(true);
+    if (saved != NULL) {
+        *saved = ok;
+    }
+    /* Let the UART flush before the AFE drops. */
+    HAL_Delay(20U);
+    return BQ76922_EnterShutdown(&g_bq76922);
+}
+
+uint32_t BmsMgr_LowBattFlags(void)
+{
+    return BmsLowBatt_Flags(&s_lb);
 }
 
 bool BmsMgr_SaveNow(bool *refused_output_on)
@@ -202,7 +244,7 @@ void BmsMgr_FillBms(TlmBuilder_t *b)
     Tlm_Put(b, TLM_BMS_CFG, (BQ76922_IsEnabled() && s.configured) ? 1 : 0);
     Tlm_Put(b, TLM_BMS_STATE, BQ76922_IsEnabled() ? (int32_t)s.state : 0);
     Tlm_Put(b, TLM_BMS_ALERT, (s.alert_latched || s.alert_pin) ? 1 : 0);
-    Tlm_Put(b, TLM_BMS_FAULT, (int32_t)s.fault_flags);
+    Tlm_Put(b, TLM_BMS_FAULT, (int32_t)(s.fault_flags | BmsLowBatt_Flags(&s_lb)));
     Tlm_Put(b, TLM_BMS_ALARM, s.alarm_status);
     Tlm_Put(b, TLM_BMS_SA, s.safety_status_a);
     Tlm_Put(b, TLM_BMS_SB, s.safety_status_b);
