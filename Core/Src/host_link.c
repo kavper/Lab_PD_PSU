@@ -102,11 +102,31 @@ static void HostLink_Remember(uint8_t type, uint8_t seq, bool ack, uint8_t reaso
     s_replay_reason[slot] = reason;
 }
 
+#if (BMS_OTP_SERVICE != 0U)
+/* Service build only: bench text commands over SWD.  Write the line to
+ * g_hl_swd_cmd, set g_hl_swd_go=1; replies collect in g_hl_swd_reply and
+ * go becomes 2 when the command has finished. */
+volatile char g_hl_swd_cmd[97];
+volatile uint8_t g_hl_swd_go;
+volatile char g_hl_swd_reply[768];
+volatile uint16_t g_hl_swd_reply_len;
+static bool s_swd_capture;
+#endif
+
 static void HostLink_Tx(const char *text)
 {
     size_t length;
     size_t offset;
 
+#if (BMS_OTP_SERVICE != 0U)
+    if (s_swd_capture && (text != NULL)) {
+        for (const char *c = text; (*c != '\0') &&
+             (g_hl_swd_reply_len < (sizeof(g_hl_swd_reply) - 1U)); c++) {
+            g_hl_swd_reply[g_hl_swd_reply_len++] = *c;
+        }
+        g_hl_swd_reply[g_hl_swd_reply_len] = '\0';
+    }
+#endif
     if ((s_huart == NULL) || (text == NULL)) {
         return;
     }
@@ -1276,6 +1296,20 @@ void HostLink_Task(void)
     }
 
     LinkUart_Poll(&s_host_uart, HostLink_OnByte, NULL);
+
+#if (BMS_OTP_SERVICE != 0U)
+    if (g_hl_swd_go == 1U) {
+        char line[97];
+        for (size_t i = 0U; i < sizeof(line); i++) line[i] = g_hl_swd_cmd[i];
+        line[sizeof(line) - 1U] = '\0';
+        g_hl_swd_reply_len = 0U;
+        g_hl_swd_reply[0] = '\0';
+        s_swd_capture = true;
+        HostLink_HandleLine(line);
+        s_swd_capture = false;
+        g_hl_swd_go = 2U;
+    }
+#endif
 
     if (HostHeartbeat_Expired(LdoLink_IsOutputWanted(), HAL_GetTick(), s_last_host_ms)) {
         LdoLink_HostLinkLost();
