@@ -1,0 +1,4 @@
+PASS both variants: 18000mV / 8064mA in both copies of BQ startup instructions
+PASS independent CRC validation both regions
+PASS source/sink PDOs, PPS, 12V and sink negotiation unchanged
+PASS full.h equals binary

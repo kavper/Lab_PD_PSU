@@ -1,0 +1,12 @@
+{
+  "status": "offline validated; EEPROM not programmed",
+  "variant": "SOURCE_5V_5A_BENCH_ONLY",
+  "pack_charge_voltage_mV": 18000,
+  "pack_charge_current_limit_mA_at5mOhm": 8064,
+  "sha256": "190d3099038c805b1ae193341e4df1eda103249e7d3644c2092a16d1a82441c2",
+  "source_sha256": "634d60e364cbe877e33af0defe91f17b2c541d18d15f831c9a47cb90ff11d56e",
+  "SOURCE_PPS_12V": "preserved",
+  "SINK_12V_higher_voltage_tie": "preserved",
+  "G4_requirement": "production CHARGE_BALANCE_LIMITS_ENABLED=0",
+  "5V5A_source": "bench-only variant remains unvalidated"
+}
